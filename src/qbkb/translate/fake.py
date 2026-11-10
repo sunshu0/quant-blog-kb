@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 
 from qbkb.models import QuotaExceededError
 from qbkb.translate.base import count_chars
+from qbkb.translate.glossary import case_variants
 
 _TAG = re.compile(r"(<[^>]*>)")
 
@@ -56,7 +57,9 @@ class FakeTranslator:
         return "".join(out)
 
     def _text(self, text: str, glossary: Mapping[str, str]) -> str:
+        # 和 DeepL 一样：用同一份大小写变体、区分大小写匹配（"DRAWDOWN" 不会命中）
+        entries = case_variants(glossary)
         # 长术语优先，避免 "trend following" 先被 "trend" 之类的短词吃掉
-        for src in sorted(glossary, key=len, reverse=True):
-            text = re.sub(rf"\b{re.escape(src)}\b", glossary[src], text, flags=re.IGNORECASE)
+        for src in sorted(entries, key=len, reverse=True):
+            text = re.sub(rf"\b{re.escape(src)}\b", entries[src], text)
         return self.prefix + text

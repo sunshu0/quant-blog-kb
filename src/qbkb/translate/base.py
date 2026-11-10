@@ -1,4 +1,4 @@
-"""翻译后端的公共部分：上下文协议、分批、字符计数。"""
+"""翻译后端的公共部分：上下文协议、请求大小上限、异常、分批、字符计数。"""
 
 from __future__ import annotations
 
@@ -7,8 +7,18 @@ from typing import Protocol, runtime_checkable
 
 # DeepL API Free 每月额度（字符）
 FREE_MONTHLY_CHARS = 500_000
-# DeepL 单次请求最多 50 条文本
+# 单次请求的上限，pipeline 分批和 DeepLTranslator 共用这一处定义。
+# DeepL 限制：最多 50 条文本、请求体最多 128 KiB；字符上限留足余量给 JSON 转义和 context。
 MAX_TEXTS_PER_REQUEST = 50
+MAX_REQUEST_CHARS = 30_000
+
+
+class TranslatorUnavailableError(RuntimeError):
+    """后端暂时不可用（限流、网络、5xx），重试用尽。稍后再跑即可。"""
+
+
+class SegmentTooLargeError(ValueError):
+    """单个段落超过单次请求上限，没法送出去。"""
 
 
 @runtime_checkable
@@ -28,10 +38,14 @@ def count_chars(texts: Sequence[str]) -> int:
     return sum(len(t) for t in texts)
 
 
-def chunk_texts(texts: Sequence[str], max_items: int, max_chars: int) -> list[range]:
+def chunk_texts(
+    texts: Sequence[str],
+    max_items: int = MAX_TEXTS_PER_REQUEST,
+    max_chars: int = MAX_REQUEST_CHARS,
+) -> list[range]:
     """把 texts 按顺序切成若干批，每批不超过 max_items 条、max_chars 个字符。
 
-    单条就超过 max_chars 的，自己单独成一批（交给后端报错，不在这里截断）。
+    单条就超过 max_chars 的抛 SegmentTooLargeError：调用方应该事先把它挑出来。
     """
     if max_items < 1 or max_chars < 1:
         raise ValueError("max_items 和 max_chars 必须是正数")
@@ -39,6 +53,8 @@ def chunk_texts(texts: Sequence[str], max_items: int, max_chars: int) -> list[ra
     start, size = 0, 0
     for i, text in enumerate(texts):
         n = len(text)
+        if n > max_chars:
+            raise SegmentTooLargeError(f"第 {i} 条有 {n} 个字符，超过单次请求上限 {max_chars}")
         if i > start and (i - start >= max_items or size + n > max_chars):
             chunks.append(range(start, i))
             start, size = i, 0

@@ -12,12 +12,16 @@ import deepl
 from dotenv import load_dotenv
 
 from qbkb.models import QuotaExceededError
-from qbkb.translate.base import MAX_TEXTS_PER_REQUEST, chunk_texts, count_chars
-from qbkb.translate.glossary import Glossary, terms_fingerprint
+from qbkb.translate.base import (
+    MAX_REQUEST_CHARS,
+    MAX_TEXTS_PER_REQUEST,
+    TranslatorUnavailableError,
+    chunk_texts,
+    count_chars,
+)
+from qbkb.translate.glossary import Glossary, case_variants, terms_fingerprint
 
 GLOSSARY_PREFIX = "qbkb-"
-# DeepL 请求体最多 128 KiB；字符上限留足余量（context 也算在请求体里）
-MAX_CHARS_PER_REQUEST = 30_000
 
 
 class DeepLApi(Protocol):
@@ -43,18 +47,34 @@ class DeepLApi(Protocol):
     def get_usage(self) -> deepl.Usage: ...
 
 
+def glossary_entries(glossary: Mapping[str, str]) -> dict[str, str]:
+    """真正上传到 DeepL 的词条：yaml 里的词条加上大小写变体。"""
+    return case_variants(glossary)
+
+
 def glossary_name(glossary: Mapping[str, str]) -> str:
-    """DeepL 上术语表的名字。名字里带版本和内容指纹，内容不变就复用，变了才新建。"""
+    """DeepL 上术语表的名字：版本 + 上传词条的指纹。内容不变就复用，变了才新建。"""
+    fp = terms_fingerprint(glossary_entries(glossary))
     if isinstance(glossary, Glossary):
-        return f"{GLOSSARY_PREFIX}v{glossary.tm_version}"
-    return f"{GLOSSARY_PREFIX}{terms_fingerprint(glossary)}"
+        return f"{GLOSSARY_PREFIX}v{glossary.version}-{fp}"
+    return f"{GLOSSARY_PREFIX}{fp}"
+
+
+def _retryable(e: deepl.DeepLException) -> bool:
+    if isinstance(e, deepl.TooManyRequestsException):
+        return True
+    if isinstance(e, deepl.ConnectionException):
+        return e.should_retry
+    return e.http_status_code is not None and e.http_status_code >= 500
 
 
 class DeepLTranslator:
     """实现 models.Translator，另外支持 translate_with_context。
 
-    限流：deepl SDK 自己会对 429 做几次短退避（约 15 秒内）；仍然 429 时，这里再按
-    backoff_s、2×backoff_s……（不超过 max_backoff_s）等待，最多 rate_limit_retries 次。
+    重试只有一层，就是这里：from_env 创建客户端时把 SDK 自带的重试关掉（max_retries=0）。
+    遇到 429、可重试的网络错误、5xx 时依次等 backoff_s、2×backoff_s……（每次不超过
+    max_backoff_s），最多 retries 次；默认 2+4+8+16+32 秒，最坏约 1 分钟（不含每次请求本身的超时）。
+    重试用尽抛 TranslatorUnavailableError；额度用完抛 QuotaExceededError。
     """
 
     def __init__(
@@ -65,10 +85,10 @@ class DeepLTranslator:
         target_lang: str = "ZH-HANS",
         glossary_target_lang: str = "ZH",
         max_texts: int = MAX_TEXTS_PER_REQUEST,
-        max_chars: int = MAX_CHARS_PER_REQUEST,
-        rate_limit_retries: int = 3,
-        backoff_s: float = 30.0,
-        max_backoff_s: float = 300.0,
+        max_chars: int = MAX_REQUEST_CHARS,
+        retries: int = 5,
+        backoff_s: float = 2.0,
+        max_backoff_s: float = 60.0,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._client = client
@@ -77,7 +97,7 @@ class DeepLTranslator:
         self.glossary_target_lang = glossary_target_lang
         self.max_texts = max_texts
         self.max_chars = max_chars
-        self.rate_limit_retries = rate_limit_retries
+        self.retries = retries
         self.backoff_s = backoff_s
         self.max_backoff_s = max_backoff_s
         self._sleep = sleep
@@ -96,11 +116,12 @@ class DeepLTranslator:
         key = os.environ.get("DEEPL_API_KEY", "").strip()
         if not key:
             raise RuntimeError("没有找到 DEEPL_API_KEY：请在 .env 里设置")
-        return cls(deepl.DeepLClient(key), **kwargs)
+        return cls(deepl.DeepLClient(key, max_retries=0), **kwargs)
 
     @property
     def name(self) -> str:
-        return "deepl"
+        """翻译记忆的 backend 键，带目标语言：换了目标语言不会命中别的语言的译文。"""
+        return f"deepl:{self.target_lang}"
 
     def translate(self, segments: Sequence[str], glossary: Mapping[str, str]) -> list[str]:
         return self.translate_with_context(segments, glossary, "")
@@ -110,9 +131,11 @@ class DeepLTranslator:
     ) -> list[str]:
         if not segments:
             return []
+        # 先切批：超长段落在发任何请求之前就报 SegmentTooLargeError
+        chunks = chunk_texts(segments, self.max_texts, self.max_chars)
         glossary_id = self.sync_glossary(glossary)
         out: list[str] = []
-        for chunk in chunk_texts(segments, self.max_texts, self.max_chars):
+        for chunk in chunks:
             out.extend(self._request([segments[i] for i in chunk], glossary_id, context))
         return out
 
@@ -127,51 +150,62 @@ class DeepLTranslator:
         name = glossary_name(glossary)
         if name in self._glossary_ids:
             return self._glossary_ids[name]
+        entries = glossary_entries(glossary)
         target = self.glossary_target_lang.lower()
         found = next(
             (
                 g
-                for g in self._client.list_glossaries()
+                for g in self._with_retry(self._client.list_glossaries)
                 if g.name == name
                 and g.source_lang.lower() == self.source_lang.lower()
                 and g.target_lang.lower() == target
-                and g.entry_count == len(glossary)
+                and g.entry_count == len(entries)
             ),
             None,
         )
         if found is None:
-            found = self._client.create_glossary(
-                name, self.source_lang, self.glossary_target_lang, dict(glossary)
+            found = self._with_retry(
+                lambda: self._client.create_glossary(
+                    name, self.source_lang, self.glossary_target_lang, entries
+                )
             )
         self._glossary_ids[name] = found.glossary_id
         return found.glossary_id
 
     def usage(self) -> tuple[int | None, int | None]:
         """本月已用字符数和上限（访问 DeepL，但不消耗额度）。"""
-        chars = self._client.get_usage().character
+        chars = self._with_retry(self._client.get_usage).character
         return chars.count, chars.limit
 
-    def _request(self, texts: list[str], glossary_id: str | None, context: str) -> list[str]:
+    def _with_retry[T](self, fn: Callable[[], T]) -> T:
         attempt = 0
         while True:
             try:
-                result = self._client.translate_text(
-                    texts,
-                    source_lang=self.source_lang,
-                    target_lang=self.target_lang,
-                    tag_handling="html",
-                    context=context or None,
-                    # 传 id 而不是 GlossaryInfo：SDK 对 GlossaryInfo 的语言比对区分大小写
-                    glossary=glossary_id,
-                )
-                break
+                return fn()
             except deepl.QuotaExceededException as e:
                 raise QuotaExceededError(f"DeepL 额度用完：{e}") from e
-            except deepl.TooManyRequestsException:
-                if attempt >= self.rate_limit_retries:
+            except deepl.DeepLException as e:
+                if not _retryable(e):
                     raise
+                if attempt >= self.retries:
+                    raise TranslatorUnavailableError(
+                        f"DeepL 暂时不可用，重试 {self.retries} 次后放弃：{e}"
+                    ) from e
                 self._sleep(min(self.backoff_s * 2**attempt, self.max_backoff_s))
                 attempt += 1
+
+    def _request(self, texts: list[str], glossary_id: str | None, context: str) -> list[str]:
+        result = self._with_retry(
+            lambda: self._client.translate_text(
+                texts,
+                source_lang=self.source_lang,
+                target_lang=self.target_lang,
+                tag_handling="html",
+                context=context or None,
+                # 传 id 而不是 GlossaryInfo：SDK 对 GlossaryInfo 的语言比对区分大小写
+                glossary=glossary_id,
+            )
+        )
         results = result if isinstance(result, list) else [result]
         if len(results) != len(texts):
             raise RuntimeError(f"DeepL 返回 {len(results)} 条译文，送出 {len(texts)} 条")

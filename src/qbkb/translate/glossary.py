@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import yaml
 
 from qbkb.config import CONFIG_DIR
+from qbkb.translate.structure import plain_text
+
+# 段落术语版本的规则版本。匹配规则或大小写变体规则改了就递增，让所有含术语的段落重翻。
+SEGMENT_RULES = "g1"
+NO_TERMS = f"{SEGMENT_RULES}-none"
 
 
 def terms_fingerprint(terms: Mapping[str, str]) -> str:
@@ -18,21 +24,50 @@ def terms_fingerprint(terms: Mapping[str, str]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
 
+def case_variants(terms: Mapping[str, str]) -> dict[str, str]:
+    """DeepL 术语表区分大小写：为每个词条补上句首大写和标题大写的变体。
+
+    "drawdown" → 另加 "Drawdown"；"trend following" → 另加 "Trend following"、"Trend Following"。
+    原文和译文相同的词条（alpha → alpha），译文跟着原文变；yaml 里显式写了的变体优先。
+    DeepL 后端和 FakeTranslator 都用这份展开结果，两边的匹配行为一致。
+    """
+    out = dict(terms)
+    for src, tgt in terms.items():
+        for variant in (
+            src[:1].upper() + src[1:],
+            " ".join(w[:1].upper() + w[1:] for w in src.split()),
+        ):
+            if variant not in out:
+                out[variant] = variant if tgt == src else tgt
+    return out
+
+
 class Glossary(Mapping[str, str]):
     """英文 → 中文术语表。本身就是 Mapping，可以直接传给 Translator.translate。
 
-    tm_version 写进翻译记忆的 glossary_version 列：由 yaml 里的 version 加内容指纹组成，
-    所以改了术语却忘了递增 version，也不会误用旧译文。
+    翻译记忆的 glossary_version **按段落计算**（version_for）：只由这段里实际出现的术语决定。
+    所以术语表改了，只有含相关术语的段落会重翻，不会让整个翻译记忆失效。
+    yaml 里的 version 只用来给 DeepL 上的术语表起名，方便人看。
     """
 
     def __init__(self, version: str, terms: Mapping[str, str]) -> None:
         self.version = version
         self._terms = dict(terms)
         self.fingerprint = terms_fingerprint(self._terms)
+        # 大小写不敏感、只要求左边界（"factor" 也匹配 "factors"）：宁可多算，不可漏算
+        self._patterns = [
+            (src, re.compile(rf"(?<!\w){re.escape(src)}", re.IGNORECASE)) for src in self._terms
+        ]
 
-    @property
-    def tm_version(self) -> str:
-        return f"{self.version}-{self.fingerprint}"
+    def terms_in(self, html: str) -> dict[str, str]:
+        """这段 HTML 正文里出现的术语。"""
+        text = plain_text(html)
+        return {src: self._terms[src] for src, pat in self._patterns if pat.search(text)}
+
+    def version_for(self, html: str) -> str:
+        """这一段的术语版本，写进翻译记忆的 glossary_version 列。"""
+        used = self.terms_in(html)
+        return f"{SEGMENT_RULES}-{terms_fingerprint(used)}" if used else NO_TERMS
 
     def __getitem__(self, key: str) -> str:
         return self._terms[key]

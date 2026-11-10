@@ -7,11 +7,17 @@ import pytest
 from qbkb import store
 from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment, Status
 from qbkb.translate import (
+    REVIEW_PREFIX,
+    BackendStopped,
     FakeTranslator,
     Glossary,
+    QuotaStopped,
     TranslationStopped,
+    TranslatorUnavailableError,
     count_chars,
     estimate_chars,
+    glossary_upgrade_cost,
+    needs_review,
     translate_article,
 )
 
@@ -26,6 +32,7 @@ PARAS = [
     "<p>Volatility targeting keeps risk stable.</p>",
 ]
 TOTAL = count_chars(PARAS)
+LINK = '<a href="https://example.test/x">'
 
 AddArticle = Callable[..., str]
 
@@ -52,8 +59,21 @@ def add_article(conn: sqlite3.Connection) -> AddArticle:
     return add
 
 
-def _tm_rows(conn: sqlite3.Connection) -> int:
-    return int(conn.execute("SELECT count(*) FROM translation_memory").fetchone()[0])
+def _row(conn: sqlite3.Connection, url: str = URL) -> sqlite3.Row:
+    row = store.get_article(conn, url)
+    assert row is not None
+    return row
+
+
+def _tm(
+    conn: sqlite3.Connection, pos: int, glossary: Glossary, backend: str = "fake"
+) -> str | None:
+    seg = store.get_segments(conn, URL)[pos]
+    return store.tm_get(conn, seg.src_hash, backend, glossary.version_for(seg.html))
+
+
+def _sent(t: FakeTranslator) -> list[str]:
+    return [s for call in t.calls for s in call]
 
 
 def test_first_run_translates_everything(
@@ -64,17 +84,13 @@ def test_first_run_translates_everything(
     stats = translate_article(conn, URL, t, glossary)
     assert (stats.segments, stats.tm_hits, stats.translated) == (5, 0, 5)
     assert stats.chars == TOTAL == t.chars_used
-    assert stats.complete and stats.structure_failures == []
-    row = store.get_article(conn, URL)
-    assert row is not None
+    assert not stats.needs_review
+    assert len(t.calls) == 1  # 一批送完
+    row = _row(conn)
     assert row["status"] == Status.TRANSLATED
     assert row["translator"] == "fake"
     assert row["translated_at"] and row["error"] is None
-    seg = store.get_segments(conn, URL)[0]
-    assert (
-        store.tm_get(conn, seg.src_hash, "fake", glossary.tm_version)
-        == "<h2>【译】Why 回撤 matters</h2>"
-    )
+    assert _tm(conn, 0, glossary) == "<h2>【译】Why 回撤 matters</h2>"
 
 
 def test_tm_hits_are_skipped(
@@ -93,6 +109,26 @@ def test_tm_hits_are_skipped(
     assert t.calls == [["<p>New text.</p>"]]
 
 
+def test_misses_are_batched_together_with_neighbour_context(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    footer = "<p>Copyright notice.</p>"
+    add_article([*PARAS[:2], footer, *PARAS[2:], footer])
+    # 中间那段已有译文：剩下的未命中段落被它和重复段落隔开，也仍然合成一批
+    seg = store.get_segments(conn, URL)[3]
+    store.tm_put(
+        conn, seg.src_hash, "fake", seg.html, "<p>已有</p>", glossary.version_for(seg.html)
+    )
+    t = FakeTranslator()
+    stats = translate_article(conn, URL, t, glossary)
+    assert t.calls == [[PARAS[0], PARAS[1], footer, PARAS[3], PARAS[4]]]
+    assert (stats.tm_hits, stats.translated, stats.duplicates) == (1, 5, 1)
+    # context 来自原文里的邻居：已命中的那段（不在批里）是参考，批内段落不重复放进去
+    (ctx,) = t.contexts
+    assert "Momentum is one factor among many." in ctx
+    assert "Why drawdown" not in ctx and "<" not in ctx
+
+
 def test_duplicate_segments_translated_once(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
@@ -101,116 +137,177 @@ def test_duplicate_segments_translated_once(
     t = FakeTranslator()
     stats = translate_article(conn, URL, t, glossary)
     assert (stats.translated, stats.duplicates) == (3, 1)
-    assert sum(c.count(footer) for c in t.calls) == 1
-    assert stats.complete
+    assert _sent(t).count(footer) == 1
 
 
-def test_glossary_change_retranslates(
+def test_glossary_change_only_retranslates_affected_segments(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
-    add_article()
+    urls = [add_article()]
     translate_article(conn, URL, FakeTranslator(), glossary)
-    new = Glossary("2", {**glossary, "momentum": "动能"})
+    # 改了 momentum（只出现在第 2 段），新增一个文中没有的词条，version 也递增了
+    new = Glossary("2", {**glossary, "momentum": "动能", "carry": "套息"})
+    assert glossary_upgrade_cost(conn, urls, "fake", glossary, new) == len(PARAS[2])
+    assert estimate_chars(conn, urls, "fake", new) == len(PARAS[2])
     t = FakeTranslator()
     stats = translate_article(conn, URL, t, new)
-    assert (stats.tm_hits, stats.translated) == (0, 5)
-    seg = store.get_segments(conn, URL)[2]
-    assert "动能" in (store.tm_get(conn, seg.src_hash, "fake", new.tm_version) or "")
-    # 主键是 (src_hash, backend)：新版本覆盖旧版本，旧版本不再命中
-    assert store.tm_get(conn, seg.src_hash, "fake", glossary.tm_version) is None
-    assert _tm_rows(conn) == 5
+    assert (stats.tm_hits, stats.translated) == (4, 1)
+    assert t.calls == [[PARAS[2]]]
+    assert "动能" in (_tm(conn, 2, new) or "")
+    # 只新增文中没有的词条：一段都不用重翻
+    newer = Glossary("3", {**new, "risk parity": "风险平价"})
+    assert glossary_upgrade_cost(conn, urls, "fake", new, newer) == 0
 
 
 def test_quota_stop_then_resume_without_double_billing(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
     add_article()
-    # 每批最多约 1 段；额度只够前两段
     budget = count_chars(PARAS[:2])
     first = FakeTranslator(quota_chars=budget)
-    with pytest.raises(TranslationStopped) as exc:
-        translate_article(conn, URL, first, glossary, max_batch_chars=1)
+    # 批上限压到最长段落的长度，迫使每批大约一段
+    with pytest.raises(QuotaStopped) as exc:
+        translate_article(conn, URL, first, glossary, max_batch_chars=max(map(len, PARAS)))
     assert isinstance(exc.value, QuotaExceededError)
+    assert isinstance(exc.value, TranslationStopped)
     assert exc.value.stats.translated == 2
-    assert not exc.value.stats.complete
-    row = store.get_article(conn, URL)
-    assert row is not None and row["status"] == Status.DISCOVERED  # 状态没推进
-    assert _tm_rows(conn) == 2
+    assert _row(conn)["status"] == Status.DISCOVERED  # 状态没推进
 
     second = FakeTranslator()  # 下个月，额度恢复
     stats = translate_article(conn, URL, second, glossary)
     assert (stats.tm_hits, stats.translated) == (2, 3)
-    assert stats.complete
-    # 每段只计费一次
-    assert first.chars_used + second.chars_used == TOTAL
-    assert [s for call in second.calls for s in call] == PARAS[2:]
+    assert first.chars_used + second.chars_used == TOTAL  # 每段只计费一次
+    assert _sent(second) == PARAS[2:]
 
 
-class FlakyStructure(FakeTranslator):
-    """对含 <a> 的段落把链接标签吃掉，前 broken_times 次都这样。"""
+class BreakLinks(FakeTranslator):
+    """把链接标签吃掉。only_in_batches=True 时只在多段的批量请求里出错。"""
 
-    def __init__(self, broken_times: int) -> None:
-        super().__init__()
-        self.broken_left = broken_times
+    def __init__(
+        self, *, times: int = 99, only_in_batches: bool = False, quota_chars: int | None = None
+    ) -> None:
+        super().__init__(quota_chars=quota_chars)
+        self.left = times
+        self.only_in_batches = only_in_batches
 
     def translate_with_context(
         self, segments: Sequence[str], glossary: Mapping[str, str], context: str
     ) -> list[str]:
         out = super().translate_with_context(segments, glossary, context)
-        fixed: list[str] = []
+        if self.only_in_batches and len(segments) == 1:
+            return out
+        fixed = []
         for s in out:
-            if "<a " in s and self.broken_left > 0:
-                self.broken_left -= 1
-                s = s.replace('<a href="https://example.test/x">', "").replace("</a>", "")
+            if LINK in s and self.left > 0:
+                self.left -= 1
+                s = s.replace(LINK, "").replace("</a>", "")
             fixed.append(s)
         return fixed
 
 
-def test_structure_mismatch_is_retried(
+def test_retry_is_single_segment_without_context(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
     add_article()
-    t = FlakyStructure(broken_times=1)
+    # 最后一段已有译文，所以第一批有 context
+    seg = store.get_segments(conn, URL)[4]
+    store.tm_put(
+        conn, seg.src_hash, "fake", seg.html, "<p>已有</p>", glossary.version_for(seg.html)
+    )
+    t = BreakLinks(only_in_batches=True)
     stats = translate_article(conn, URL, t, glossary)
-    assert stats.retried == 1
-    assert stats.structure_failures == []
-    assert stats.chars == TOTAL + len(PARAS[1])  # 重翻的那段多花一次
-    assert t.calls[-1] == [PARAS[1]]
+    assert stats.retried == 1 and not stats.needs_review
+    assert t.contexts[0].startswith("Volatility")
+    assert t.calls[-1] == [PARAS[1]] and t.contexts[-1] == ""
+    assert stats.chars == count_chars(PARAS[:4]) + len(PARAS[1])
+    assert LINK in (_tm(conn, 1, glossary) or "")
+    assert _row(conn)["status"] == Status.TRANSLATED
+
+
+def test_rejected_translation_is_quarantined_not_reused(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    add_article()
+    stats = translate_article(conn, URL, BreakLinks(), glossary)
+    assert stats.retried == 1 and stats.rejected == [1]
+    # 坏译文不在正常的翻译记忆里，只在隔离区
+    assert _tm(conn, 1, glossary) is None
+    assert _tm(conn, 1, glossary, backend="fake#rejected") is not None
+    row = _row(conn)
+    assert row["status"] == Status.FAILED
+    assert row["error"].startswith(REVIEW_PREFIX) and "1" in row["error"]
+    assert needs_review(row)
+
+    # 重跑：不再花额度去重翻，仍然报告需要复查
+    t = FakeTranslator()
+    stats = translate_article(conn, URL, t, glossary)
+    assert t.calls == [] and stats.rejected == [1] and stats.tm_hits == 4
+    assert needs_review(_row(conn))
+
+    # 强制重翻开关：这次后端正常了，文章推进到 translated
+    stats = translate_article(conn, URL, t, glossary, retry_rejected=True)
+    assert t.calls == [[PARAS[1]]] and stats.rejected == []
+    row = _row(conn)
+    assert row["status"] == Status.TRANSLATED and row["error"] is None
+    assert not needs_review(row)
+
+
+def test_bad_hit_in_tm_is_not_silently_reused(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    add_article()
+    translate_article(conn, URL, FakeTranslator(), glossary)
+    # 模拟旧版本代码写进正常翻译记忆的坏译文
     seg = store.get_segments(conn, URL)[1]
-    assert "<a href" in (store.tm_get(conn, seg.src_hash, "fake", glossary.tm_version) or "")
-
-
-def test_structure_mismatch_twice_is_recorded(
-    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
-) -> None:
-    add_article()
-    stats = translate_article(conn, URL, FlakyStructure(broken_times=2), glossary)
-    assert stats.retried == 1
-    assert stats.structure_failures == [1]
-    row = store.get_article(conn, URL)
-    assert row is not None
-    assert row["status"] == Status.TRANSLATED
-    assert "1" in row["error"]
-    # 重跑：命中翻译记忆，不再花额度，但问题仍然报告出来
+    store.tm_put(conn, seg.src_hash, "fake", seg.html, "<p>坏</p>", glossary.version_for(seg.html))
     t = FakeTranslator()
     stats = translate_article(conn, URL, t, glossary)
-    assert t.calls == [] and stats.structure_failures == [1]
+    assert stats.rejected == [1] and t.calls == []
+    assert needs_review(_row(conn))
+    translate_article(conn, URL, t, glossary, retry_rejected=True)
+    assert t.calls == [[PARAS[1]]]
+    assert _row(conn)["status"] == Status.TRANSLATED
 
 
-def test_context_comes_from_neighbours(
+def test_quota_during_retry_keeps_good_segments(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
     add_article()
-    # 先翻好中间那段，剩下的待翻段落在它两侧，被它隔开成两批
-    seg2 = store.get_segments(conn, URL)[2]
-    store.tm_put(conn, seg2.src_hash, "fake", seg2.html, "<p>已有</p>", glossary.tm_version)
+    t = BreakLinks(quota_chars=TOTAL)  # 第一批刚好用完额度，重翻时超额
+    with pytest.raises(QuotaStopped) as exc:
+        translate_article(conn, URL, t, glossary)
+    assert exc.value.stats.translated == 4
+    assert [_tm(conn, i, glossary) is not None for i in range(5)] == [True, False, True, True, True]
+
+
+def test_oversized_segment_is_recorded_not_blocking(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    huge = "<p>" + "x" * 200 + "</p>"
+    add_article([PARAS[0], huge, PARAS[2]])
     t = FakeTranslator()
-    translate_article(conn, URL, t, glossary)
-    assert t.calls == [PARAS[:2], PARAS[3:]]
-    # 第一批的 context 是后面的原文，第二批的是前面的原文；context 不含 HTML 标签
-    assert t.contexts[0].startswith("Momentum is one factor")
-    assert "Momentum is one factor among many." in t.contexts[1]
-    assert "<" not in t.contexts[0] + t.contexts[1]
+    stats = translate_article(conn, URL, t, glossary, max_batch_chars=100)
+    assert stats.oversized == [1] and stats.translated == 2
+    assert huge not in _sent(t)
+    row = _row(conn)
+    assert needs_review(row) and "超过单次请求上限" in row["error"]
+
+
+def test_backend_unavailable_stops_with_stats(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    class Down(FakeTranslator):
+        def translate_with_context(
+            self, segments: Sequence[str], glossary: Mapping[str, str], context: str
+        ) -> list[str]:
+            raise TranslatorUnavailableError("429")
+
+    add_article()
+    with pytest.raises(BackendStopped) as exc:
+        translate_article(conn, URL, Down(), glossary)
+    assert not isinstance(exc.value, QuotaExceededError)
+    assert exc.value.stats.translated == 0
+    assert _row(conn)["status"] == Status.DISCOVERED
 
 
 class NoContext:
@@ -231,10 +328,9 @@ def test_backend_without_context_support(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
     add_article()
-    stats = translate_article(conn, URL, NoContext(), glossary)
-    assert stats.complete
-    row = store.get_article(conn, URL)
-    assert row is not None and row["translator"] == "plain"
+    translate_article(conn, URL, NoContext(), glossary)
+    row = _row(conn)
+    assert row["status"] == Status.TRANSLATED and row["translator"] == "plain"
 
 
 def test_wrong_output_length_is_an_error(

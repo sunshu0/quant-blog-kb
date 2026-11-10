@@ -10,42 +10,65 @@ from datetime import UTC, datetime
 from qbkb import store
 from qbkb.models import QuotaExceededError, Segment, Status, Translator
 from qbkb.translate.base import (
+    MAX_REQUEST_CHARS,
     MAX_TEXTS_PER_REQUEST,
     SupportsContext,
+    TranslatorUnavailableError,
     chunk_texts,
     count_chars,
 )
 from qbkb.translate.glossary import Glossary
 from qbkb.translate.structure import plain_text, same_structure
 
-# 每批送出的字符上限。每批翻完立刻写进翻译记忆，所以批越小，额度中途用完时损失越少。
-MAX_BATCH_CHARS = 10_000
-# 每侧最多取多少字符的前后文作为 context
-CONTEXT_CHARS = 600
+# 一批请求的 context 总长上限（字符）。DeepL 不对 context 计费，但它占请求体。
+CONTEXT_CHARS = 1_200
+# 结构校验两次都没过的译文存在这个后缀的 backend 键下（隔离区），正常查询永远不会命中它。
+REJECTED_SUFFIX = "#rejected"
+# 需要人工复查的文章：status=failed，error 以这个前缀开头。
+REVIEW_PREFIX = "需人工复查："
 
 
 @dataclass(slots=True)
 class TranslateStats:
     url: str
     segments: int = 0
-    tm_hits: int = 0  # 翻译记忆命中的段落
-    translated: int = 0  # 这次新翻的段落（重复段落只算一次）
+    tm_hits: int = 0  # 翻译记忆命中（且结构校验通过）的段落
+    translated: int = 0  # 这次新翻、通过校验的段落（重复段落只算一次）
     duplicates: int = 0  # 文章内重复、复用同一份译文的段落
     chars: int = 0  # 这次送出去的字符数（含重翻），用于估算额度
     retried: int = 0  # 结构校验没过、重翻过的段落
-    structure_failures: list[int] = field(default_factory=list)  # 重翻后仍不一致的段落 idx
+    rejected: list[int] = field(default_factory=list)  # 两次都没过校验、需人工复查的段落 idx
+    oversized: list[int] = field(default_factory=list)  # 超过单次请求上限、没送出去的段落 idx
 
     @property
-    def complete(self) -> bool:
-        return self.tm_hits + self.translated + self.duplicates == self.segments
+    def needs_review(self) -> bool:
+        return bool(self.rejected or self.oversized)
 
 
-class TranslationStopped(QuotaExceededError):
-    """额度中途用完。已翻的段落已经在翻译记忆里，下次运行会接着翻。"""
+class TranslationStopped(Exception):
+    """翻译中途停下。已经通过校验的段落都在翻译记忆里，下次运行会接着翻、不重复计费。"""
 
-    def __init__(self, stats: TranslateStats) -> None:
-        super().__init__(f"额度用完，{stats.url} 翻了 {stats.translated} 段后停下")
+    def __init__(self, stats: TranslateStats, reason: str) -> None:
+        super().__init__(f"{stats.url} 翻了 {stats.translated} 段后停下：{reason}")
         self.stats = stats
+
+
+class QuotaStopped(TranslationStopped, QuotaExceededError):
+    """额度用完。上层应停止本轮，等额度恢复。"""
+
+
+class BackendStopped(TranslationStopped):
+    """后端暂时不可用（限流 / 网络 / 5xx 重试用尽）。上层应停止本轮，稍后再跑。"""
+
+
+def needs_review(row: sqlite3.Row) -> bool:
+    """文章是否在等人工复查（区别于真正的失败）。"""
+    error = row["error"]
+    return (
+        row["status"] == Status.FAILED
+        and isinstance(error, str)
+        and error.startswith(REVIEW_PREFIX)
+    )
 
 
 def _call(translator: Translator, texts: list[str], glossary: Glossary, context: str) -> list[str]:
@@ -58,31 +81,26 @@ def _call(translator: Translator, texts: list[str], glossary: Glossary, context:
     return out
 
 
-def _context(segments: Sequence[Segment], first: int, last: int, limit: int) -> str:
-    """位置 first..last 这一批的前后文：前面段落的结尾 + 后面段落的开头（纯文本）。"""
+def _context(segments: Sequence[Segment], batch: list[int], limit: int) -> str:
+    """一批段落的参考上下文：批里每段在原文中的前一段和后一段（不在本批里的），纯文本。
+
+    批可以由不相邻的段落组成，所以按每段各自的邻居取，再平均分配 limit 个字符。
+    前一段取结尾，后一段取开头。
+    """
     if limit <= 0:
         return ""
-    before = " ".join(plain_text(s.html) for s in segments[max(0, first - 3) : first])[-limit:]
-    after = " ".join(plain_text(s.html) for s in segments[last + 1 : last + 4])[:limit]
-    return "\n".join(p for p in (before.strip(), after.strip()) if p)
-
-
-def _batches(positions: list[int], segments: Sequence[Segment], max_chars: int) -> list[list[int]]:
-    """把待翻段落（按文章中的位置）切批：只把相邻段落放进一批，这样共用的 context 才对得上。"""
-    runs: list[list[int]] = []
-    for pos in positions:
-        if runs and runs[-1][-1] == pos - 1:
-            runs[-1].append(pos)
-        else:
-            runs.append([pos])
-    out: list[list[int]] = []
-    for run in runs:
-        texts = [segments[p].html for p in run]
-        out.extend(
-            [run[i] for i in chunk]
-            for chunk in chunk_texts(texts, MAX_TEXTS_PER_REQUEST, max_chars)
-        )
-    return out
+    members = set(batch)
+    before = {p - 1 for p in batch if p > 0 and p - 1 not in members}
+    after = {p + 1 for p in batch if p + 1 < len(segments) and p + 1 not in members}
+    neighbours = sorted(before | after)
+    if not neighbours:
+        return ""
+    per = max(60, limit // len(neighbours))
+    pieces = []
+    for p in neighbours:
+        text = plain_text(segments[p].html)
+        pieces.append(text[:per] if p in after else text[-per:])
+    return "\n".join(t for t in pieces if t)[:limit]
 
 
 def translate_article(
@@ -91,86 +109,130 @@ def translate_article(
     translator: Translator,
     glossary: Glossary,
     *,
-    max_batch_chars: int = MAX_BATCH_CHARS,
+    retry_rejected: bool = False,
+    max_batch_chars: int = MAX_REQUEST_CHARS,
     context_chars: int = CONTEXT_CHARS,
 ) -> TranslateStats:
-    """翻译一篇文章的全部段落，完成后把状态推进到 translated。
+    """翻译一篇文章的全部段落。
 
-    额度用完时抛 TranslationStopped（QuotaExceededError 的子类，带着统计），状态不变；
-    上层应停止本轮，下次重跑会从翻译记忆接着翻。
-
-    结构校验：译文的标签、链接、图片和原文不一致就单独重翻一次；仍不一致的译文照样存进
-    翻译记忆（额度已经花了），段落 idx 记进 stats.structure_failures 和文章的 error 列，留给人看。
-    翻译记忆命中的段落也会校验，所以这个记录每次运行都会重新算出来。
+    - 查翻译记忆（按段落的术语版本），只翻未命中的；文章内重复的段落只翻一次。
+      未命中的段落不管是否相邻都合进同一批（每批不超过 max_batch_chars 和 50 条）。
+    - 每批翻完，通过结构校验的段落立刻写进翻译记忆。没通过的单独再翻一次，
+      而且不带 context（同样的输入大概率得到同样的结果）。
+    - 还是没通过：译文存进隔离区（backend 加 "#rejected"），不会被当成正常译文复用；
+      以后的运行也不再自动重翻它（不会每次都花额度），除非 retry_rejected=True。
+    - 单段超过 max_batch_chars 的不送出，记为 oversized，其余段落照常翻。
+    - 结果：全部通过 → translated；有 rejected / oversized → failed，error 以 REVIEW_PREFIX
+      开头（needs_review() 可以判断），等人工复查。
+    - 额度用完抛 QuotaStopped，后端重试用尽抛 BackendStopped（都是 TranslationStopped，
+      带 stats），文章状态不变。
     """
     segments = store.get_segments(conn, url)
     if not segments:
         raise ValueError(f"{url} 没有段落，先跑 extract")
-    backend, version = translator.name, glossary.tm_version
+    backend = translator.name
+    quarantine = backend + REJECTED_SUFFIX
     stats = TranslateStats(url=url, segments=len(segments))
 
-    done: dict[str, str] = {}  # src_hash → 译文
-    failed_hashes: set[str] = set()
-    pending: list[int] = []  # 需要翻译的段落位置（每个 hash 只取第一次出现）
-    pending_hashes: set[str] = set()
+    rejected: set[str] = set()
+    oversized: set[str] = set()
+    pending: list[int] = []  # 要送去翻译的段落位置（每个 hash 只取第一次出现）
+    versions: dict[int, str] = {}
+    seen: set[str] = set()
     for pos, seg in enumerate(segments):
         h = seg.src_hash
-        if h in done or h in pending_hashes:
+        if h in seen:
             stats.duplicates += 1
             continue
+        seen.add(h)
+        version = versions[pos] = glossary.version_for(seg.html)
         hit = store.tm_get(conn, h, backend, version)
-        if hit is None:
-            pending.append(pos)
-            pending_hashes.add(h)
+        if hit is not None and same_structure(seg.html, hit):
+            stats.tm_hits += 1
             continue
-        stats.tm_hits += 1
-        done[h] = hit
-        if not same_structure(seg.html, hit):
-            failed_hashes.add(h)
+        if not retry_rejected and (
+            hit is not None or store.tm_get(conn, h, quarantine, version) is not None
+        ):
+            # 以前就没通过校验：不自动重翻，继续等人工复查
+            rejected.add(h)
+            continue
+        if len(seg.html) > max_batch_chars:
+            oversized.add(h)
+            continue
+        pending.append(pos)
 
-    def save(seg: Segment, tgt: str) -> None:
-        store.tm_put(conn, seg.src_hash, backend, seg.html, tgt, version)
-        done[seg.src_hash] = tgt
+    def save(pos: int, tgt: str) -> None:
+        seg = segments[pos]
+        store.tm_put(conn, seg.src_hash, backend, seg.html, tgt, versions[pos])
+        rejected.discard(seg.src_hash)
         stats.translated += 1
 
+    def finish_lists() -> None:
+        stats.rejected = [s.idx for s in segments if s.src_hash in rejected]
+        stats.oversized = [s.idx for s in segments if s.src_hash in oversized]
+
+    texts = [segments[p].html for p in pending]
     try:
-        for batch in _batches(pending, segments, max_batch_chars):
-            texts = [segments[p].html for p in batch]
-            ctx = _context(segments, batch[0], batch[-1], context_chars)
-            out = _call(translator, texts, glossary, ctx)
-            stats.chars += count_chars(texts)
+        for chunk in chunk_texts(texts, MAX_TEXTS_PER_REQUEST, max_batch_chars):
+            batch = [pending[i] for i in chunk]
+            batch_texts = [texts[i] for i in chunk]
+            out = _call(translator, batch_texts, glossary, _context(segments, batch, context_chars))
+            stats.chars += count_chars(batch_texts)
             bad: list[int] = []
+            # 先把好段落存下来，再重翻坏的：重翻时额度用完，已计费的好段落也不会丢
             for pos, tgt in zip(batch, out, strict=True):
                 if same_structure(segments[pos].html, tgt):
-                    save(segments[pos], tgt)
+                    save(pos, tgt)
                 else:
                     bad.append(pos)
             for pos in bad:
                 seg = segments[pos]
                 stats.retried += 1
-                (tgt,) = _call(
-                    translator, [seg.html], glossary, _context(segments, pos, pos, context_chars)
-                )
+                (tgt,) = _call(translator, [seg.html], glossary, "")
                 stats.chars += len(seg.html)
-                if not same_structure(seg.html, tgt):
-                    failed_hashes.add(seg.src_hash)
-                save(seg, tgt)
+                if same_structure(seg.html, tgt):
+                    save(pos, tgt)
+                else:
+                    store.tm_put(conn, seg.src_hash, quarantine, seg.html, tgt, versions[pos])
+                    rejected.add(seg.src_hash)
     except QuotaExceededError as e:
-        raise TranslationStopped(stats) from e
+        finish_lists()
+        raise QuotaStopped(stats, f"额度用完（{e}）") from e
+    except TranslatorUnavailableError as e:
+        finish_lists()
+        raise BackendStopped(stats, str(e)) from e
 
-    stats.structure_failures = [s.idx for s in segments if s.src_hash in failed_hashes]
-    error = None
-    if stats.structure_failures:
-        error = "结构校验未通过的段落：" + ", ".join(map(str, stats.structure_failures))
-    store.set_status(
-        conn,
-        url,
-        Status.TRANSLATED,
-        translator=backend,
-        translated_at=datetime.now(UTC).isoformat(timespec="seconds"),
-        error=error,
-    )
+    finish_lists()
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    if stats.needs_review:
+        parts = []
+        if stats.rejected:
+            parts.append("结构校验未通过的段落 " + ", ".join(map(str, stats.rejected)))
+        if stats.oversized:
+            parts.append(
+                f"超过单次请求上限（{max_batch_chars} 字符）的段落 "
+                + ", ".join(map(str, stats.oversized))
+            )
+        error = REVIEW_PREFIX + "；".join(parts)
+        store.set_status(
+            conn, url, Status.FAILED, translator=backend, translated_at=now, error=error
+        )
+    else:
+        store.set_status(
+            conn, url, Status.TRANSLATED, translator=backend, translated_at=now, error=None
+        )
     return stats
+
+
+def _unique_segments(conn: sqlite3.Connection, urls: Iterable[str]) -> list[Segment]:
+    seen: set[str] = set()
+    out: list[Segment] = []
+    for url in urls:
+        for seg in store.get_segments(conn, url):
+            if seg.src_hash not in seen:
+                seen.add(seg.src_hash)
+                out.append(seg)
+    return out
 
 
 def estimate_chars(
@@ -180,14 +242,24 @@ def estimate_chars(
 
     和 base.FREE_MONTHLY_CHARS 比较，就知道这个月的额度够不够。
     """
-    seen: set[str] = set()
+    return sum(
+        len(seg.html)
+        for seg in _unique_segments(conn, urls)
+        if store.tm_get(conn, seg.src_hash, backend, glossary.version_for(seg.html)) is None
+    )
+
+
+def glossary_upgrade_cost(
+    conn: sqlite3.Connection,
+    urls: Iterable[str],
+    backend: str,
+    old: Glossary,
+    new: Glossary,
+) -> int:
+    """术语表从 old 换成 new，会让多少字符的已翻段落重翻（换之前先看一眼）。"""
     total = 0
-    for url in urls:
-        for seg in store.get_segments(conn, url):
-            h = seg.src_hash
-            if h in seen:
-                continue
-            seen.add(h)
-            if store.tm_get(conn, h, backend, glossary.tm_version) is None:
-                total += len(seg.html)
+    for seg in _unique_segments(conn, urls):
+        before, after = old.version_for(seg.html), new.version_for(seg.html)
+        if before != after and store.tm_get(conn, seg.src_hash, backend, before) is not None:
+            total += len(seg.html)
     return total

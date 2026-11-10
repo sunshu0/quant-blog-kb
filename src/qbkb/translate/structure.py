@@ -3,38 +3,103 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 _WS = re.compile(r"\s+")
+# 没有结束标签的元素：<br> 和 <br/> 视为同一个东西
+VOID = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
+)
 
 
-class _SignatureParser(HTMLParser):
+@dataclass(slots=True)
+class _Node:
+    tag: str
+    attrs: str = ""
+    closed: bool = True
+    children: list[_Node] = field(default_factory=list)
+
+    def canonical(self) -> str:
+        # 兄弟元素排序后再比较：中英文语序不同，DeepL 会合理地调换行内标签的先后
+        kids = ",".join(sorted(c.canonical() for c in self.children))
+        mark = "" if self.closed else "!"
+        return f"{self.tag}{mark}[{self.attrs}]({kids})"
+
+
+class _TreeParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.signature: Counter[str] = Counter()
+        self.root = _Node("#root")
+        self.stack = [self.root]
         self.text: list[str] = []
 
+    def _add(self, tag: str, attrs: list[tuple[str, str | None]]) -> _Node:
+        key = " ".join(
+            f"{n}={v}" for n, v in sorted(attrs, key=lambda a: a[0]) if n in ("href", "src")
+        )
+        node = _Node(tag, key)
+        self.stack[-1].children.append(node)
+        return node
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.signature[f"<{tag}>"] += 1
-        for name, value in attrs:
-            if name in ("href", "src"):
-                self.signature[f"{name}={value}"] += 1
+        node = self._add(tag, attrs)
+        if tag not in VOID:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # <br/> 和 <p/> 都按不入栈的空元素处理（默认实现会再补一个结束标签）
+        self._add(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in VOID:
+            return
+        if not any(n.tag == tag for n in self.stack[1:]):
+            # 多出来的结束标签
+            self.stack[-1].children.append(_Node(f"/{tag}"))
+            return
+        while True:
+            node = self.stack.pop()
+            if node.tag == tag:
+                return
+            node.closed = False  # 被外层结束标签强行关掉的元素
 
     def handle_data(self, data: str) -> None:
         self.text.append(data)
 
+    def close(self) -> None:
+        super().close()
+        for node in self.stack[1:]:
+            node.closed = False
 
-def _parse(html: str) -> _SignatureParser:
-    parser = _SignatureParser()
+
+def _parse(html: str) -> _TreeParser:
+    parser = _TreeParser()
     parser.feed(html)
     parser.close()
     return parser
 
 
-def structure_signature(html: str) -> Counter[str]:
-    """片段的结构指纹：每种标签的数量，加上每个链接（href）和图片（src）地址的数量。"""
-    return _parse(html).signature
+def structure_signature(html: str) -> str:
+    """片段的结构指纹：标签的嵌套关系、是否正确闭合，以及链接（href）和图片（src）地址。
+
+    文本不算；同一层兄弟元素的先后顺序不算。
+    """
+    return _parse(html).root.canonical()
 
 
 def same_structure(src_html: str, tgt_html: str) -> bool:
@@ -43,5 +108,5 @@ def same_structure(src_html: str, tgt_html: str) -> bool:
 
 
 def plain_text(html: str) -> str:
-    """去掉标签、折叠空白，用作 DeepL 的 context。"""
+    """去掉标签、折叠空白，用作 DeepL 的 context，也用来找段落里的术语。"""
     return _WS.sub(" ", "".join(_parse(html).text)).strip()

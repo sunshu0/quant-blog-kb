@@ -1,6 +1,8 @@
 # 术语表（design.md 4.5）。英文 → 中文，同步到 DeepL glossary。
-# 改动后递增 version。翻译记忆按"version + 术语内容指纹"区分，忘了递增也不会误用旧译文；
-# DeepL 上的术语表按同样的名字（qbkb-v<version>-<指纹>）复用，内容变了才新建。
+# 改动后递增 version（只用于 DeepL 术语表的名字 qbkb-v<version>-<指纹>，内容变了才新建）。
+# 翻译记忆按段落记录"这段用到的术语"的指纹：改一个词条，只有含这个词的段落会重翻。
+# 改之前可以用 translate.glossary_upgrade_cost() 看要重翻多少字符。
+# 句首大写（Drawdown）、标题大写（Trend Following）的变体会自动补上，不用手写。
 
 version: 1
 terms:
