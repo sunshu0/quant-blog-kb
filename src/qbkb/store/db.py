@@ -32,6 +32,7 @@ UPDATABLE_COLUMNS = frozenset(
         "evergreen",
         "score_reason",
         "rubric_version",
+        "scored_body_hash",
         "translator",
         "translated_at",
         "md_path",
@@ -64,8 +65,9 @@ def upsert_discovered(conn: sqlite3.Connection, d: DiscoveredUrl) -> bool:
     lastmod 变了的文章退回 discovered 状态完整重抓：
     - 清掉 etag，避免条件请求拿到 304 却已经丢了原来的流程位置；
     - 清掉 error、retries，原文更新后给失败过的文章一次新机会。
-    body_hash、value_score 等保留：正文 hash 没变时，下游可以直接复用打分和翻译记忆，
-    不重复花 LLM / DeepL 额度（由 filter、translate 各自比较 body_hash 决定）。
+    value_score、scored_body_hash 等保留：重新抽取会覆盖 body_hash，filter 比较
+    body_hash 与 scored_body_hash，相同就复用打分，不重复花 LLM 额度；
+    translate 靠段落级翻译记忆复用，不花 DeepL 额度。
 
     INSERT ... ON CONFLICT 让"查询 + 插入"成为一条语句，两个 discover 并发也不会撞主键。
     """

@@ -63,8 +63,20 @@ def test_changed_lastmod_clears_fetch_state(conn: sqlite3.Connection) -> None:
     row = store.get_article(conn, URL)
     assert row is not None
     assert (row["etag"], row["error"], row["retries"]) == (None, None, 0)
-    # 下游靠这两个判断能否复用打分和翻译记忆，必须保留
     assert (row["body_hash"], row["value_score"]) == ("h1", 8.0)
+
+
+def test_scored_body_hash_survives_reextract(conn: sqlite3.Connection) -> None:
+    _discover(conn)
+    store.set_status(
+        conn, URL, Status.FILTERED, body_hash="h1", value_score=8.0, scored_body_hash="h1"
+    )
+    _discover(conn, lastmod="2026-02-01")
+    # 重新抽取覆盖 body_hash；scored_body_hash 仍指向打分时的版本，filter 据此判断要不要重打
+    store.set_status(conn, URL, Status.EXTRACTED, body_hash="h2")
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert (row["body_hash"], row["scored_body_hash"], row["value_score"]) == ("h2", "h1", 8.0)
 
 
 def test_rediscover_twice_with_same_new_lastmod(conn: sqlite3.Connection) -> None:

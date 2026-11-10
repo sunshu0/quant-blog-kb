@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS articles (
   evergreen      INTEGER,  -- 0 / 1
   score_reason   TEXT,
   rubric_version TEXT,
+  scored_body_hash TEXT,  -- 打分时的 body_hash；和当前 body_hash 相同就复用打分
   translator     TEXT,
   translated_at  TEXT,
   md_path        TEXT,

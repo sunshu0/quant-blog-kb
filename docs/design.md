@@ -144,11 +144,11 @@ compliance:
 
 表结构以 [`src/qbkb/store/schema.sql`](../src/qbkb/store/schema.sql) 为准，这里只写要点：
 
-- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、http_status、raw_path）、正文 hash、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version）、翻译（translator、translated_at）、输出路径、失败原因和重试次数。
+- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、http_status、raw_path）、正文 hash、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、输出路径、失败原因和重试次数。
 - `segments`：文章由哪些段落组成，**同时存段落 HTML**，translate 直接从这里取要翻的正文。
 - `translation_memory`：段落级翻译记忆，主键 `(src_hash, backend)`；**术语表版本不同视为未命中**。
 
-增量规则（`upsert_discovered`）：lastmod 变化时文章退回 `discovered`，同时清掉 etag、error、retries；body_hash 和打分保留，下游比较 body_hash 决定能否复用打分和翻译记忆。
+增量规则（`upsert_discovered`）：lastmod 变化时文章退回 `discovered`，同时清掉 etag、error、retries；打分保留；filter 比较当前 body_hash 和 scored_body_hash，相同就复用打分；translate 靠段落翻译记忆复用。
 
 ---
 
