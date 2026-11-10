@@ -32,8 +32,33 @@ DEFAULT_REMOVE: tuple[str, ...] = (
     "select",
     "textarea",
     "nav",
+    "svg",
+    "canvas",
+    "link",
+    "meta",
+    "base",
 )
-DEFAULT_NOISE_KEYWORDS: tuple[str, ...] = ("You are leaving", "cookie")
+# 版权声明要原样保留，只做安全清理：删掉能执行代码或加载外部资源的元素
+KEEP_SAFETY_REMOVE: tuple[str, ...] = (
+    "script",
+    "style",
+    "template",
+    "iframe",
+    "object",
+    "embed",
+    "svg",
+    "link",
+    "meta",
+    "base",
+    "form",
+)
+# 按整词、不分大小写匹配（"cookie jar" 不算 "cookies"，见 quality.py）
+DEFAULT_NOISE_KEYWORDS: tuple[str, ...] = (
+    "You are leaving",
+    "accept cookies",
+    "cookie policy",
+    "cookie settings",
+)
 DEFAULT_MIN_CHARS = 500
 # 页面上直接显示的日期（"3 December 2020" 这类）的解析格式
 DEFAULT_DATE_FORMATS: tuple[str, ...] = ("%d %B %Y", "%B %d, %Y", "%d %b %Y", "%b %d, %Y")
@@ -68,13 +93,25 @@ class Template:
 
 
 @dataclass(frozen=True, slots=True)
+class KeepRule:
+    """一块要原样附在正文后的内容（版权声明等）。
+
+    selector 的全部匹配都会附上（嵌套在已选块里的、内容和前面完全相同的跳过）；
+    remove 只删这块里明确列出的东西（比如响应式布局重复的标题），不套用全站噪音规则。
+    """
+
+    selector: str
+    remove: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractRules:
     """整个站点的抽取规则。"""
 
     site: str
     templates: tuple[Template, ...] = ()
     remove: tuple[str, ...] = DEFAULT_REMOVE
-    keep: tuple[str, ...] = ()
+    keep: tuple[KeepRule, ...] = ()
     noise_keywords: tuple[str, ...] = DEFAULT_NOISE_KEYWORDS
     min_chars: int = DEFAULT_MIN_CHARS
     title_strip: re.Pattern[str] | None = None
@@ -171,6 +208,26 @@ def _template(value: Any, i: int) -> Template:
     )
 
 
+def _keep(value: Any) -> tuple[KeepRule, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise _err("keep", "必须是列表")
+    out: list[KeepRule] = []
+    for i, item in enumerate(value):
+        path = f"keep[{i}]"
+        if isinstance(item, Mapping):
+            out.append(
+                KeepRule(
+                    _selector(item.get("selector"), f"{path}.selector"),
+                    _selectors(item.get("remove"), f"{path}.remove"),
+                )
+            )
+        else:
+            out.append(KeepRule(_selector(item, path)))
+    return tuple(out)
+
+
 def load_rules(site: SiteConfig) -> ExtractRules:
     """从站点配置读出抽取规则。extract 节为空时只用 trafilatura 兜底。"""
     raw = site.raw.get("extract")
@@ -196,7 +253,7 @@ def load_rules(site: SiteConfig) -> ExtractRules:
         site=site.name,
         templates=tuple(_template(t, i) for i, t in enumerate(templates)),
         remove=DEFAULT_REMOVE + _selectors(raw.get("remove"), "remove"),
-        keep=_selectors(raw.get("keep"), "keep"),
+        keep=_keep(raw.get("keep")),
         noise_keywords=tuple(keywords),
         min_chars=min_chars,
         title_strip=_regex(raw.get("title_strip"), "title_strip"),

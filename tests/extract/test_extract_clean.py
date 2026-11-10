@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from lxml.html import fragment_fromstring
 
 from qbkb.extract.clean import finish, prepare, referenced_ids, split_blocks
@@ -101,3 +102,80 @@ def test_original_tree_is_not_modified() -> None:
     root = prepare(src, URL, ("script",))
     split_blocks(finish(root, set()))
     assert len(src.findall("script")) == 1
+
+
+def test_mathml_event_attributes_are_stripped() -> None:
+    out = _run(
+        '<div><p><math display="block" onclick="x()" style="color:red">'
+        '<mtext onmouseover="y()" mathvariant="bold">t</mtext>'
+        '<annotation-xml encoding="text/html"><b>evil</b></annotation-xml>'
+        '<mi href="javascript:z()">x</mi></math></p></div>'
+    )
+    assert out == [
+        '<p><math display="block"><mtext mathvariant="bold">t</mtext><mi>x</mi></math></p>'
+    ]
+
+
+def test_inline_image_and_math_stay_in_paragraph() -> None:
+    out = _run('<div>The value <img src="/a.png"> is high and <math><mi>x</mi></math> low</div>')
+    assert out == [
+        '<p>The value <img src="https://example.test/a.png"> is high and'
+        " <math><mi>x</mi></math> low</p>"
+    ]
+
+
+def test_lone_image_between_blocks_is_its_own_segment() -> None:
+    out = _run('<div><h3>Fig</h3>\n<img src="/a.png">\n<p>Source</p></div>')
+    assert out == ["<h3>Fig</h3>", '<img src="https://example.test/a.png">', "<p>Source</p>"]
+
+
+def test_br_only_paragraphs_are_dropped() -> None:
+    out = _run("<div><p><br></p><p> <br> <br> </p><div><br></div><p>a<br>b</p></div>")
+    assert out == ["<p>a<br>b</p>"]
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "javascript:alert(1)",
+        "JaVaScRiPt:alert(1)",
+        "java\tscript:alert(1)",
+        " javascript:alert(1)",
+        "vbscript:msgbox(1)",
+        "data:text/html,<b>x</b>",
+        "ftp://example.test/file",
+        "#",
+        "",
+    ],
+)
+def test_unsafe_link_schemes_lose_href(href: str) -> None:
+    root = fragment_fromstring("<div><p>a <a>link</a> b</p></div>")
+    root.find(".//a").set("href", href)
+    out = split_blocks(finish(prepare(root, URL, ()), set()))
+    assert out == ["<p>a link b</p>"]
+
+
+@pytest.mark.parametrize(
+    ("href", "expected"),
+    [
+        ("https://x.test/p", "https://x.test/p"),
+        ("http://x.test/p", "http://x.test/p"),
+        ("mailto:a@x.test", "mailto:a@x.test"),
+        ("rel/p", "https://example.test/blog/rel/p"),
+        ("//cdn.test/p", "https://cdn.test/p"),
+    ],
+)
+def test_safe_link_schemes_are_kept(href: str, expected: str) -> None:
+    root = fragment_fromstring("<div><p><a>link</a></p></div>")
+    root.find(".//a").set("href", href)
+    out = split_blocks(finish(prepare(root, URL, ()), set()))
+    assert out == [f'<p><a href="{expected}">link</a></p>']
+
+
+@pytest.mark.parametrize(
+    "src", ["javascript:alert(1)", "data:image/png;base64,AA", "mailto:a@x.test", "file:///etc"]
+)
+def test_unsafe_image_sources_are_dropped(src: str) -> None:
+    root = fragment_fromstring("<div><p>a <img> b</p></div>")
+    root.find(".//img").set("src", src)
+    assert split_blocks(finish(prepare(root, URL, ()), set())) == ["<p>a b</p>"]

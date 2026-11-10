@@ -61,6 +61,9 @@ def test_template_matching() -> None:
         ({"drop_text": ["ok", "("]}, "drop_text[1]"),
         ({"remove": [1]}, "remove[0]"),
         ({"date_formats": "%Y"}, "date_formats"),
+        ({"keep": "#legal"}, "keep"),
+        ({"keep": [{"selector": ""}]}, "keep[0].selector"),
+        ({"keep": [{"selector": "#a", "remove": "[["}]}, "keep[0].remove[0]"),
     ],
 )
 def test_bad_config_is_rejected_with_path(extract: Any, message: str) -> None:

@@ -9,11 +9,12 @@
 """
 
 from qbkb.extract.core import ExtractError, Extraction, extract, extract_full
-from qbkb.extract.pipeline import QC_PREFIX, RunStats, extract_one, run
+from qbkb.extract.pipeline import FAIL_PREFIX, QC_PREFIX, RunStats, extract_one, run
 from qbkb.extract.quality import check_quality
 from qbkb.extract.rules import ExtractRules, load_rules
 
 __all__ = [
+    "FAIL_PREFIX",
     "QC_PREFIX",
     "ExtractError",
     "ExtractRules",

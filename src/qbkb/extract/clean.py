@@ -3,6 +3,9 @@
 清洗后的 HTML 只保留"内容"：结构标签（标题、列表、表格、图片、脚注、公式）和少数有意义的
 属性。布局用的 div / span 和 class、style 全部去掉，这样同一段文字在不同页面上得到同一个
 hash，翻译记忆才能复用；也让 DeepL 的 HTML 模式少处理无关标签。
+
+输出会被 export 写进 Markdown、可能在浏览器里打开，所以属性和链接都走白名单：
+事件属性（onclick 等）一律删掉，链接只留 http/https/mailto/页内锚点，图片只留 http/https。
 """
 
 from __future__ import annotations
@@ -10,7 +13,7 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Iterable, Sequence
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import lxml.etree as etree
 from lxml.html import HtmlElement, fragment_fromstring
@@ -40,12 +43,12 @@ BLOCK_TAGS = frozenset(
         "figure",
         "blockquote",
         "pre",
-        "img",
-        "math",
     }
 )
-# 没有文字也有意义的元素（<hr> 不在其中：分隔线对翻译和 Markdown 都没用，当空元素删掉）
-SELF_MEANINGFUL = frozenset({"img", "br", "math", "td", "th", "tr"})
+# 行内元素，但两边没有文字、单独出现时自成一段（图片、公式）
+STANDALONE_INLINE = frozenset({"img", "math"})
+# 没有文字也有意义的元素。<br> 和 <hr> 不算：只有换行或分隔线的段落白占翻译额度
+SELF_MEANINGFUL = frozenset({"img", "math", "td", "th", "tr"})
 # 每个标签允许保留的属性；id 另外处理（只保留被页内链接引用的，比如脚注锚点）
 ALLOWED_ATTRS: dict[str, frozenset[str]] = {
     "a": frozenset({"href", "title"}),
@@ -55,19 +58,59 @@ ALLOWED_ATTRS: dict[str, frozenset[str]] = {
     "ol": frozenset({"start", "type", "reversed"}),
     "li": frozenset({"value"}),
     "abbr": frozenset({"title"}),
-    "blockquote": frozenset({"cite"}),
-    "q": frozenset({"cite"}),
 }
-MATHML_NS_TAGS = frozenset({"math"})
+# MathML 里决定公式含义的属性。不在这里的（onclick、href、style……）一律删掉
+MATHML_ATTRS = frozenset(
+    {
+        "xmlns",
+        "display",
+        "displaystyle",
+        "scriptlevel",
+        "mathvariant",
+        "mathsize",
+        "dir",
+        "form",
+        "fence",
+        "separator",
+        "stretchy",
+        "symmetric",
+        "largeop",
+        "movablelimits",
+        "accent",
+        "accentunder",
+        "lspace",
+        "rspace",
+        "minsize",
+        "maxsize",
+        "linethickness",
+        "notation",
+        "open",
+        "close",
+        "separators",
+        "columnalign",
+        "rowalign",
+        "columnspan",
+        "rowspan",
+        "align",
+        "width",
+        "height",
+        "depth",
+        "encoding",
+    }
+)
+# MathML 里可以嵌任意 HTML/SVG 的元素，直接删掉
+MATHML_UNSAFE = ("annotation-xml",)
+LINK_SCHEMES = frozenset({"http", "https", "mailto"})
+IMG_SCHEMES = frozenset({"http", "https"})
 _PLACEHOLDER_SRC = ("data:", "about:blank")
+# 浏览器解析 URL 前会去掉的字符：java\tscript: 在浏览器里仍然是 javascript:
+_URL_IGNORED = re.compile(r"[\x00-\x20\x7f]")
 
 
-def _is_mathml(el: HtmlElement) -> bool:
-    """MathML 公式整棵子树原样保留（属性决定公式的含义，不能乱删）。"""
-    for anc in el.iterancestors():
-        if anc.tag in MATHML_NS_TAGS:
-            return True
-    return el.tag in MATHML_NS_TAGS
+def _in_math(el: HtmlElement) -> bool:
+    if el.tag == "math":
+        return True
+    return any(anc.tag == "math" for anc in el.iterancestors())
 
 
 def _drop(el: HtmlElement) -> None:
@@ -105,20 +148,38 @@ def _lazy_images(root: HtmlElement) -> None:
         lazy = img.get("data-src") or img.get("data-lazy-src") or img.get("data-original")
         if lazy and (not src or src.startswith(_PLACEHOLDER_SRC)):
             img.set("src", lazy)
-        if not img.get("src"):
-            _drop(img)
+
+
+def safe_url(
+    value: str, base_url: str, schemes: frozenset[str], *, allow_fragment: bool = False
+) -> str | None:
+    """相对地址转绝对地址；协议不在白名单里就返回 None。
+
+    allow_fragment=True 时页内锚点 #xxx 原样保留（脚注链接）；单独一个 # 算没有去处。
+    """
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith("#"):
+        return value if allow_fragment and len(value) > 1 else None
+    absolute = urljoin(base_url, value)
+    scheme = urlsplit(_URL_IGNORED.sub("", absolute)).scheme.lower()
+    return absolute if scheme in schemes else None
 
 
 def _links(root: HtmlElement, base_url: str) -> None:
     for a in list(root.iter("a")):
-        href = (a.get("href") or "").strip()
-        if not href or href == "#" or href.lower().startswith("javascript:"):
-            a.drop_tag()  # 分享按钮之类：没有去处的链接只留文字
-            continue
-        if not href.startswith("#"):
-            a.set("href", urljoin(base_url, href))
-    for img in root.iter("img"):
-        img.set("src", urljoin(base_url, (img.get("src") or "").strip()))
+        href = safe_url(a.get("href") or "", base_url, LINK_SCHEMES, allow_fragment=True)
+        if href is None:
+            a.drop_tag()  # 分享按钮、javascript: 之类：去掉链接，只留文字
+        else:
+            a.set("href", href)
+    for img in list(root.iter("img")):
+        src = safe_url(img.get("src") or "", base_url, IMG_SCHEMES)
+        if src is None:
+            _drop(img)  # 没有地址或 data:/javascript: 等协议的图片
+        else:
+            img.set("src", src)
 
 
 def _unwrap(root: HtmlElement) -> None:
@@ -158,19 +219,25 @@ def _remove_empty(root: HtmlElement, keep_ids: set[str]) -> None:
         if not isinstance(el.tag, str):
             _drop(el)  # 注释、处理指令
             continue
-        if el.get("id") in keep_ids or _is_mathml(el):
-            continue
+        if el.tag == "br" or el.get("id") in keep_ids or _in_math(el):
+            continue  # <br> 本身留着，只含 <br> 的父元素会因为没有内容被删
         if not _has_content(el):
             _drop(el)
 
 
 def _strip_attrs(root: HtmlElement, keep_ids: set[str]) -> None:
-    for el in root.iter():
-        if not isinstance(el.tag, str) or _is_mathml(el):
+    for el in list(root.iter()):
+        if not isinstance(el.tag, str):
             continue
-        allowed = ALLOWED_ATTRS.get(el.tag, frozenset())
+        if _in_math(el):
+            if el.tag in MATHML_UNSAFE:
+                _drop(el)
+                continue
+            allowed = MATHML_ATTRS
+        else:
+            allowed = ALLOWED_ATTRS.get(el.tag, frozenset())
         for attr in list(el.attrib):
-            if attr == "id" and el.get("id") in keep_ids:
+            if attr == "id" and el.get("id") in keep_ids and not _in_math(el):
                 continue
             if attr not in allowed:
                 del el.attrib[attr]
@@ -207,8 +274,8 @@ def prepare(container: HtmlElement, base_url: str, remove: Sequence[str]) -> Htm
 def finish(root: HtmlElement, keep_ids: set[str]) -> HtmlElement:
     """第二步：拆布局容器、删空元素、清属性。"""
     _unwrap(root)
-    _remove_empty(root, keep_ids)
     _strip_attrs(root, keep_ids)
+    _remove_empty(root, keep_ids)
     return root
 
 
@@ -231,7 +298,14 @@ def block_text(html: str) -> str:
 
 
 def _wrap_run(run: list[HtmlElement | str]) -> HtmlElement | None:
-    """一串零散的文字和行内元素包成一个 <p>；只有空白或 <br> 时返回 None。"""
+    """一串零散的文字和行内元素包成一个 <p>；只有空白或 <br> 时返回 None。
+
+    这一串里只有一张图或一个公式、没有文字时，它自己就是一段，不再包 <p>。
+    """
+    elements = [i for i in run if not isinstance(i, str) and i.tag != "br"]
+    has_text = any(isinstance(i, str) and i.strip() for i in run)
+    if len(elements) == 1 and elements[0].tag in STANDALONE_INLINE and not has_text:
+        return elements[0]
     p = fragment_fromstring("<p></p>")
     last: HtmlElement | None = None
     for item in run:
@@ -273,7 +347,7 @@ def _group(container: HtmlElement) -> list[HtmlElement]:
             flush()
             out.append(child)
         else:
-            run.append(child)  # 行内元素和 <br>；元素之间的空格也要保留
+            run.append(child)  # 行内元素、图片、公式和 <br>；元素之间的空格也要保留
         if tail:
             run.append(tail)
     flush()

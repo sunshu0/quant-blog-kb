@@ -25,12 +25,12 @@
 
 | 文件 | 覆盖的情况 |
 |---|---|
-| `article-figures` | 标准文章：JSON-LD 作者（含 @id 引用）、h2/h3、相对链接和图片、图注、脚注锚点（id 保留）、侧栏/相关文章/弹窗被删 |
-| `article-table-math` | 表格（colspan、scope）、MathML 和 TeX 公式、嵌套列表、引用、`<pre>` 代码缩进、`<picture>` + 懒加载图片、JSON-LD keywords 作标签 |
+| `article-figures` | 标准文章：JSON-LD 作者（含 @id 引用）、h2/h3、相对链接和图片、图注、脚注锚点（id 保留）、侧栏/相关文章/弹窗被删；版权声明在响应式布局里重复一份，只附一次 |
+| `article-table-math` | 表格（colspan、scope）、MathML 和 TeX 公式（MathML 的 onclick 被删）、段内的图片和公式不拆段、嵌套列表、引用、`<pre>` 代码缩进、`<picture>` + 懒加载图片、JSON-LD keywords 作标签 |
 | `video-short` | 视频页：播放器被删、作者为空、质检"正文太短" |
-| `podcast-transcript` | 播客页：iframe 被删、坏 JSON-LD 被跳过、div 里的零散文字成段、`<br>` 保留在段内、"cookie jar" 被质检标出（只标不删） |
+| `podcast-transcript` | 播客页：iframe 被删、坏 JSON-LD 被跳过、div 里的零散文字成段、`<br>` 保留在段内、"cookie jar" 不算噪音（关键词按整词匹配） |
 | `weekly-flourish` | 周报：h5 小标题、Flourish 图表留下 noscript 缩略图、"Problems loading this infographic?" 按文字删除、作者来自页面 |
-| `meta-fallback-noise` | 没有 JSON-LD：标题来自 og:title（去掉站名后缀）、日期来自页面文字；注释、空段、死链接、`<hr>` 被清掉；正文里混进的"You are leaving"被标出 |
+| `meta-fallback-noise` | 没有 JSON-LD：标题来自 og:title（去掉站名后缀）、日期来自页面文字；注释、空段、只有 `<br>` 的段、死链接、javascript:/vbscript: 链接（只留文字）、data: 图片、`<hr>` 被清掉；正文里混进的"You are leaving"被标出 |
 | `fallback-trafilatura` | 不认识的旧版式：trafilatura 兜底，元数据来自 meta 标签，版权声明照样附上 |
 | `missing-meta` | 缺标题、缺日期、缺版权声明，全部进质检 |
 

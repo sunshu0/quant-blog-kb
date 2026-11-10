@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import codecs
+import contextlib
+import re
 from dataclasses import dataclass
 
 import trafilatura
@@ -20,7 +23,7 @@ from qbkb.extract.clean import (
     to_segments,
 )
 from qbkb.extract.meta import extract_meta
-from qbkb.extract.rules import ExtractRules, Template
+from qbkb.extract.rules import KEEP_SAFETY_REMOVE, ExtractRules, Template
 from qbkb.models import ExtractedArticle
 
 FALLBACK = "trafilatura"
@@ -80,14 +83,65 @@ def _drop_by_text(blocks: list[str], rules: ExtractRules) -> list[str]:
     return [b for b in blocks if not any(p.search(block_text(b)) for p in rules.drop_text)]
 
 
+_META_CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_:.-]+)""", re.I)
+_XML_DECL = re.compile(r"^\s*<\?xml[^>]*\?>")
+_BOMS = (
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def decode_html(raw: str | bytes) -> str:
+    """按 BOM → 页面开头的 <meta charset> → UTF-8 的顺序解码。
+
+    只解码一次，lxml、trafilatura 和元数据兜底拿到的是同一份文字，不会一边对一边乱码。
+    """
+    if isinstance(raw, str):
+        text = raw
+    else:
+        encoding = "utf-8"
+        for bom, name in _BOMS:
+            if raw.startswith(bom):
+                encoding = name
+                break
+        else:
+            m = _META_CHARSET.search(raw[:4096])
+            if m:
+                # 写错的 charset 名字：按 UTF-8 处理
+                with contextlib.suppress(LookupError):
+                    encoding = codecs.lookup(m.group(1).decode("ascii")).name
+        text = raw.decode(encoding, errors="replace")
+    # lxml 不接受带编码声明的 str（<?xml encoding=...?>），去掉它
+    return _XML_DECL.sub("", text, count=1)
+
+
 def parse(raw: str | bytes) -> HtmlElement:
-    """bytes 交给 lxml 按 <meta charset> 解码；str 原样解析。"""
-    return document_fromstring(raw)
+    return document_fromstring(decode_html(raw))
+
+
+def _keep_roots(doc: HtmlElement, url: str, rules: ExtractRules) -> list[HtmlElement]:
+    """版权声明块：每条规则的全部匹配，跳过嵌套在已选块里的和内容完全重复的。"""
+    chosen: list[HtmlElement] = []
+    roots: list[HtmlElement] = []
+    seen: set[str] = set()
+    for rule in rules.keep:
+        for el in doc.cssselect(rule.selector):
+            if any(el is c or c in el.iterancestors() for c in chosen):
+                continue
+            root = prepare(el, url, KEEP_SAFETY_REMOVE + rule.remove)
+            key = " ".join(root.text_content().split())
+            if not key or key in seen:
+                continue  # 响应式布局里同一块内容出现多次，只要一份
+            seen.add(key)
+            chosen.append(el)
+            roots.append(root)
+    return roots
 
 
 def extract_full(raw: str | bytes, url: str, rules: ExtractRules) -> Extraction:
-    doc = parse(raw)
-    raw_text = raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
+    raw_text = decode_html(raw)
+    doc = document_fromstring(raw_text)
     template = _match_template(doc, url, rules)
     meta = extract_meta(doc, raw_text, url, rules, template)
 
@@ -111,12 +165,7 @@ def extract_full(raw: str | bytes, url: str, rules: ExtractRules) -> Extraction:
                     h1.drop_tree()
             body_roots.append(root)
 
-    keep_roots: list[HtmlElement] = []
-    for sel in rules.keep:
-        el = _first(doc, sel)
-        if el is not None:
-            keep_roots.append(prepare(el, url, rules.remove))
-
+    keep_roots = _keep_roots(doc, url, rules)
     keep_ids = referenced_ids(body_roots + keep_roots)
     body_blocks: list[str] = []
     for root in body_roots:
@@ -127,7 +176,6 @@ def extract_full(raw: str | bytes, url: str, rules: ExtractRules) -> Extraction:
     keep_blocks: list[str] = []
     for root in keep_roots:
         keep_blocks += split_blocks(finish(root, keep_ids))
-    keep_blocks = _drop_by_text(keep_blocks, rules)
 
     article = ExtractedArticle(url=url, meta=meta, segments=to_segments(body_blocks + keep_blocks))
     return Extraction(

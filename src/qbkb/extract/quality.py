@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import re
+
 from qbkb.extract.clean import block_text
 from qbkb.extract.core import FALLBACK, Extraction
 from qbkb.extract.rules import ExtractRules
+
+
+def keyword_pattern(keyword: str) -> re.Pattern[str]:
+    """整词、不分大小写匹配：关键词 'cookie' 不会命中正文里的 'cookies'。"""
+    words = r"\s+".join(re.escape(w) for w in keyword.split())
+    return re.compile(rf"(?<!\w){words}(?!\w)", re.IGNORECASE)
 
 
 def check_quality(result: Extraction, rules: ExtractRules) -> list[str]:
@@ -17,9 +25,9 @@ def check_quality(result: Extraction, rules: ExtractRules) -> list[str]:
     chars = sum(len(t) for t in texts)
     if chars < rules.min_chars:
         issues.append(f"正文太短：{chars} 字符（下限 {rules.min_chars}）")
-    lowered = [t.lower() for t in texts]
     for kw in rules.noise_keywords:
-        hits = [i for i, t in enumerate(lowered) if kw.lower() in t]
+        pattern = keyword_pattern(kw)
+        hits = [i for i, t in enumerate(texts) if pattern.search(t)]
         if hits:
             idx = ", ".join(str(body[i].idx) for i in hits)
             issues.append(f"出现噪音关键词 {kw!r}：段落 {idx}")

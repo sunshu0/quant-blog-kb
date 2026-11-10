@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from qbkb import config, store
-from qbkb.extract import QC_PREFIX, extract, load_rules, run
+from qbkb.extract import FAIL_PREFIX, QC_PREFIX, extract, load_rules, run
 from qbkb.models import DiscoveredUrl, Status
 
 GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "man"
@@ -100,3 +100,62 @@ def test_run_only_touches_own_site(conn: sqlite3.Connection, tmp_path: Path) -> 
     row = store.get_article(conn, "https://o.test/x")
     assert row is not None
     assert row["status"] == Status.FETCHED
+
+
+def test_retry_failed_reprocesses_extract_failures_only(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    _setup(conn, tmp_path)
+    site = config.load_site("man")
+    run(conn, site, root=tmp_path)
+    # fetch 阶段的失败：没有 raw_path，error 也不是 extract 写的
+    fetch_fail = "https://www.man.com/insights/fixture-fetch-403"
+    store.upsert_discovered(conn, DiscoveredUrl(url=fetch_fail, site="man", slug="f"))
+    store.record_failure(conn, fetch_fail, "fetch: HTTP 403")
+    # 修好原始文件后重试
+    shutil.copy(GOLDEN / "weekly-flourish.html", tmp_path / "raw" / "man" / "nope.html")
+
+    assert run(conn, site, root=tmp_path).extracted == 0  # 默认不碰失败的文章
+    stats = run(conn, site, root=tmp_path, retry_failed=True)
+
+    assert stats.extracted == 1  # MISSING_URL 修好了
+    assert stats.failed == 1  # EMPTY_URL 仍然抽不出正文
+    fixed = store.get_article(conn, MISSING_URL)
+    assert fixed is not None and fixed["status"] == Status.EXTRACTED
+    empty = store.get_article(conn, EMPTY_URL)
+    assert empty is not None and empty["retries"] == 2
+    assert empty["error"].startswith(FAIL_PREFIX)
+    untouched = store.get_article(conn, fetch_fail)
+    assert untouched is not None
+    assert (untouched["status"], untouched["retries"]) == (Status.FAILED, 1)
+
+
+def test_crash_between_segments_and_status_heals_on_rerun(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """replace_segments 和 set_status 不在一个事务里：中途进程被杀，下次 run 能自己恢复。
+
+    按 URL 排序第一篇是 SHORT_URL，它写完段落、改状态时"进程被杀"。
+    """
+    _setup(conn, tmp_path)
+    site = config.load_site("man")
+    real_set_status = store.set_status
+
+    def killed(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt  # BaseException：模拟进程被杀，不会被 run 当成单篇失败
+
+    monkeypatch.setattr(store, "set_status", killed)
+    with pytest.raises(KeyboardInterrupt):
+        run(conn, site, root=tmp_path)
+    row = store.get_article(conn, SHORT_URL)
+    assert row is not None and row["status"] == Status.FETCHED  # 下游不会读这篇的段落
+    half_written = store.get_segment_hashes(conn, SHORT_URL)
+    assert half_written
+
+    monkeypatch.setattr(store, "set_status", real_set_status)
+    run(conn, site, root=tmp_path)
+    row = store.get_article(conn, SHORT_URL)
+    assert row is not None and row["status"] == Status.EXTRACTED
+    assert store.get_segment_hashes(conn, SHORT_URL) == half_written
+    expected = extract((GOLDEN / "video-short.html").read_bytes(), SHORT_URL, load_rules(site))
+    assert row["body_hash"] == expected.body_hash

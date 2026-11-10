@@ -30,8 +30,8 @@ def test_real_page(path: Path) -> None:
     assert meta.title and meta.published and meta.tags
     assert result.keep_found
     issues = check_quality(result, rules)
-    # 视频、播客页面正文短或提到 cookie 是正常的；其他问题都不应该出现
-    assert all(i.startswith(("正文太短", "出现噪音关键词 'cookie'")) for i in issues), issues
+    # 视频页面正文短是正常的；其他问题都不应该出现
+    assert all(i.startswith("正文太短") for i in issues), issues
 
     texts = [block_text(s.html) for s in result.article.segments]
     joined = "\n".join(texts)

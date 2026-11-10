@@ -32,6 +32,7 @@
               <h2 id="the-rule">The rule</h2>
               <p>The idea fits in one line: hold less of an asset when it is jumpy and more when it is calm. With a target volatility \(\sigma^*\) and an estimate \(\hat\sigma_t\), the weight is</p>
               <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mi>w</mi><mi>t</mi></msub><mo>=</mo><mfrac><msup><mi>σ</mi><mo>*</mo></msup><msub><mover><mi>σ</mi><mo>^</mo></mover><mi>t</mi></msub></mfrac></mrow></math>
+              <p>The weight goes <img src="images/arrow-down.png" alt="down"> as the estimate goes up, so <math><mi onclick="alert(1)" mathvariant="italic">w</mi></math> and <math><mi>σ</mi></math> move in opposite directions.</p>
               <p>We cap the weight at <span class="nowrap" style="font-weight:bold">two</span> so that a quiet spell cannot lever the book without limit.</p>
               <h2 id="a-small-table">A small table</h2>
               <p>The numbers below are made up to keep the arithmetic easy.</p>

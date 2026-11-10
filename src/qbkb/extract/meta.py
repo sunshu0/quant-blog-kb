@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import trafilatura
@@ -128,7 +128,10 @@ def normalize_date(value: str | None, formats: tuple[str, ...]) -> str | None:
     value = _text(value)
     m = _ISO_DATE.match(value)
     if m:
-        return m.group(1)
+        try:
+            return date.fromisoformat(m.group(1)).isoformat()
+        except ValueError:
+            return None  # 2023-00-00 这类无效日期：当作没有，调用方接着用下一个来源
     for fmt in formats:
         try:
             return datetime.strptime(value, fmt).date().isoformat()

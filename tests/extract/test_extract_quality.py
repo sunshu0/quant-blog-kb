@@ -4,6 +4,7 @@ from typing import Any
 
 from qbkb.config import SiteConfig
 from qbkb.extract import check_quality, extract_full, load_rules
+from qbkb.extract.quality import keyword_pattern
 from qbkb.extract.rules import ExtractRules
 
 URL = "https://example.test/insights/a"
@@ -32,11 +33,11 @@ def test_clean_article_has_no_issues() -> None:
 
 def test_short_noisy_and_missing_meta() -> None:
     rules = _rules(templates=[TEMPLATE], keep=["#legal"], min_chars=100)
-    html = _page('<div id="body"><p>Accept all Cookies</p><p>ok</p></div>')
+    html = _page('<div id="body"><p>Please ACCEPT  cookies</p><p>ok</p></div>')
     issues = check_quality(extract_full(html, URL, rules), rules)
     assert issues == [
-        "正文太短：20 字符（下限 100）",
-        "出现噪音关键词 'cookie'：段落 0",
+        "正文太短：23 字符（下限 100）",
+        "出现噪音关键词 'accept cookies'：段落 0",
         "缺少标题",
         "缺少发布日期",
         "没有找到版权声明（extract.keep）",
@@ -61,3 +62,12 @@ def test_fallback_is_reported_when_site_has_rules() -> None:
     result = extract_full(html, URL, rules)
     assert result.method == "trafilatura"
     assert "没有匹配的站点规则，用了 trafilatura 兜底" in check_quality(result, rules)
+
+
+def test_keyword_matches_whole_words_only() -> None:
+    p = keyword_pattern("cookie")
+    assert p.search("a Cookie here")
+    assert p.search("cookie.")
+    assert not p.search("eat less cookies")
+    assert not p.search("fortunecookie")
+    assert keyword_pattern("You are leaving").search("you  are\nleaving now")

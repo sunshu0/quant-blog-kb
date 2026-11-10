@@ -25,11 +25,14 @@ discover:
 extract:
   # 正文少于这么多字符就标记"正文太短"（视频页、播客页通常会被标出来）
   min_chars: 1000
-  # 出现在正文里就标记出来给人看（不自动删除）
+  # 出现在正文里就标记出来给人看（不自动删除）。按整词、不分大小写匹配；
+  # 不用单独的 "cookie"：正文里谈 cookies 的句子会误报
   noise_keywords:
     - You are leaving
     - You are now leaving
-    - cookie
+    - accept cookies
+    - cookie policy
+    - cookie settings
     - Subscribe to Man Insights
     - Thank you for subscribing
     - Please select your country
@@ -45,9 +48,12 @@ extract:
   drop_text:
     - '^Problems loading this infographic\?'
   # 版权声明和重要信息：每篇都一样，翻译记忆只翻一次；原样附在正文后（design.md 3.3）
+  # 只做安全清理，不套用上面的 remove / drop_text；同一选择器的全部匹配都附上（重复内容只留一份）
   keep:
     - "#pdf-article-header"
-    - "#insights-important-information-section-title"
+    - selector: "#insights-important-information-section-title"
+      remove:
+        - .d-md-none # 标题里给手机看的重复文字
     - "#insights-important-information-section .accordion-body"
   templates:
     # /insights/ 下的文章、视频、播客共用一个 Drupal 模板

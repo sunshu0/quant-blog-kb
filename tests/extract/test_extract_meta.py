@@ -42,6 +42,8 @@ def _meta(html: str, extract: dict[str, Any] | None = None) -> ArticleMeta:
         ("December 3, 2020", "2020-12-03"),
         ("3 Dec 2020", "2020-12-03"),
         ("Coming soon", None),
+        ("2023-00-00", None),
+        ("2023-02-30T00:00:00Z", None),
         ("", None),
         (None, None),
     ],
@@ -132,3 +134,9 @@ def test_jsonld_wins_over_site_rule() -> None:
 def test_title_falls_back_to_title_tag() -> None:
     m = _meta(_page("<title>Only Title | Site</title>"), {"title_strip": r"\s*\|\s*Site$"})
     assert m.title == "Only Title"
+
+
+def test_invalid_jsonld_date_falls_through_to_next_source() -> None:
+    head = _ld({"@type": "Article", "headline": "H", "datePublished": "2023-00-00"})
+    head += '<meta property="article:published_time" content="2023-04-05">'
+    assert _meta(_page(head)).published == "2023-04-05"

@@ -9,12 +9,13 @@
       "ARTICLE"
     ]
   },
-  "n_body": 9,
+  "n_body": 10,
   "issues": [
-    "出现噪音关键词 'You are leaving'：段落 4"
+    "出现噪音关键词 'You are leaving'：段落 5"
   ],
   "segments": [
     "<p>Rebalancing back to a fixed mix sounds dull, yet the pretend backtest in this fixture shows it quietly sells what has run up and buys what has fallen behind.</p>",
+    "<p>Old links like this one and that one keep their words but lose the address; a <a href=\"mailto:fixture@example.test\">mail link</a> stays.</p>",
     "<p>The interactive version of this note was never built, and the share link goes nowhere.</p>",
     "<h2>When it hurts</h2>",
     "<p>It hurts in long one-way trends, because you keep trimming the winner. The fixture shows this with a pretend asset that rises every single quarter for ten years.</p>",

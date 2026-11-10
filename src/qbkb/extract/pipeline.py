@@ -17,8 +17,11 @@ from qbkb.models import Status
 
 log = logging.getLogger(__name__)
 
-# 质检问题写进 articles.error，前缀用来和真正的失败区分（文章状态仍是 extracted）
+# 质检问题写进 articles.error，前缀用来和真正的失败区分（文章状态仍是 extracted）。
+# 以后 schema 加了 qc_issues 列就改写到那里（PR #5 的共享需求）。
 QC_PREFIX = "质检："
+# 抽取阶段失败时 error 的前缀；retry_failed 只捞这一类，不碰 fetch 等阶段的失败
+FAIL_PREFIX = "extract: "
 
 
 @dataclass(slots=True)
@@ -38,7 +41,7 @@ def _raw_file(raw_path: str | None, root: Path) -> Path:
 def extract_one(
     conn: sqlite3.Connection, url: str, rules: ExtractRules, root: Path = Path(".")
 ) -> list[str]:
-    """抽取一篇 fetched 文章并写回状态库，返回质检问题。失败时抛异常，由调用方记录。"""
+    """抽取一篇文章并写回状态库，返回质检问题。失败时抛异常，由调用方记录。"""
     row = store.get_article(conn, url)
     if row is None:
         raise KeyError(url)
@@ -46,6 +49,8 @@ def extract_one(
     result = extract_full(raw, url, rules)
     issues = check_quality(result, rules)
     art = result.article
+    # 两步各自一个事务（store 没有提供合并的接口）。先写段落再改状态：中途崩溃时文章
+    # 仍是 fetched，下游不会读到这些段落；下次 run 会整体替换段落再推进状态，自动恢复。
     store.replace_segments(conn, url, art.segments)
     store.set_status(
         conn,
@@ -61,18 +66,39 @@ def extract_one(
     return issues
 
 
-def run(conn: sqlite3.Connection, site: SiteConfig, root: Path = Path(".")) -> RunStats:
+def _extract_failures(conn: sqlite3.Connection, site: str) -> list[str]:
+    """抽取阶段失败、原始 HTML 还在记录里的文章。fetch 阶段的失败（没有 raw_path，
+    或 error 不是 extract 写的）留给 fetch 自己重试。"""
+    out: list[str] = []
+    for url in store.list_by_status(conn, Status.FAILED, site):
+        row = store.get_article(conn, url)
+        if row is not None and row["raw_path"] and (row["error"] or "").startswith(FAIL_PREFIX):
+            out.append(url)
+    return out
+
+
+def run(
+    conn: sqlite3.Connection,
+    site: SiteConfig,
+    root: Path = Path("."),
+    *,
+    retry_failed: bool = False,
+) -> RunStats:
     """处理这个站点全部 fetched 文章。单篇失败不影响其他文章，失败原因记进状态库。
 
+    retry_failed=True 时，抽取阶段失败过的文章也重新处理（改了规则之后用）。
     不访问网络：只读 fetch 存下的原始 HTML。
     """
     rules = load_rules(site)
     stats = RunStats()
-    for url in store.list_by_status(conn, Status.FETCHED, site.name):
+    urls = store.list_by_status(conn, Status.FETCHED, site.name)
+    if retry_failed:
+        urls += _extract_failures(conn, site.name)
+    for url in urls:
         try:
             issues = extract_one(conn, url, rules, root)
         except Exception as e:  # 一篇坏页面不能拖垮整批
-            retries = store.record_failure(conn, url, f"extract: {type(e).__name__}: {e}")
+            retries = store.record_failure(conn, url, f"{FAIL_PREFIX}{type(e).__name__}: {e}")
             log.warning("抽取失败 %s（第 %d 次）：%s", url, retries, e)
             stats.failed += 1
             continue
