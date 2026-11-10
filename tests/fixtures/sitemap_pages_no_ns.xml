@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 构造的 urlset，不带命名空间（有的站点这样写） -->
+<urlset>
+  <url>
+    <loc>https://www.example.test/insights/delta-volatility</loc>
+    <lastmod>2026-02-01T08:00:00+00:00</lastmod>
+  </url>
+  <url>
+    <loc>https://www.example.test/insights/report.pdf</loc>
+  </url>
+</urlset>

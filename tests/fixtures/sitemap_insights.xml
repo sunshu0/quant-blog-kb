@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 构造的 urlset：覆盖前缀过滤、语言版本、外站、列表页、重复、多级路径 -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>https://www.example.test/insights/alpha-signals</loc>
+    <lastmod>2026-01-02</lastmod>
+    <xhtml:link rel="alternate" hreflang="it" href="https://www.example.test/it/insights/alpha-signals"/>
+  </url>
+  <url>
+    <loc> https://WWW.EXAMPLE.TEST/insights/beta-carry#top </loc>
+    <lastmod>2026-01-03</lastmod>
+  </url>
+  <url>
+    <loc>https://www.example.test/insights/beta-carry</loc>
+    <lastmod>2026-01-04</lastmod>
+  </url>
+  <url>
+    <loc>https://www.example.test/insights/series/part-one</loc>
+  </url>
+  <url>
+    <loc>https://www.example.test/insights/</loc>
+  </url>
+  <url>
+    <loc>https://www.example.test/insights/subscription</loc>
+  </url>
+  <url>
+    <loc>https://www.example.test/it/insights/alpha-signals</loc>
+  </url>
+  <url>
+    <loc>https://www.example.test/es/insights/alpha-signals</loc>
+  </url>
+  <url>
+    <loc>https://www.example.test/about-us</loc>
+  </url>
+  <url>
+    <loc>https://elsewhere.test/insights/gamma</loc>
+  </url>
+  <url>
+    <loc>mailto:someone@example.test</loc>
+  </url>
+  <url>
+    <loc></loc>
+  </url>
+</urlset>

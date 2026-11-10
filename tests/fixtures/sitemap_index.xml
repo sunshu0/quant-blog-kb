@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 构造的 sitemap index，不是任何真实站点的内容 -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://www.example.test/sitemap-insights.xml</loc>
+    <lastmod>2026-01-05</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.example.test/sitemap-pages.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://cdn.other.test/sitemap.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.example.test/sitemap-insights.xml</loc>
+  </sitemap>
+</sitemapindex>
