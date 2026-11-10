@@ -38,7 +38,11 @@ def _raw_file(raw_path: str | None, root: Path) -> Path:
 def extract_one(
     conn: sqlite3.Connection, url: str, rules: ExtractRules, root: Path = Path(".")
 ) -> list[str]:
-    """抽取一篇文章并写回状态库，返回质检问题。失败时抛异常，由调用方记录。"""
+    """抽取一篇文章并写回状态库，返回质检问题。失败时抛异常，由调用方记录。
+
+    前置状态应是 fetched，或抽取阶段失败（retry_failed）。成功后状态改为 extracted、
+    error 清空：用在已经翻译 / 等人工复查的文章上，会丢掉下游的进度和复查原因。
+    """
     row = store.get_article(conn, url)
     if row is None:
         raise KeyError(url)

@@ -98,7 +98,13 @@ def classify_response(response: Response) -> Outcome:
     """只看响应决定结果，不碰状态库和文件系统。"""
     status = response.status
     if status == 304:
-        return Outcome(Kind.NOT_MODIFIED, status)
+        # 304 可以带新的校验值（RFC 9110 15.4.5），带了就记下来，下次条件请求用新的
+        return Outcome(
+            Kind.NOT_MODIFIED,
+            status,
+            etag=_header(response, "ETag"),
+            last_modified=_header(response, "Last-Modified"),
+        )
     challenge = detect_challenge(response)
     if challenge:
         return Outcome(
@@ -200,7 +206,7 @@ def cleanup_stale_tmp(raw_dir: Path, site: str) -> int:
 def apply_outcome(
     conn: sqlite3.Connection, url: str, outcome: Outcome, body: bytes, raw_dir: Path
 ) -> FetchResult:
-    """把结果落到状态库（和 raw/）。304 不改任何东西。
+    """把结果落到状态库（和 raw/）。304 只在服务器给了新校验值时刷新 etag / last_modified。
 
     raw_path 存绝对路径（posix 形式），读的一方不依赖当前目录。
     """
@@ -209,7 +215,16 @@ def apply_outcome(
         raise KeyError(url)
     match outcome.kind:
         case Kind.NOT_MODIFIED:
-            return FetchResult(url, outcome.http_status or 304, row["raw_path"], row["etag"], True)
+            etag = outcome.etag or row["etag"]
+            fresh = {
+                k: v
+                for k, v in (("etag", outcome.etag), ("last_modified", outcome.last_modified))
+                if v is not None and v != row[k]
+            }
+            if fresh:
+                # 只刷新校验值，状态和原文都不动
+                store.set_status(conn, url, Status(row["status"]), **fresh)
+            return FetchResult(url, outcome.http_status or 304, row["raw_path"], etag, True)
         case Kind.FETCHED:
             path = raw_file(raw_dir.resolve(), str(row["site"]), str(row["slug"]))
             _write_atomic(path, body)

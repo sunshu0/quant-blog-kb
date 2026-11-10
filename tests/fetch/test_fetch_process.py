@@ -405,3 +405,12 @@ def test_cleanup_stale_tmp(tmp_path: Path) -> None:
     assert cleanup_stale_tmp(tmp_path, "example") == 1
     assert [p.name for p in site_dir.iterdir()] == ["b.html"]
     assert cleanup_stale_tmp(tmp_path, "missing-site") == 0
+
+
+def test_304_refreshes_validators(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    process_response(conn, URL, _resp(headers={"ETag": '"v1"'}), tmp_path)
+    process_response(conn, URL, _resp(status=304, body=b"", headers={"ETag": '"v2"'}), tmp_path)
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert (row["status"], row["etag"]) == ("fetched", '"v2"')
+    assert Path(row["raw_path"]).read_bytes() == ARTICLE

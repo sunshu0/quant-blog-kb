@@ -210,7 +210,7 @@ def translate_article(
                 f"超过单次请求上限（{max_batch_chars} 字符）的段落 "
                 + ", ".join(map(str, stats.oversized))
             )
-        error = "需人工复查：" + "；".join(parts)
+        error = "；".join(parts)
         store.set_status(
             conn, url, Status.NEEDS_REVIEW, translator=backend, translated_at=now, error=error
         )

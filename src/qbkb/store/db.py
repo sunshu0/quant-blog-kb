@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -16,6 +17,10 @@ from typing import Literal
 from qbkb.models import DiscoveredUrl, Segment, Status
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+# 改了表结构（加列等）就加 1，并在 _migrate 里补升级步骤
+SCHEMA_VERSION = 1
+
+log = logging.getLogger(__name__)
 
 # set_status 允许顺带更新的列。url / site / slug / status / updated_at 由本模块自己管理。
 UPDATABLE_COLUMNS = frozenset(
@@ -63,8 +68,9 @@ class _Keep(Enum):
     KEEP = 0
 
 
-TM_OK = "ok"
-TM_REJECTED = "rejected"
+type TmQuality = Literal["ok", "rejected"]
+TM_OK: Literal["ok"] = "ok"
+TM_REJECTED: Literal["rejected"] = "rejected"
 
 type Value = str | int | float | None
 
@@ -72,7 +78,7 @@ type Value = str | int | float | None
 @dataclass(frozen=True, slots=True)
 class TmEntry:
     tgt_html: str
-    quality: str
+    quality: TmQuality
 
 
 def _now() -> str:
@@ -90,21 +96,55 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    """按 PRAGMA user_version 升级老库；已经是最新版本就什么都不做（不扫表）。"""
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version >= SCHEMA_VERSION:
+        return
     with conn:
         for table, column, decl in _ADDED_COLUMNS:
             existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-            if column not in existing:
+            if column in existing:
+                continue
+            try:
                 # 表名、列名来自上面的常量，不是外部输入
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-        pattern = "%" + _LEGACY_REJECTED_SUFFIX
-        conn.execute(
-            "INSERT OR IGNORE INTO translation_memory"
-            " (src_hash, backend, src_html, tgt_html, glossary_version, quality, created_at)"
-            " SELECT src_hash, substr(backend, 1, length(backend) - ?), src_html, tgt_html,"
-            " glossary_version, ?, created_at FROM translation_memory WHERE backend LIKE ?",
-            (len(_LEGACY_REJECTED_SUFFIX), TM_REJECTED, pattern),
+            except sqlite3.OperationalError as e:
+                # 另一个进程刚好同时在升级同一个库，列已经被它加上了
+                if "duplicate column name" not in str(e):
+                    raise
+        _convert_legacy_rejected(conn)
+        # PRAGMA 不能带参数；SCHEMA_VERSION 是常量
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def _convert_legacy_rejected(conn: sqlite3.Connection) -> None:
+    """PR #3 时期的隔离区（backend 带 #rejected 后缀）→ quality = rejected。
+
+    主键是 (src_hash, backend)，同一段落已有合格译文时两条放不进同一个键：保留合格的，
+    坏译文丢弃并记日志（它本来就不会被复用，只是人工复查时看不到了）。
+    """
+    pattern = "%" + _LEGACY_REJECTED_SUFFIX
+    n = len(_LEGACY_REJECTED_SUFFIX)
+    dropped = conn.execute(
+        "SELECT old.src_hash, old.backend FROM translation_memory AS old"
+        " JOIN translation_memory AS cur"
+        " ON cur.src_hash = old.src_hash"
+        " AND cur.backend = substr(old.backend, 1, length(old.backend) - ?)"
+        " WHERE old.backend LIKE ?",
+        (n, pattern),
+    ).fetchall()
+    for r in dropped:
+        log.warning(
+            "升级翻译记忆：%s 在 %s 下已有合格译文，丢弃旧隔离区里的坏译文", r[0], r[1][:-n]
         )
-        conn.execute("DELETE FROM translation_memory WHERE backend LIKE ?", (pattern,))
+    conn.execute(
+        "INSERT OR IGNORE INTO translation_memory"
+        " (src_hash, backend, src_html, tgt_html, glossary_version, quality, created_at)"
+        " SELECT src_hash, substr(backend, 1, length(backend) - ?), src_html, tgt_html,"
+        " glossary_version, ?, created_at FROM translation_memory WHERE backend LIKE ?",
+        (n, TM_REJECTED, pattern),
+    )
+    conn.execute("DELETE FROM translation_memory WHERE backend LIKE ?", (pattern,))
 
 
 def upsert_discovered(conn: sqlite3.Connection, d: DiscoveredUrl) -> bool:
@@ -240,7 +280,10 @@ def tm_lookup(
         " WHERE src_hash = ? AND backend = ? AND glossary_version IS ?",
         (src_hash, backend, glossary_version),
     ).fetchone()
-    return None if row is None else TmEntry(str(row["tgt_html"]), str(row["quality"]))
+    if row is None:
+        return None
+    quality = TM_REJECTED if row["quality"] == TM_REJECTED else TM_OK
+    return TmEntry(str(row["tgt_html"]), quality)
 
 
 def tm_get(
@@ -263,8 +306,13 @@ def tm_put(
     tgt_html: str,
     glossary_version: str | None = None,
     *,
-    quality: str = TM_OK,
+    quality: TmQuality = TM_OK,
 ) -> None:
+    """写入翻译记忆。
+
+    rejected 不覆盖同一术语版本下已有的 ok 译文：那份译文已经花过额度，人工复查时还要看；
+    术语版本不同时照常覆盖（旧版本的译文按规则已经不会命中）。ok 总是可以覆盖 rejected。
+    """
     if quality not in (TM_OK, TM_REJECTED):
         raise ValueError(f"quality 必须是 {TM_OK!r} 或 {TM_REJECTED!r}")
     with conn:
@@ -276,6 +324,8 @@ def tm_put(
             " tgt_html = excluded.tgt_html,"
             " glossary_version = excluded.glossary_version,"
             " quality = excluded.quality,"
-            " created_at = excluded.created_at",
+            " created_at = excluded.created_at"
+            " WHERE excluded.quality = 'ok' OR translation_memory.quality != 'ok'"
+            " OR translation_memory.glossary_version IS NOT excluded.glossary_version",
             (src_hash, backend, src_html, tgt_html, glossary_version, quality, _now()),
         )
