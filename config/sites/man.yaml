@@ -1,0 +1,25 @@
+# Man Group insights。字段说明见 docs/design.md 3.1、4.1、4.3。
+# discover / extract 两节由 Phase 1 的 A、B 线补全。
+
+compliance:
+  robots_txt: "只禁止 /core/ 和 /profiles/，/insights/ 放行"
+  terms_url: https://www.man.com/terms-and-conditions
+  terms_summary: >-
+    第 6 节：未经书面许可，不得用自动化手段抓取、存储、挖掘内容用于公开或商业目的；
+    禁止再分发、去掉版权声明、系统化下载建库。
+  permission: "用户已获得许可（2026-11-11），凭证由用户保管；许可不含公开再分发"
+  checked_at: 2026-11-11
+  decision: allowed
+
+base_url: https://www.man.com
+
+discover:
+  sitemap: https://www.man.com/sitemap.xml
+  include_prefixes:
+    - /insights/
+  exclude_prefixes:
+    - /it/
+    - /es/
+    - /insights/subscription
+
+extract: {}

@@ -1,0 +1,56 @@
+[project]
+name = "qbkb"
+version = "0.1.0"
+description = "把国外量化机构博客抓取、筛选并翻译成中文 Markdown 知识库"
+readme = "README.md"
+requires-python = ">=3.13"
+# Phase 0 一次性加齐运行时依赖，Phase 1 的三条线不再改 pyproject / uv.lock，避免并行合并冲突
+dependencies = [
+    "scrapy>=2.11",
+    "trafilatura>=2.0",
+    "lxml>=5.0",
+    "markdownify>=0.13",
+    "pyyaml>=6.0",
+    "deepl>=1.18",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+qbkb = "qbkb.cli:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+    "pytest>=8.0",
+    "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qbkb"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests", ".claude/hooks"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = [
+    "network: 需要联网或消耗 API 额度；verify.sh 会跳过",
+]

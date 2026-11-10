@@ -1,0 +1,21 @@
+# 价值筛选规则（design.md 4.4）。Phase 2 实现。
+
+include_categories:
+  - 量化方法论
+  - 基础概念
+  - 行为金融/金融史
+  - 量化相关AI
+exclude_categories:
+  - 宏观周评
+  - ESG/气候
+  - 公司文化/软文
+
+sites:
+  man:
+    exclude_prefixes:
+      - /insights/a-moment-in-macro/
+    min_words: 300
+
+l2:
+  rubric_version: v1
+  threshold: 7
