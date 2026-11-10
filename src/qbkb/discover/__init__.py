@@ -9,12 +9,21 @@ from qbkb.discover.run import (
     apply_entries,
     collect_entries,
     discover_site,
+    http_get,
     make_slug,
+    prefix_matches,
     to_discovered,
 )
-from qbkb.discover.sitemap import Sitemap, SitemapEntry, SitemapError, parse_sitemap
+from qbkb.discover.sitemap import (
+    MAX_SITEMAP_BYTES,
+    Sitemap,
+    SitemapEntry,
+    SitemapError,
+    parse_sitemap,
+)
 
 __all__ = [
+    "MAX_SITEMAP_BYTES",
     "DiscoverRules",
     "DiscoverStats",
     "Sitemap",
@@ -23,7 +32,9 @@ __all__ = [
     "apply_entries",
     "collect_entries",
     "discover_site",
+    "http_get",
     "make_slug",
     "parse_sitemap",
+    "prefix_matches",
     "to_discovered",
 ]

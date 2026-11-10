@@ -7,10 +7,12 @@ from scrapy.exceptions import IgnoreRequest
 from scrapy.http import HtmlResponse, Request, Response, TextResponse
 
 from qbkb import store
-from qbkb.fetch import (
-    Kind,
+from qbkb.fetch.outcome import Kind
+from qbkb.fetch.process import (
+    META_RETRY_AFTER_REFUSED,
     classify_error,
     classify_response,
+    cleanup_stale_tmp,
     conditional_headers,
     detect_challenge,
     process_error,
@@ -180,7 +182,8 @@ def test_fetched_writes_raw_and_status(conn: sqlite3.Connection, tmp_path: Path)
     assert row is not None
     assert row["status"] == Status.FETCHED
     assert row["http_status"] == 200
-    assert row["raw_path"] == path.as_posix()
+    assert row["raw_path"] == path.resolve().as_posix()
+    assert Path(row["raw_path"]).is_absolute()
     assert row["etag"] == '"v1"'
     assert row["error"] is None
 
@@ -277,3 +280,101 @@ def test_no_conditional_header_without_etag(conn: sqlite3.Connection, tmp_path: 
 def test_raw_file_rejects_unsafe_slug(slug: str, tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         raw_file(tmp_path, "example", slug)
+
+
+# ---- Retry-After 超过上限 ----
+
+
+def test_refused_retry_after_is_reported() -> None:
+    url = URL
+    resp = HtmlResponse(
+        url,
+        status=429,
+        body=b"slow down",
+        request=Request(url, meta={META_RETRY_AFTER_REFUSED: 3600.0}),
+    )
+    out = classify_response(resp)
+    assert out.kind == Kind.FAILED
+    assert out.reason is not None
+    assert "Retry-After 3600 秒" in out.reason
+    assert "不重试" in out.reason
+
+
+# ---- 落库出错时兜底 ----
+
+
+def test_disk_error_counts_as_failed(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    blocker = tmp_path / "raw"
+    blocker.write_text("不是目录")  # raw/<site>/ 建不出来 → OSError
+    out = process_response(conn, URL, _resp(), blocker)
+    assert out.kind == Kind.FAILED
+    assert out.reason is not None
+    assert out.reason.startswith("落库失败（")
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert row["status"] == Status.FAILED
+    assert row["error"] == out.reason
+    assert row["http_status"] == 200
+
+
+def test_failed_replace_leaves_no_tmp(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qbkb.fetch.process as process_mod
+
+    def boom(_src: object, _dst: object) -> None:
+        raise PermissionError("文件被占用")
+
+    monkeypatch.setattr(process_mod.os, "replace", boom)
+    out = process_response(conn, URL, _resp(), tmp_path)
+    assert out.kind == Kind.FAILED
+    assert out.reason is not None
+    assert "PermissionError" in out.reason
+    assert list((tmp_path / "example").iterdir()) == []
+
+
+def test_sqlite_error_counts_as_failed(
+    conn: sqlite3.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qbkb.fetch.process as process_mod
+
+    real = process_mod.store.set_status
+    calls: list[str] = []
+
+    def flaky(c: sqlite3.Connection, url: str, status: Status, **fields: object) -> None:
+        calls.append(status)
+        if status == Status.FETCHED:
+            raise sqlite3.OperationalError("database is locked")
+        real(c, url, status, **fields)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(process_mod.store, "set_status", flaky)
+    out = process_response(conn, URL, _resp(), tmp_path)
+    assert out.kind == Kind.FAILED
+    assert out.reason is not None
+    assert "OperationalError" in out.reason
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert row["status"] == Status.FAILED
+
+
+def test_store_completely_broken_still_returns_failed(tmp_path: Path) -> None:
+    c = store.connect(tmp_path / "s.db")
+    store.upsert_discovered(c, DiscoveredUrl(URL, "example", "alpha"))
+    c.close()  # 之后任何 SQL 都抛 sqlite3.ProgrammingError，连兜底记录也写不进去
+    for out in (
+        process_error(c, URL, TimeoutError("t")),
+        process_response(c, URL, _resp(), tmp_path),
+    ):
+        assert out.kind == Kind.FAILED
+        assert out.reason is not None
+        assert out.reason.startswith("落库失败")
+
+
+def test_cleanup_stale_tmp(tmp_path: Path) -> None:
+    site_dir = tmp_path / "example"
+    site_dir.mkdir()
+    (site_dir / "a.html.tmp").write_bytes(b"half")
+    (site_dir / "b.html").write_bytes(b"keep")
+    assert cleanup_stale_tmp(tmp_path, "example") == 1
+    assert [p.name for p in site_dir.iterdir()] == ["b.html"]
+    assert cleanup_stale_tmp(tmp_path, "missing-site") == 0

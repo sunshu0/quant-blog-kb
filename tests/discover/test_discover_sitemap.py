@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from qbkb.discover import SitemapEntry, SitemapError, parse_sitemap
+from qbkb.discover import MAX_SITEMAP_BYTES, SitemapEntry, SitemapError, parse_sitemap
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -72,3 +72,35 @@ def test_entities_are_not_expanded() -> None:
     )
     sm = parse_sitemap(data)
     assert not any(e.loc.startswith("https://evil.test") for e in sm.urls)
+
+
+# ---- 大小上限与损坏的 gzip ----
+
+
+def test_gzip_bomb_is_rejected() -> None:
+    bomb = gzip.compress(b"<urlset>" + b" " * 5000 + b"</urlset>")
+    assert len(bomb) < 1000
+    with pytest.raises(SitemapError, match="解压后超过"):
+        parse_sitemap(bomb, max_bytes=1000)
+
+
+def test_oversized_raw_sitemap_is_rejected() -> None:
+    with pytest.raises(SitemapError, match="超过"):
+        parse_sitemap(b"<urlset>" + b" " * 2000 + b"</urlset>", max_bytes=1000)
+
+
+def test_default_limit_is_50_mb() -> None:
+    assert MAX_SITEMAP_BYTES == 50 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        bytes((0x1F, 0x8B)) + b"garbage-after-magic",  # BadGzipFile
+        gzip.compress(b"<urlset></urlset>")[:-12],  # 截断：EOFError
+        gzip.compress(b"<urlset></urlset>")[:12] + b"corrupt-deflate-stream" * 3,  # zlib.error
+    ],
+)
+def test_corrupt_gzip_raises_sitemap_error(data: bytes) -> None:
+    with pytest.raises(SitemapError, match="gzip"):
+        parse_sitemap(data)

@@ -6,11 +6,10 @@ classify_response 是纯函数，只看响应；process_response 再把结果落
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -18,23 +17,13 @@ from scrapy.exceptions import IgnoreRequest
 from scrapy.http import Response
 
 from qbkb import store
+from qbkb.fetch.outcome import Kind, Outcome
 from qbkb.fetch.settings import RETRY_HTTP_CODES
 from qbkb.models import FetchResult, Status
 
-
-class Kind(StrEnum):
-    FETCHED = "fetched"
-    NOT_MODIFIED = "not_modified"
-    PDF = "pdf"
-    FAILED = "failed"
-
-
-@dataclass(frozen=True, slots=True)
-class Outcome:
-    kind: Kind
-    http_status: int | None
-    reason: str | None = None
-    etag: str | None = None
+# 重试中间件拒绝照 Retry-After 等待时，把服务器要求的秒数写在 request.meta 的这个键里
+META_RETRY_AFTER_REFUSED = "qbkb_retry_after_refused"
+TMP_SUFFIX = ".tmp"
 
 
 # 人机验证/反爬页面的特征。200 页面只认强特征（cf-mitigated 头、小页面的标题）：
@@ -119,6 +108,13 @@ def classify_response(response: Response) -> Outcome:
         return Outcome(Kind.FAILED, status, f"HTTP {status}：拒绝访问，不绕过")
     if status in (404, 410):
         return Outcome(Kind.FAILED, status, f"HTTP {status}：页面不存在")
+    refused = response.request.meta.get(META_RETRY_AFTER_REFUSED) if response.request else None
+    if refused is not None:
+        reason = (
+            f"HTTP {status}：服务器要求 Retry-After {refused:.0f} 秒，"
+            "超过上限，不重试并停止本次抓取"
+        )
+        return Outcome(Kind.FAILED, status, reason)
     if status in RETRY_HTTP_CODES:
         n = _retry_times(response)
         return Outcome(Kind.FAILED, status, f"HTTP {status}：重试 {n} 次后仍失败")
@@ -162,16 +158,38 @@ def conditional_headers(row: sqlite3.Row) -> dict[str, str]:
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
+    """先写 <name>.tmp 再原子替换；中途出错就删掉 .tmp，不留半截文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    tmp = path.with_name(path.name + TMP_SUFFIX)
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def cleanup_stale_tmp(raw_dir: Path, site: str) -> int:
+    """删掉上次被强行中断时留下的 raw/<site>/*.html.tmp，返回删了几个。"""
+    site_dir = raw_dir / site
+    if not site_dir.is_dir():
+        return 0
+    removed = 0
+    for tmp in site_dir.glob("*.html" + TMP_SUFFIX):
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+            removed += 1
+    return removed
 
 
 def apply_outcome(
     conn: sqlite3.Connection, url: str, outcome: Outcome, body: bytes, raw_dir: Path
 ) -> FetchResult:
-    """把结果落到状态库（和 raw/）。304 不改任何东西。"""
+    """把结果落到状态库（和 raw/）。304 不改任何东西。
+
+    raw_path 存绝对路径（posix 形式），读的一方不依赖当前目录。
+    """
     row = store.get_article(conn, url)
     if row is None:
         raise KeyError(url)
@@ -179,7 +197,7 @@ def apply_outcome(
         case Kind.NOT_MODIFIED:
             return FetchResult(url, outcome.http_status or 304, row["raw_path"], row["etag"], True)
         case Kind.FETCHED:
-            path = raw_file(raw_dir, str(row["site"]), str(row["slug"]))
+            path = raw_file(raw_dir.resolve(), str(row["site"]), str(row["slug"]))
             _write_atomic(path, body)
             store.set_status(
                 conn,
@@ -202,12 +220,32 @@ def apply_outcome(
             return FetchResult(url, outcome.http_status or 0, None)
 
 
+# 落库时可能遇到的异常：写盘（OSError）、状态库（sqlite3.Error）、不安全的 slug（ValueError）
+_STORE_ERRORS = (OSError, sqlite3.Error, ValueError)
+
+
+def _record_store_error(
+    conn: sqlite3.Connection, url: str, exc: BaseException, http_status: int | None
+) -> Outcome:
+    """落库本身失败时的兜底：尽量把失败记进状态库；状态库也写不进去就只返回结果（由调用方记日志）。"""
+    outcome = Outcome(Kind.FAILED, http_status, f"落库失败（{type(exc).__name__}: {exc}）")
+    with contextlib.suppress(sqlite3.Error):
+        apply_outcome(conn, url, outcome, b"", Path())
+    return outcome
+
+
 def process_response(
     conn: sqlite3.Connection, url: str, response: Response, raw_dir: Path
 ) -> Outcome:
-    """爬虫回调用：分类 + 落库。url 是状态库里的原始 URL（重定向后 response.url 可能不同）。"""
+    """爬虫回调用：分类 + 落库。url 是状态库里的原始 URL（重定向后 response.url 可能不同）。
+
+    写盘或状态库出错不会抛出去打断爬虫，而是计为 failed（原因写明是落库失败）。
+    """
     outcome = classify_response(response)
-    apply_outcome(conn, url, outcome, response.body, raw_dir)
+    try:
+        apply_outcome(conn, url, outcome, response.body, raw_dir)
+    except _STORE_ERRORS as e:
+        return _record_store_error(conn, url, e, outcome.http_status)
     return outcome
 
 
@@ -215,5 +253,8 @@ def process_error(
     conn: sqlite3.Connection, url: str, exc: BaseException, retry_times: int = 0
 ) -> Outcome:
     outcome = classify_error(exc, retry_times)
-    apply_outcome(conn, url, outcome, b"", raw_dir=Path())
+    try:
+        apply_outcome(conn, url, outcome, b"", raw_dir=Path())
+    except _STORE_ERRORS as e:
+        return _record_store_error(conn, url, e, None)
     return outcome

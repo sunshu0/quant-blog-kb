@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import gzip
+import io
+import zlib
 from dataclasses import dataclass, field
 
 # lxml 没有自带类型存根（lxml-stubs 不在冻结的依赖里），pyright 看不到 etree
@@ -10,11 +12,13 @@ from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
 
 # 关掉实体解析和网络访问，防 XXE；huge_tree 保持默认关闭，防超大文档。
 _PARSER = etree.XMLParser(resolve_entities=False, no_network=True, remove_comments=True)
-_GZIP_MAGIC = b"\x1f\x8b"
+_GZIP_MAGIC = bytes((0x1F, 0x8B))
+# 单份 sitemap 的上限（下载的字节、解压后的字节都算）。规范要求未压缩不超过 50 MB。
+MAX_SITEMAP_BYTES = 50 * 1024 * 1024
 
 
 class SitemapError(ValueError):
-    """sitemap 不是合法的 XML，或者根元素既不是 urlset 也不是 sitemapindex。"""
+    """sitemap 无法使用：不是合法的 XML / gzip、根元素不对、超过大小上限、重定向到外站等。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,10 +48,24 @@ def _child_text(el: etree._Element, name: str) -> str | None:
     return None
 
 
-def parse_sitemap(data: bytes) -> Sitemap:
-    """解析 urlset 或 sitemapindex。.xml.gz（gzip 压缩的原始文件）自动解压。"""
+def _gunzip(data: bytes, max_bytes: int) -> bytes:
+    """有上限地解压（防 gzip 炸弹）；损坏的 gzip 统一报 SitemapError。"""
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as f:
+            out = f.read(max_bytes + 1)
+    except (EOFError, OSError, zlib.error) as e:  # gzip.BadGzipFile 是 OSError 的子类
+        raise SitemapError(f"gzip 已损坏: {e}") from e
+    if len(out) > max_bytes:
+        raise SitemapError(f"sitemap 解压后超过 {max_bytes} 字节")
+    return out
+
+
+def parse_sitemap(data: bytes, max_bytes: int = MAX_SITEMAP_BYTES) -> Sitemap:
+    """解析 urlset 或 sitemapindex。.xml.gz（gzip 压缩的原始文件）有上限地自动解压。"""
+    if len(data) > max_bytes:
+        raise SitemapError(f"sitemap 超过 {max_bytes} 字节")
     if data[:2] == _GZIP_MAGIC:
-        data = gzip.decompress(data)
+        data = _gunzip(data, max_bytes)
     try:
         root = etree.fromstring(data, _PARSER)
     except etree.XMLSyntaxError as e:
