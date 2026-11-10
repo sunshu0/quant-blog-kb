@@ -1,0 +1,10 @@
+# L3 人工覆盖（design.md 4.4）：优先级最高，压过 L1 规则和 L2 打分。
+# 只影响还没翻译的文章（extracted / filtered / skipped）；每次跑 filter 都会重新套用。
+#
+# 写法（URL 要和状态库里的一致，即 sitemap 里的地址）：
+#   https://www.man.com/insights/xxx: include
+#   https://www.man.com/insights/yyy:
+#     decision: exclude          # include | exclude
+#     category: 量化方法论        # 可选，index.md 按它分组；不写就沿用 L2 打分的类别
+#     note: 宏观但讲了历史规律     # 可选，写进 score_reason
+overrides: {}

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import html
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from qbkb import store
-from qbkb.models import QuotaExceededError, Segment, Status, Translator
+from qbkb.models import QuotaExceededError, Segment, Status, Translator, segment_hash
 from qbkb.translate.base import (
     MAX_REQUEST_CHARS,
     MAX_TEXTS_PER_REQUEST,
@@ -59,6 +60,53 @@ class BackendStopped(TranslationStopped):
 def needs_review(row: sqlite3.Row) -> bool:
     """文章是否在等人工复查（区别于真正的失败）。"""
     return row["status"] == Status.NEEDS_REVIEW
+
+
+def title_unit(title: str) -> str:
+    """标题作为一个额外的翻译单元：包成一个 <p>，和正文段落一样走翻译记忆。"""
+    return f"<p>{html.escape(' '.join(title.split()), quote=False)}</p>"
+
+
+def lookup_translation(
+    conn: sqlite3.Connection, src_html: str, backend: str, glossary: Glossary
+) -> str | None:
+    """按 translate 的规则查一段的合格译文（backend + 这段的术语版本）。export 也用它。"""
+    return store.tm_get(conn, segment_hash(src_html), backend, glossary.version_for(src_html))
+
+
+def translated_title(
+    conn: sqlite3.Connection, title: str | None, backend: str, glossary: Glossary
+) -> str | None:
+    """标题的中文（纯文本）；翻译记忆里没有就返回 None。"""
+    if not title or not title.strip():
+        return None
+    tgt = lookup_translation(conn, title_unit(title), backend, glossary)
+    if tgt is None:
+        return None
+    return plain_text(tgt) or None
+
+
+def _translate_title(
+    conn: sqlite3.Connection,
+    title: str | None,
+    translator: Translator,
+    glossary: Glossary,
+    context: str,
+    stats: TranslateStats,
+) -> str | None:
+    """翻译标题（命中翻译记忆就不花额度）。结构校验没过就放弃标题、不影响正文。"""
+    if not title or not title.strip():
+        return None
+    unit = title_unit(title)
+    found = translated_title(conn, title, translator.name, glossary)
+    if found is not None:
+        return found
+    (tgt,) = _call(translator, [unit], glossary, context)
+    stats.chars += len(unit)
+    if not same_structure(unit, tgt):
+        return None
+    store.tm_put(conn, segment_hash(unit), translator.name, unit, tgt, glossary.version_for(unit))
+    return plain_text(tgt) or None
 
 
 def _call(translator: Translator, texts: list[str], glossary: Glossary, context: str) -> list[str]:
@@ -113,6 +161,8 @@ def translate_article(
       error 列写明是哪些段落，等人工复查。
     - 额度用完抛 QuotaStopped，后端重试用尽抛 BackendStopped（都是 TranslationStopped，
       带 stats），文章状态不变。
+    - 标题（articles.title）作为额外的一个翻译单元（title_unit）在正文之后翻译，同样走
+      翻译记忆，结果写进 title_zh；标题结构校验没过只是 title_zh 留空，不影响文章状态。
     """
     segments = store.get_segments(conn, url)
     if not segments:
@@ -192,6 +242,10 @@ def translate_article(
                         quality=store.TM_REJECTED,
                     )
                     rejected.add(seg.src_hash)
+        row = store.get_article(conn, url)
+        title = None if row is None else row["title"]
+        context = plain_text(segments[0].html)[:context_chars] if context_chars > 0 else ""
+        title_zh = _translate_title(conn, title, translator, glossary, context, stats)
     except QuotaExceededError as e:
         finish_lists()
         raise QuotaStopped(stats, f"额度用完（{e}）") from e
@@ -212,11 +266,23 @@ def translate_article(
             )
         error = "；".join(parts)
         store.set_status(
-            conn, url, Status.NEEDS_REVIEW, translator=backend, translated_at=now, error=error
+            conn,
+            url,
+            Status.NEEDS_REVIEW,
+            translator=backend,
+            translated_at=now,
+            title_zh=title_zh,
+            error=error,
         )
     else:
         store.set_status(
-            conn, url, Status.TRANSLATED, translator=backend, translated_at=now, error=None
+            conn,
+            url,
+            Status.TRANSLATED,
+            translator=backend,
+            translated_at=now,
+            title_zh=title_zh,
+            error=None,
         )
     return stats
 
@@ -242,7 +308,7 @@ def estimate_chars(
     return sum(
         len(seg.html)
         for seg in _unique_segments(conn, urls)
-        if store.tm_get(conn, seg.src_hash, backend, glossary.version_for(seg.html)) is None
+        if lookup_translation(conn, seg.html, backend, glossary) is None
     )
 
 

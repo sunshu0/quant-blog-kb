@@ -116,7 +116,16 @@ class Translator(Protocol):
 
 
 class Scorer(Protocol):
-    """可插拔打分后端（便宜的 LLM API、假后端……）。"""
+    """可插拔打分后端（便宜的 LLM API、假后端……）。
+
+    version 是打分结果的版本标识（评分标准版本 + 后端，例如 "v1@deepseek:deepseek-chat"），
+    写进 articles.rubric_version，也就是 score() 返回的 Score.rubric_version。
+    正文没变（body_hash == scored_body_hash）且 version 相同时，filter 复用旧打分、不再调用后端。
+    额度用完抛 QuotaExceededError。
+    """
+
+    @property
+    def version(self) -> str: ...
 
     def score(self, title: str, excerpt: str) -> Score: ...
 

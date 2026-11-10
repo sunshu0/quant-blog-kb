@@ -1,4 +1,6 @@
-# 价值筛选规则（design.md 4.4）。Phase 2 实现。
+# 价值筛选规则（design.md 4.4）。
+# L1 规则在 sites 下按站点写；L2 打分的提示词在 config/rubrics/<rubric_version>.md；
+# L3 人工覆盖在 config/overrides.yaml；评测集在 config/eval/<site>.yaml。
 
 include_categories:
   - 量化方法论
@@ -14,8 +16,16 @@ sites:
   man:
     exclude_prefixes:
       - /insights/a-moment-in-macro/
+    # 只数正文（不含文末的版权声明和重要信息）的英文单词
     min_words: 300
 
 l2:
+  # 选用哪份评分标准（config/rubrics/v1.md）。改版本号 = 所有文章重新打分
   rubric_version: v1
+  # 分数 ≥ threshold 且类别在 include_categories 里才收
   threshold: 7
+  # 只给 LLM 看标题和正文前这么多个单词
+  excerpt_words: 500
+  # OpenAI 兼容接口（默认 DeepSeek）。环境变量 LLM_BASE_URL / LLM_MODEL 优先；key 是 .env 的 LLM_API_KEY
+  base_url: https://api.deepseek.com
+  model: deepseek-chat

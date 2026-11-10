@@ -12,6 +12,8 @@ compliance:
   decision: allowed
 
 base_url: https://www.man.com
+# 输出 frontmatter 的 firm 字段和来源说明里用的机构名
+firm: Man Group
 
 discover:
   sitemap: https://www.man.com/sitemap.xml

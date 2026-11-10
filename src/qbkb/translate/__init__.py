@@ -17,8 +17,11 @@ from qbkb.translate.pipeline import (
     TranslationStopped,
     estimate_chars,
     glossary_upgrade_cost,
+    lookup_translation,
     needs_review,
+    title_unit,
     translate_article,
+    translated_title,
 )
 from qbkb.translate.structure import same_structure
 
@@ -38,7 +41,10 @@ __all__ = [
     "estimate_chars",
     "glossary_upgrade_cost",
     "load_glossary",
+    "lookup_translation",
     "needs_review",
     "same_structure",
+    "title_unit",
     "translate_article",
+    "translated_title",
 ]
