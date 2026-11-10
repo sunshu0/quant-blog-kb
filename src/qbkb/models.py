@@ -22,6 +22,7 @@ class Status(StrEnum):
     FILTERED = "filtered"
     SKIPPED = "skipped"
     TRANSLATED = "translated"
+    NEEDS_REVIEW = "needs_review"  # 翻译有问题（结构校验没过、段落超长），等人工复查
     PUBLISHED = "published"
     FAILED = "failed"
     PDF_PENDING = "pdf_pending"
@@ -102,12 +103,16 @@ class Translator(Protocol):
     """可插拔翻译后端（DeepL、Azure、假后端……）。
 
     输入输出都是 HTML 片段，长度和顺序一一对应。
+    context 是只作参考、不翻译的上下文（纯文本，比如前后段落）；不支持的后端忽略它。
+    name 用作翻译记忆的 backend 键，应包含目标语言（例如 "deepl:ZH-HANS"）。
     """
 
     @property
     def name(self) -> str: ...
 
-    def translate(self, segments: Sequence[str], glossary: Mapping[str, str]) -> list[str]: ...
+    def translate(
+        self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
+    ) -> list[str]: ...
 
 
 class Scorer(Protocol):

@@ -17,9 +17,6 @@ from qbkb.models import Status
 
 log = logging.getLogger(__name__)
 
-# 质检问题写进 articles.error，前缀用来和真正的失败区分（文章状态仍是 extracted）。
-# 以后 schema 加了 qc_issues 列就改写到那里（PR #5 的共享需求）。
-QC_PREFIX = "质检："
 # 抽取阶段失败时 error 的前缀；retry_failed 只捞这一类，不碰 fetch 等阶段的失败
 FAIL_PREFIX = "extract: "
 
@@ -61,7 +58,9 @@ def extract_one(
         author=art.meta.author,
         published=art.meta.published,
         tags=json.dumps(list(art.meta.tags), ensure_ascii=False),
-        error=QC_PREFIX + "；".join(issues) if issues else None,
+        # 质检问题单独一列（JSON 数组），不和 fetch / translate 的失败原因混在 error 里
+        qc_issues=json.dumps(issues, ensure_ascii=False) if issues else None,
+        error=None,
     )
     return issues
 

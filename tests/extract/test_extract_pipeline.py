@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from qbkb import config, store
-from qbkb.extract import FAIL_PREFIX, QC_PREFIX, extract, load_rules, run
+from qbkb.extract import FAIL_PREFIX, extract, load_rules, run
 from qbkb.models import DiscoveredUrl, Status
 
 GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "man"
@@ -64,13 +64,15 @@ def test_run_extracts_and_records(conn: sqlite3.Connection, tmp_path: Path) -> N
     assert row["published"] == "2024-05-07"
     assert json.loads(row["tags"]) == ["ARTICLE"]
     assert row["error"] is None
+    assert row["qc_issues"] is None
     assert store.get_segments(conn, GOOD_URL) == list(expected.segments)
 
     short = store.get_article(conn, SHORT_URL)
     assert short is not None
     assert short["status"] == Status.EXTRACTED
-    assert short["error"].startswith(QC_PREFIX)
-    assert "正文太短" in short["error"]
+    assert short["error"] is None
+    issues = json.loads(short["qc_issues"])
+    assert any("正文太短" in i for i in issues)
 
     for url, reason in [(MISSING_URL, "FileNotFoundError"), (EMPTY_URL, "ExtractError")]:
         bad = store.get_article(conn, url)

@@ -19,3 +19,4 @@ class Outcome:
     http_status: int | None
     reason: str | None = None
     etag: str | None = None
+    last_modified: str | None = None

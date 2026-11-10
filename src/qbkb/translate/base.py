@@ -1,9 +1,8 @@
-"""翻译后端的公共部分：上下文协议、请求大小上限、异常、分批、字符计数。"""
+"""翻译后端的公共部分：请求大小上限、异常、分批、字符计数。"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Protocol, runtime_checkable
+from collections.abc import Sequence
 
 # DeepL API Free 每月额度（字符）
 FREE_MONTHLY_CHARS = 500_000
@@ -19,18 +18,6 @@ class TranslatorUnavailableError(RuntimeError):
 
 class SegmentTooLargeError(ValueError):
     """单个段落超过单次请求上限，没法送出去。"""
-
-
-@runtime_checkable
-class SupportsContext(Protocol):
-    """可以接收参考上下文的后端（models.Translator 的扩展，不改共享协议）。
-
-    context 是前后文的纯文本，只作参考，不翻译；DeepL 不对 context 计费。
-    """
-
-    def translate_with_context(
-        self, segments: Sequence[str], glossary: Mapping[str, str], context: str
-    ) -> list[str]: ...
 
 
 def count_chars(texts: Sequence[str]) -> int:

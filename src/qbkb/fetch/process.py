@@ -128,7 +128,12 @@ def classify_response(response: Response) -> Outcome:
         return Outcome(Kind.FAILED, status, f"内容类型 {ctype} 不是 HTML")
     if not body.strip():
         return Outcome(Kind.FAILED, status, "空响应")
-    return Outcome(Kind.FETCHED, status, etag=_header(response, "ETag"))
+    return Outcome(
+        Kind.FETCHED,
+        status,
+        etag=_header(response, "ETag"),
+        last_modified=_header(response, "Last-Modified"),
+    )
 
 
 def classify_error(exc: BaseException, retry_times: int = 0) -> Outcome:
@@ -150,11 +155,20 @@ def raw_file(raw_dir: Path, site: str, slug: str) -> Path:
 
 
 def conditional_headers(row: sqlite3.Row) -> dict[str, str]:
-    """有 etag 且本地原文还在时才发 If-None-Match；原文丢了就完整重抓，304 会让我们无内容可用。"""
-    etag, raw_path = row["etag"], row["raw_path"]
-    if etag and raw_path and Path(raw_path).is_file():
-        return {"If-None-Match": str(etag)}
-    return {}
+    """本地原文还在时才发条件请求；原文丢了就完整重抓，304 会让我们无内容可用。
+
+    有 etag 发 If-None-Match，有 Last-Modified 发 If-Modified-Since（man.com 不给 etag，
+    只能靠后者）。两个都有时一起发，服务器按 RFC 9110 优先看 If-None-Match。
+    """
+    raw_path = row["raw_path"]
+    if not (raw_path and Path(raw_path).is_file()):
+        return {}
+    headers: dict[str, str] = {}
+    if row["etag"]:
+        headers["If-None-Match"] = str(row["etag"])
+    if row["last_modified"]:
+        headers["If-Modified-Since"] = str(row["last_modified"])
+    return headers
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
@@ -206,6 +220,7 @@ def apply_outcome(
                 http_status=outcome.http_status,
                 raw_path=path.as_posix(),
                 etag=outcome.etag,
+                last_modified=outcome.last_modified,
                 error=None,
             )
             return FetchResult(url, outcome.http_status or 200, path.as_posix(), outcome.etag)
@@ -215,8 +230,9 @@ def apply_outcome(
             )
             return FetchResult(url, outcome.http_status or 0, None)
         case Kind.FAILED:
-            store.set_status(conn, url, Status.FAILED, http_status=outcome.http_status)
-            store.record_failure(conn, url, outcome.reason or "未知错误")
+            store.record_failure(
+                conn, url, outcome.reason or "未知错误", http_status=outcome.http_status
+            )
             return FetchResult(url, outcome.http_status or 0, None)
 
 

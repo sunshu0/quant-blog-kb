@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from qbkb.models import DiscoveredUrl, Segment, Status
 
@@ -19,6 +22,7 @@ UPDATABLE_COLUMNS = frozenset(
     {
         "lastmod",
         "etag",
+        "last_modified",
         "http_status",
         "raw_path",
         "body_hash",
@@ -36,12 +40,39 @@ UPDATABLE_COLUMNS = frozenset(
         "translator",
         "translated_at",
         "md_path",
+        "qc_issues",
         "error",
         "retries",
     }
 )
 
+# 老库升级：CREATE TABLE IF NOT EXISTS 不会给已有的表加列，这里补上。
+# (表, 列, 类型定义)。只加列，不删不改，所以可以反复执行。
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("articles", "last_modified", "TEXT"),
+    ("articles", "qc_issues", "TEXT"),
+    ("translation_memory", "quality", "TEXT NOT NULL DEFAULT 'ok'"),
+)
+# PR #3 时期用 backend 名加这个后缀隔离坏译文；升级时改成 quality = 'rejected'。
+_LEGACY_REJECTED_SUFFIX = "#rejected"
+
+
+class _Keep(Enum):
+    """record_failure 的哨兵：区分"没传 http_status"和"传了 None"。"""
+
+    KEEP = 0
+
+
+TM_OK = "ok"
+TM_REJECTED = "rejected"
+
 type Value = str | int | float | None
+
+
+@dataclass(frozen=True, slots=True)
+class TmEntry:
+    tgt_html: str
+    quality: str
 
 
 def _now() -> str:
@@ -54,7 +85,26 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    with conn:
+        for table, column, decl in _ADDED_COLUMNS:
+            existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                # 表名、列名来自上面的常量，不是外部输入
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        pattern = "%" + _LEGACY_REJECTED_SUFFIX
+        conn.execute(
+            "INSERT OR IGNORE INTO translation_memory"
+            " (src_hash, backend, src_html, tgt_html, glossary_version, quality, created_at)"
+            " SELECT src_hash, substr(backend, 1, length(backend) - ?), src_html, tgt_html,"
+            " glossary_version, ?, created_at FROM translation_memory WHERE backend LIKE ?",
+            (len(_LEGACY_REJECTED_SUFFIX), TM_REJECTED, pattern),
+        )
+        conn.execute("DELETE FROM translation_memory WHERE backend LIKE ?", (pattern,))
 
 
 def upsert_discovered(conn: sqlite3.Connection, d: DiscoveredUrl) -> bool:
@@ -63,7 +113,7 @@ def upsert_discovered(conn: sqlite3.Connection, d: DiscoveredUrl) -> bool:
     返回 True 表示需要（重新）处理：URL 是新的，或者 lastmod 变了。
 
     lastmod 变了的文章退回 discovered 状态完整重抓：
-    - 清掉 etag，避免条件请求拿到 304 却已经丢了原来的流程位置；
+    - 清掉 etag、last_modified，避免条件请求拿到 304 却已经丢了原来的流程位置；
     - 清掉 error、retries，原文更新后给失败过的文章一次新机会。
     value_score、scored_body_hash 等保留：重新抽取会覆盖 body_hash，filter 比较
     body_hash 与 scored_body_hash，相同就复用打分，不重复花 LLM 额度；
@@ -83,7 +133,8 @@ def upsert_discovered(conn: sqlite3.Connection, d: DiscoveredUrl) -> bool:
         if d.lastmod is None:
             return False
         cur = conn.execute(
-            "UPDATE articles SET lastmod = ?, status = ?, etag = NULL, error = NULL,"
+            "UPDATE articles SET lastmod = ?, status = ?, etag = NULL, last_modified = NULL,"
+            " error = NULL,"
             " retries = 0, updated_at = ? WHERE url = ? AND lastmod IS NOT ?",
             (d.lastmod, Status.DISCOVERED.value, now, d.url, d.lastmod),
         )
@@ -125,13 +176,32 @@ def set_status(conn: sqlite3.Connection, url: str, status: Status, **fields: Val
         raise KeyError(url)
 
 
-def record_failure(conn: sqlite3.Connection, url: str, error: str) -> int:
-    """标记失败并累加重试次数，返回新的重试次数。"""
+def record_failure(
+    conn: sqlite3.Connection,
+    url: str,
+    error: str,
+    *,
+    http_status: int | None | Literal[_Keep.KEEP] = _Keep.KEEP,
+) -> int:
+    """标记失败并累加重试次数，返回新的重试次数。
+
+    传了 http_status（包括 None，表示没拿到响应）就在同一个事务里一并写入，
+    fetch 不用先 set_status 一次；不传则保留原值（extract、translate 的失败）。
+    """
+    update_status = http_status is not _Keep.KEEP
     with conn:
         row = conn.execute(
-            "UPDATE articles SET status = ?, error = ?, retries = retries + 1, updated_at = ?"
+            "UPDATE articles SET status = ?, error = ?, retries = retries + 1, updated_at = ?,"
+            " http_status = CASE WHEN ? THEN ? ELSE http_status END"
             " WHERE url = ? RETURNING retries",
-            (Status.FAILED.value, error, _now(), url),
+            (
+                Status.FAILED.value,
+                error,
+                _now(),
+                update_status,
+                None if http_status is _Keep.KEEP else http_status,
+                url,
+            ),
         ).fetchone()
     if row is None:
         raise KeyError(url)
@@ -161,19 +231,28 @@ def get_segment_hashes(conn: sqlite3.Connection, url: str) -> list[str]:
     return [r["src_hash"] for r in rows]
 
 
-def tm_get(
+def tm_lookup(
     conn: sqlite3.Connection, src_hash: str, backend: str, glossary_version: str | None
-) -> str | None:
-    """查翻译记忆。命中就返回译文，不用再花额度。
-
-    术语表版本不同视为未命中：术语表升级后，旧译文可能用的是旧译名。
-    """
+) -> TmEntry | None:
+    """查翻译记忆，连同质量标记一起返回（包括 rejected 的）。"""
     row = conn.execute(
-        "SELECT tgt_html FROM translation_memory"
+        "SELECT tgt_html, quality FROM translation_memory"
         " WHERE src_hash = ? AND backend = ? AND glossary_version IS ?",
         (src_hash, backend, glossary_version),
     ).fetchone()
-    return None if row is None else str(row["tgt_html"])
+    return None if row is None else TmEntry(str(row["tgt_html"]), str(row["quality"]))
+
+
+def tm_get(
+    conn: sqlite3.Connection, src_hash: str, backend: str, glossary_version: str | None
+) -> str | None:
+    """查翻译记忆。命中合格（quality = ok）的译文就返回，不用再花额度。
+
+    术语表版本不同视为未命中：术语表升级后，旧译文可能用的是旧译名。
+    rejected 的译文不返回，避免被当成正常译文复用。
+    """
+    entry = tm_lookup(conn, src_hash, backend, glossary_version)
+    return entry.tgt_html if entry is not None and entry.quality == TM_OK else None
 
 
 def tm_put(
@@ -183,15 +262,20 @@ def tm_put(
     src_html: str,
     tgt_html: str,
     glossary_version: str | None = None,
+    *,
+    quality: str = TM_OK,
 ) -> None:
+    if quality not in (TM_OK, TM_REJECTED):
+        raise ValueError(f"quality 必须是 {TM_OK!r} 或 {TM_REJECTED!r}")
     with conn:
         conn.execute(
             "INSERT INTO translation_memory"
-            " (src_hash, backend, src_html, tgt_html, glossary_version, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)"
+            " (src_hash, backend, src_html, tgt_html, glossary_version, quality, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT (src_hash, backend) DO UPDATE SET"
             " tgt_html = excluded.tgt_html,"
             " glossary_version = excluded.glossary_version,"
+            " quality = excluded.quality,"
             " created_at = excluded.created_at",
-            (src_hash, backend, src_html, tgt_html, glossary_version, _now()),
+            (src_hash, backend, src_html, tgt_html, glossary_version, quality, _now()),
         )
