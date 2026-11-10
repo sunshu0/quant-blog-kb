@@ -8,7 +8,7 @@ import zlib
 from dataclasses import dataclass, field
 
 # lxml 没有自带类型存根（lxml-stubs 不在冻结的依赖里），pyright 看不到 etree
-from lxml import etree  # pyright: ignore[reportAttributeAccessIssue]
+from lxml import etree
 
 # 关掉实体解析和网络访问，防 XXE；huge_tree 保持默认关闭，防超大文档。
 _PARSER = etree.XMLParser(resolve_entities=False, no_network=True, remove_comments=True)

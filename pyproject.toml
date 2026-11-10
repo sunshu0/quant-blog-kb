@@ -25,6 +25,7 @@ dev = [
     "pyright>=1.1.390",
     "pytest>=8.0",
     "types-pyyaml>=6.0",
+    "lxml-stubs>=0.5.1",
 ]
 
 [build-system]
@@ -43,6 +44,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.pyright]
 include = ["src", "tests", ".claude/hooks"]
+exclude = ["tests/local_samples", "**/.venv", "**/__pycache__"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
 venvPath = "."

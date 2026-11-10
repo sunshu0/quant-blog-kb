@@ -12,7 +12,6 @@ from qbkb.models import QuotaExceededError, Segment, Status, Translator
 from qbkb.translate.base import (
     MAX_REQUEST_CHARS,
     MAX_TEXTS_PER_REQUEST,
-    SupportsContext,
     TranslatorUnavailableError,
     chunk_texts,
     count_chars,
@@ -22,10 +21,6 @@ from qbkb.translate.structure import plain_text, same_structure
 
 # 一批请求的 context 总长上限（字符）。DeepL 不对 context 计费，但它占请求体。
 CONTEXT_CHARS = 1_200
-# 结构校验两次都没过的译文存在这个后缀的 backend 键下（隔离区），正常查询永远不会命中它。
-REJECTED_SUFFIX = "#rejected"
-# 需要人工复查的文章：status=failed，error 以这个前缀开头。
-REVIEW_PREFIX = "需人工复查："
 
 
 @dataclass(slots=True)
@@ -63,19 +58,11 @@ class BackendStopped(TranslationStopped):
 
 def needs_review(row: sqlite3.Row) -> bool:
     """文章是否在等人工复查（区别于真正的失败）。"""
-    error = row["error"]
-    return (
-        row["status"] == Status.FAILED
-        and isinstance(error, str)
-        and error.startswith(REVIEW_PREFIX)
-    )
+    return row["status"] == Status.NEEDS_REVIEW
 
 
 def _call(translator: Translator, texts: list[str], glossary: Glossary, context: str) -> list[str]:
-    if context and isinstance(translator, SupportsContext):
-        out = translator.translate_with_context(texts, glossary, context)
-    else:
-        out = translator.translate(texts, glossary)
+    out = translator.translate(texts, glossary, context)
     if len(out) != len(texts):
         raise RuntimeError(f"{translator.name} 返回 {len(out)} 条译文，送出 {len(texts)} 条")
     return out
@@ -119,11 +106,11 @@ def translate_article(
       未命中的段落不管是否相邻都合进同一批（每批不超过 max_batch_chars 和 50 条）。
     - 每批翻完，通过结构校验的段落立刻写进翻译记忆。没通过的单独再翻一次，
       而且不带 context（同样的输入大概率得到同样的结果）。
-    - 还是没通过：译文存进隔离区（backend 加 "#rejected"），不会被当成正常译文复用；
+    - 还是没通过：译文以 quality = rejected 存进翻译记忆，tm_get 不会返回它；
       以后的运行也不再自动重翻它（不会每次都花额度），除非 retry_rejected=True。
     - 单段超过 max_batch_chars 的不送出，记为 oversized，其余段落照常翻。
-    - 结果：全部通过 → translated；有 rejected / oversized → failed，error 以 REVIEW_PREFIX
-      开头（needs_review() 可以判断），等人工复查。
+    - 结果：全部通过 → translated；有 rejected / oversized → needs_review，
+      error 列写明是哪些段落，等人工复查。
     - 额度用完抛 QuotaStopped，后端重试用尽抛 BackendStopped（都是 TranslationStopped，
       带 stats），文章状态不变。
     """
@@ -131,7 +118,6 @@ def translate_article(
     if not segments:
         raise ValueError(f"{url} 没有段落，先跑 extract")
     backend = translator.name
-    quarantine = backend + REJECTED_SUFFIX
     stats = TranslateStats(url=url, segments=len(segments))
 
     rejected: set[str] = set()
@@ -146,14 +132,17 @@ def translate_article(
             continue
         seen.add(h)
         version = versions[pos] = glossary.version_for(seg.html)
-        hit = store.tm_get(conn, h, backend, version)
-        if hit is not None and same_structure(seg.html, hit):
+        entry = store.tm_lookup(conn, h, backend, version)
+        if (
+            entry is not None
+            and entry.quality == store.TM_OK
+            and same_structure(seg.html, entry.tgt_html)
+        ):
             stats.tm_hits += 1
             continue
-        if not retry_rejected and (
-            hit is not None or store.tm_get(conn, h, quarantine, version) is not None
-        ):
-            # 以前就没通过校验：不自动重翻，继续等人工复查
+        if not retry_rejected and entry is not None:
+            # 以前就没通过校验（rejected，或合格译文按现在的校验规则不过）：
+            # 不自动重翻，继续等人工复查
             rejected.add(h)
             continue
         if len(seg.html) > max_batch_chars:
@@ -193,7 +182,15 @@ def translate_article(
                 if same_structure(seg.html, tgt):
                     save(pos, tgt)
                 else:
-                    store.tm_put(conn, seg.src_hash, quarantine, seg.html, tgt, versions[pos])
+                    store.tm_put(
+                        conn,
+                        seg.src_hash,
+                        backend,
+                        seg.html,
+                        tgt,
+                        versions[pos],
+                        quality=store.TM_REJECTED,
+                    )
                     rejected.add(seg.src_hash)
     except QuotaExceededError as e:
         finish_lists()
@@ -213,9 +210,9 @@ def translate_article(
                 f"超过单次请求上限（{max_batch_chars} 字符）的段落 "
                 + ", ".join(map(str, stats.oversized))
             )
-        error = REVIEW_PREFIX + "；".join(parts)
+        error = "；".join(parts)
         store.set_status(
-            conn, url, Status.FAILED, translator=backend, translated_at=now, error=error
+            conn, url, Status.NEEDS_REVIEW, translator=backend, translated_at=now, error=error
         )
     else:
         store.set_status(

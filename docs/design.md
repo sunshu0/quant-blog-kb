@@ -144,9 +144,11 @@ compliance:
 
 表结构以 [`src/qbkb/store/schema.sql`](../src/qbkb/store/schema.sql) 为准，这里只写要点：
 
-- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、http_status、raw_path）、正文 hash、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、输出路径、失败原因和重试次数。
+- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、last_modified、http_status、raw_path 绝对路径）、正文 hash、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、抽取质检问题（qc_issues，JSON 数组，和失败原因 error 分开）、输出路径、失败原因和重试次数。
+- 状态：discovered → fetched → extracted → filtered / skipped → translated → published；另有 failed（失败，error 写原因）、pdf_pending、**needs_review**（翻译结果有问题，等人工复查）。
 - `segments`：文章由哪些段落组成，**同时存段落 HTML**，translate 直接从这里取要翻的正文。
-- `translation_memory`：段落级翻译记忆，主键 `(src_hash, backend)`；**术语表版本不同视为未命中**。
+- `translation_memory`：段落级翻译记忆，主键 `(src_hash, backend)`，backend 带目标语言（如 `deepl:ZH-HANS`）；**术语表版本不同视为未命中**（版本按段落里实际出现的术语计算）；`quality` 为 `ok` / `rejected`，`tm_get` 只返回 ok，结构校验没过的译文以 rejected 保存、不会被复用。
+- 老库升级：`store.connect()` 自动补新列（只加不删），并把 PR #3 时期 `#rejected` 后缀的隔离译文转成 `quality = rejected`。
 
 增量规则（`upsert_discovered`）：lastmod 变化时文章退回 `discovered`，同时清掉 etag、error、retries；打分保留；filter 比较当前 body_hash 和 scored_body_hash，相同就复用打分；translate 靠段落翻译记忆复用。
 

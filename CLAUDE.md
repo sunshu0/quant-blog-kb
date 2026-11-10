@@ -17,6 +17,7 @@
 - 访问任何站点前调用 `config.ensure_allowed()`（合规闸门）。
 - 模块之间只通过 `models.py` 的类型和 `store/` 交换数据。
 - 用户可见文字和文档用中文。
+- **不用 bash heredoc 生成代码或补丁**（Git Bash 下两次解析失败、`\n` 被解码）：新文件用 Write，小改用 Edit，批量替换写成 `.py` 补丁脚本放在仓库外再运行。用 Write 写的文件要去掉 `\r`。
 
 ## 分工（Phase 1 并行时）
 

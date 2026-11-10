@@ -7,7 +7,6 @@ import pytest
 from qbkb import store
 from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment, Status
 from qbkb.translate import (
-    REVIEW_PREFIX,
     BackendStopped,
     FakeTranslator,
     Glossary,
@@ -190,10 +189,10 @@ class BreakLinks(FakeTranslator):
         self.left = times
         self.only_in_batches = only_in_batches
 
-    def translate_with_context(
-        self, segments: Sequence[str], glossary: Mapping[str, str], context: str
+    def translate(
+        self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
     ) -> list[str]:
-        out = super().translate_with_context(segments, glossary, context)
+        out = super().translate(segments, glossary, context)
         if self.only_in_batches and len(segments) == 1:
             return out
         fixed = []
@@ -232,10 +231,14 @@ def test_rejected_translation_is_quarantined_not_reused(
     assert stats.retried == 1 and stats.rejected == [1]
     # 坏译文不在正常的翻译记忆里，只在隔离区
     assert _tm(conn, 1, glossary) is None
-    assert _tm(conn, 1, glossary, backend="fake#rejected") is not None
+    assert _tm(conn, 1, glossary) is None  # tm_get 不返回 rejected
+    entry = store.tm_lookup(
+        conn, Segment(1, PARAS[1]).src_hash, "fake", glossary.version_for(PARAS[1])
+    )
+    assert entry is not None and entry.quality == store.TM_REJECTED
     row = _row(conn)
-    assert row["status"] == Status.FAILED
-    assert row["error"].startswith(REVIEW_PREFIX) and "1" in row["error"]
+    assert row["status"] == Status.NEEDS_REVIEW
+    assert "1" in row["error"]
     assert needs_review(row)
 
     # 重跑：不再花额度去重翻，仍然报告需要复查
@@ -297,8 +300,8 @@ def test_backend_unavailable_stops_with_stats(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
     class Down(FakeTranslator):
-        def translate_with_context(
-            self, segments: Sequence[str], glossary: Mapping[str, str], context: str
+        def translate(
+            self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
         ) -> list[str]:
             raise TranslatorUnavailableError("429")
 
@@ -311,7 +314,7 @@ def test_backend_unavailable_stops_with_stats(
 
 
 class NoContext:
-    """只实现 models.Translator 的最小后端。"""
+    """只实现 models.Translator 的最小后端：接受 context 但不使用。"""
 
     def __init__(self) -> None:
         self.inner = FakeTranslator(name="plain")
@@ -320,11 +323,13 @@ class NoContext:
     def name(self) -> str:
         return "plain"
 
-    def translate(self, segments: Sequence[str], glossary: Mapping[str, str]) -> list[str]:
+    def translate(
+        self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
+    ) -> list[str]:
         return self.inner.translate(segments, glossary)
 
 
-def test_backend_without_context_support(
+def test_backend_ignoring_context(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
     add_article()
@@ -337,10 +342,10 @@ def test_wrong_output_length_is_an_error(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:
     class Short(FakeTranslator):
-        def translate_with_context(
-            self, segments: Sequence[str], glossary: Mapping[str, str], context: str
+        def translate(
+            self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
         ) -> list[str]:
-            return super().translate_with_context(segments, glossary, context)[:-1]
+            return super().translate(segments, glossary, context)[:-1]
 
     add_article()
     with pytest.raises(RuntimeError):

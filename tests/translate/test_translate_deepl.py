@@ -65,7 +65,7 @@ def _translator(client: FakeClient, **kwargs: Any) -> tuple[DeepLTranslator, lis
 def test_request_parameters() -> None:
     client = FakeClient()
     t, _ = _translator(client)
-    out = t.translate_with_context(["<p>a</p>", "<p>b</p>"], GLOSSARY, "before")
+    out = t.translate(["<p>a</p>", "<p>b</p>"], GLOSSARY, "before")
     assert out == ["ZH:<p>a</p>", "ZH:<p>b</p>"]
     (call,) = client.translate_calls
     assert call["tag_handling"] == "html"
@@ -297,7 +297,7 @@ def test_real_deepl_smoke() -> None:
     except RuntimeError:
         pytest.skip("没有 DEEPL_API_KEY")
     src = '<p><a href="https://example.test/x">Drawdown</a> is a fall from a peak.<br/>Next.</p>'
-    (out,) = t.translate_with_context([src], load_glossary(), "Risk management basics.")
+    (out,) = t.translate([src], load_glossary(), "Risk management basics.")
     assert "回撤" in out  # 句首大写的术语靠大小写变体命中
     assert 'href="https://example.test/x"' in out
     count, limit = t.usage()

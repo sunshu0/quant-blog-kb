@@ -34,11 +34,8 @@ class FakeTranslator:
     def name(self) -> str:
         return self._name
 
-    def translate(self, segments: Sequence[str], glossary: Mapping[str, str]) -> list[str]:
-        return self.translate_with_context(segments, glossary, "")
-
-    def translate_with_context(
-        self, segments: Sequence[str], glossary: Mapping[str, str], context: str
+    def translate(
+        self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
     ) -> list[str]:
         cost = count_chars(segments)
         if self.quota_chars is not None and self.chars_used + cost > self.quota_chars:

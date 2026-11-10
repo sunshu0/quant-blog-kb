@@ -269,6 +269,33 @@ def test_conditional_header_needs_etag_and_raw_file(
     assert conditional_headers(row) == {}  # 原文丢了就完整重抓
 
 
+def test_last_modified_is_stored_and_sent(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    lm = "Wed, 11 Nov 2026 00:00:00 GMT"
+    process_response(conn, URL, _resp(headers={"Last-Modified": lm}), tmp_path)
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert row["last_modified"] == lm
+    assert conditional_headers(row) == {"If-Modified-Since": lm}
+    Path(row["raw_path"]).unlink()
+    assert conditional_headers(row) == {}
+
+
+def test_etag_and_last_modified_sent_together(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    lm = "Wed, 11 Nov 2026 00:00:00 GMT"
+    process_response(conn, URL, _resp(headers={"ETag": '"v1"', "Last-Modified": lm}), tmp_path)
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert conditional_headers(row) == {"If-None-Match": '"v1"', "If-Modified-Since": lm}
+
+
+def test_failure_records_http_status_in_one_step(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    process_response(conn, URL, _resp(), tmp_path)
+    process_response(conn, URL, _resp(status=404), tmp_path)
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert (row["status"], row["http_status"]) == ("failed", 404)
+
+
 def test_no_conditional_header_without_etag(conn: sqlite3.Connection, tmp_path: Path) -> None:
     process_response(conn, URL, _resp(), tmp_path)
     row = store.get_article(conn, URL)
@@ -378,3 +405,12 @@ def test_cleanup_stale_tmp(tmp_path: Path) -> None:
     assert cleanup_stale_tmp(tmp_path, "example") == 1
     assert [p.name for p in site_dir.iterdir()] == ["b.html"]
     assert cleanup_stale_tmp(tmp_path, "missing-site") == 0
+
+
+def test_304_refreshes_validators(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    process_response(conn, URL, _resp(headers={"ETag": '"v1"'}), tmp_path)
+    process_response(conn, URL, _resp(status=304, body=b"", headers={"ETag": '"v2"'}), tmp_path)
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert (row["status"], row["etag"]) == ("fetched", '"v2"')
+    assert Path(row["raw_path"]).read_bytes() == ARTICLE

@@ -69,7 +69,7 @@ def _retryable(e: deepl.DeepLException) -> bool:
 
 
 class DeepLTranslator:
-    """实现 models.Translator，另外支持 translate_with_context。
+    """实现 models.Translator（支持 context 参数）。
 
     重试只有一层，就是这里：from_env 创建客户端时把 SDK 自带的重试关掉（max_retries=0）。
     遇到 429、可重试的网络错误、5xx 时依次等 backoff_s、2×backoff_s……（每次不超过
@@ -123,11 +123,8 @@ class DeepLTranslator:
         """翻译记忆的 backend 键，带目标语言：换了目标语言不会命中别的语言的译文。"""
         return f"deepl:{self.target_lang}"
 
-    def translate(self, segments: Sequence[str], glossary: Mapping[str, str]) -> list[str]:
-        return self.translate_with_context(segments, glossary, "")
-
-    def translate_with_context(
-        self, segments: Sequence[str], glossary: Mapping[str, str], context: str
+    def translate(
+        self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
     ) -> list[str]:
         if not segments:
             return []

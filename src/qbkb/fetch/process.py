@@ -98,7 +98,13 @@ def classify_response(response: Response) -> Outcome:
     """只看响应决定结果，不碰状态库和文件系统。"""
     status = response.status
     if status == 304:
-        return Outcome(Kind.NOT_MODIFIED, status)
+        # 304 可以带新的校验值（RFC 9110 15.4.5），带了就记下来，下次条件请求用新的
+        return Outcome(
+            Kind.NOT_MODIFIED,
+            status,
+            etag=_header(response, "ETag"),
+            last_modified=_header(response, "Last-Modified"),
+        )
     challenge = detect_challenge(response)
     if challenge:
         return Outcome(
@@ -128,7 +134,12 @@ def classify_response(response: Response) -> Outcome:
         return Outcome(Kind.FAILED, status, f"内容类型 {ctype} 不是 HTML")
     if not body.strip():
         return Outcome(Kind.FAILED, status, "空响应")
-    return Outcome(Kind.FETCHED, status, etag=_header(response, "ETag"))
+    return Outcome(
+        Kind.FETCHED,
+        status,
+        etag=_header(response, "ETag"),
+        last_modified=_header(response, "Last-Modified"),
+    )
 
 
 def classify_error(exc: BaseException, retry_times: int = 0) -> Outcome:
@@ -150,11 +161,20 @@ def raw_file(raw_dir: Path, site: str, slug: str) -> Path:
 
 
 def conditional_headers(row: sqlite3.Row) -> dict[str, str]:
-    """有 etag 且本地原文还在时才发 If-None-Match；原文丢了就完整重抓，304 会让我们无内容可用。"""
-    etag, raw_path = row["etag"], row["raw_path"]
-    if etag and raw_path and Path(raw_path).is_file():
-        return {"If-None-Match": str(etag)}
-    return {}
+    """本地原文还在时才发条件请求；原文丢了就完整重抓，304 会让我们无内容可用。
+
+    有 etag 发 If-None-Match，有 Last-Modified 发 If-Modified-Since（man.com 不给 etag，
+    只能靠后者）。两个都有时一起发，服务器按 RFC 9110 优先看 If-None-Match。
+    """
+    raw_path = row["raw_path"]
+    if not (raw_path and Path(raw_path).is_file()):
+        return {}
+    headers: dict[str, str] = {}
+    if row["etag"]:
+        headers["If-None-Match"] = str(row["etag"])
+    if row["last_modified"]:
+        headers["If-Modified-Since"] = str(row["last_modified"])
+    return headers
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
@@ -186,7 +206,7 @@ def cleanup_stale_tmp(raw_dir: Path, site: str) -> int:
 def apply_outcome(
     conn: sqlite3.Connection, url: str, outcome: Outcome, body: bytes, raw_dir: Path
 ) -> FetchResult:
-    """把结果落到状态库（和 raw/）。304 不改任何东西。
+    """把结果落到状态库（和 raw/）。304 只在服务器给了新校验值时刷新 etag / last_modified。
 
     raw_path 存绝对路径（posix 形式），读的一方不依赖当前目录。
     """
@@ -195,7 +215,16 @@ def apply_outcome(
         raise KeyError(url)
     match outcome.kind:
         case Kind.NOT_MODIFIED:
-            return FetchResult(url, outcome.http_status or 304, row["raw_path"], row["etag"], True)
+            etag = outcome.etag or row["etag"]
+            fresh = {
+                k: v
+                for k, v in (("etag", outcome.etag), ("last_modified", outcome.last_modified))
+                if v is not None and v != row[k]
+            }
+            if fresh:
+                # 只刷新校验值，状态和原文都不动
+                store.set_status(conn, url, Status(row["status"]), **fresh)
+            return FetchResult(url, outcome.http_status or 304, row["raw_path"], etag, True)
         case Kind.FETCHED:
             path = raw_file(raw_dir.resolve(), str(row["site"]), str(row["slug"]))
             _write_atomic(path, body)
@@ -206,6 +235,7 @@ def apply_outcome(
                 http_status=outcome.http_status,
                 raw_path=path.as_posix(),
                 etag=outcome.etag,
+                last_modified=outcome.last_modified,
                 error=None,
             )
             return FetchResult(url, outcome.http_status or 200, path.as_posix(), outcome.etag)
@@ -215,8 +245,9 @@ def apply_outcome(
             )
             return FetchResult(url, outcome.http_status or 0, None)
         case Kind.FAILED:
-            store.set_status(conn, url, Status.FAILED, http_status=outcome.http_status)
-            store.record_failure(conn, url, outcome.reason or "未知错误")
+            store.record_failure(
+                conn, url, outcome.reason or "未知错误", http_status=outcome.http_status
+            )
             return FetchResult(url, outcome.http_status or 0, None)
 
 
