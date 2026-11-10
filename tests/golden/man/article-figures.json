@@ -1,0 +1,37 @@
+{
+  "url": "https://www.man.com/insights/fixture-valuation-spreads",
+  "method": "rule:insight",
+  "meta": {
+    "title": "Valuation Spreads in a Toy Universe",
+    "author": "Ada Fixture, Bo Sample",
+    "published": "2024-05-07",
+    "tags": [
+      "ARTICLE"
+    ]
+  },
+  "n_body": 16,
+  "issues": [],
+  "segments": [
+    "<p>We build a tiny pretend market to see how wide the gap between cheap and dear stocks can grow.</p>",
+    "<h2>Setting the scene</h2>",
+    "<p>Imagine a market with only <em>twelve</em> listed firms, each sorted by a single price ratio.<sup><a href=\"#fn1\" id=\"ref1\">1</a></sup> The cheapest third forms one bucket and the dearest third forms another.</p>",
+    "<p>Read our <a href=\"https://www.man.com/insights/fixture-companion-note\">companion note</a> or the <a href=\"https://www.man.com/glossary#spread\">glossary entry</a> for the vocabulary.</p>",
+    "<h3>Figure 1. Spread between buckets over forty pretend quarters</h3>",
+    "<img src=\"https://www.man.com/sites/default/files/uploads/fixture/spread-fig1.png\" alt=\"Line chart of the toy spread\">",
+    "<p><cite>Source: invented numbers for a unit test.</cite></p>",
+    "<h2>What moved it</h2>",
+    "<p>Most of the widening came from the dear bucket getting dearer, not from the cheap bucket getting cheaper.<sup><a href=\"#fn2\" id=\"ref2\">2</a></sup></p>",
+    "<h3>Figure 2. Contribution by bucket</h3>",
+    "<img src=\"https://www.man.com/sites/default/files/uploads/fixture/spread-fig2.png\">",
+    "<p><cite>Source: invented numbers for a unit test.<br> Note: buckets are rebalanced every pretend quarter.</cite></p>",
+    "<p>We also tried splitting the dear bucket in two. The top sliver did nearly all of the work, which is what you would expect when one or two pretend firms are priced for a miracle and the rest are merely optimistic.</p>",
+    "<h2>Conclusion</h2>",
+    "<p>A toy universe cannot tell us what real markets will do, but it is a cheap way to check that a pipeline keeps headings, figures and notes in order.</p>",
+    "<ol><li id=\"fn1\">The ratio here is entirely made up. <a href=\"#ref1\">↩</a></li> <li id=\"fn2\">So is this one. <a href=\"#ref2\">↩</a></li></ol>",
+    "<p>Fixture notice: this page is for automated tests only and is not investment material.</p>",
+    "<h2>Important information</h2>",
+    "<p>Every figure on this page was invented for a regression test and describes no real fund.</p>",
+    "<p><strong>Region A:</strong> Nothing here is an offer to anyone anywhere.</p>",
+    "<p>© Fixture Authors 2026. This material may not be copied without the permission of the people who wrote the test.</p>"
+  ]
+}

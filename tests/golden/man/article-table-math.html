@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<title>A Worked Example of Volatility Scaling | Man Group</title>
+<meta property="og:title" content="A Worked Example of Volatility Scaling | Man Group">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Article","@id":"https://www.man.com/insights/fixture-vol-scaling#article","headline":"A Worked Example of Volatility Scaling","datePublished":"2023-11-20T00:00:00+01:00","author":{"@type":"Person","name":"Cy Testwriter"},"keywords":"volatility, risk management,  position sizing"},{"@type":"Organization","@id":"https://www.man.com/#organization","name":"Man Group"}]}</script>
+</head>
+<body>
+<div class="dialog-off-canvas-main-canvas"><div class="page-container">
+  <div class="sticky-top"><header class="digital-navigation"><ul class="nav"><li><a href="/insights">Insights</a></li><li><a href="/search">Search</a></li></ul></header></div>
+  <section id="man-external-modal" class="modal fade"><div class="modal-dialog"><div class="modal-content">
+    <h2 class="modal-title">You are now leaving this website</h2>
+    <div class="modal-body"><p>You are leaving this website. Links outside it are not ours.</p></div>
+  </div></div></section>
+  <div id="attestation" class="show attestation-modal modal fade"><div class="modal-dialog"><div class="modal-content"><div class="modal-body">
+    <form class="mangroup-digital-attestation-form"><p>Please confirm that you are a professional investor.</p><button type="submit">I confirm</button></form>
+  </div></div></div></div>
+  <main class="app-main" role="main"><div class="layout layout--onecol"><div class="block-region-content">
+    <div class="section"><div id="article-page-title-block-insti-pixel" class="render-component"><div class="pixel-pattern pixel-pattern--desktop"><div class="section-content">
+      <div id="article-tagline-text" class="render-component"><div class="paragraph-body"><p>ARTICLE | 12 MIN</p></div></div>
+      <div id="article-title-text" class="render-component"><h1 id="article-title-text-title"><div class="render-fieldset">A Worked Example of Volatility Scaling</div></h1></div>
+      <div id="article-date-text" class="render-component"><div class="paragraph-body"><p>20 November 2023</p></div></div>
+      <div id="pdf-article-header" class="render-component"><div class="render-fieldset"><p>Fixture notice: this page is for automated tests only and is not investment material.</p></div></div>
+    </div></div></div></div>
+    <div class="section"><div id="article-main-pixel" class="render-component"><div class="pixel-pattern pixel-pattern--desktop"><div class="section-content">
+      <div id="article-main-block-section" class="render-component section-component"><div class="row">
+        <div class="col-12 col-lg-8">
+          <div id="article-intro-blurb-text" class="render-component"><div class="text-blue paragraph-body"><div class="render-fieldset"><p>How to size a position so that its expected swings stay roughly constant, step by step.</p></div></div></div>
+          <div id="article-body-text" class="render-component"><div class="paragraph-body"><div class="render-fieldset">
+            <div class="digital-article">
+              <h2 id="the-rule">The rule</h2>
+              <p>The idea fits in one line: hold less of an asset when it is jumpy and more when it is calm. With a target volatility \(\sigma^*\) and an estimate \(\hat\sigma_t\), the weight is</p>
+              <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mi>w</mi><mi>t</mi></msub><mo>=</mo><mfrac><msup><mi>σ</mi><mo>*</mo></msup><msub><mover><mi>σ</mi><mo>^</mo></mover><mi>t</mi></msub></mfrac></mrow></math>
+              <p>We cap the weight at <span class="nowrap" style="font-weight:bold">two</span> so that a quiet spell cannot lever the book without limit.</p>
+              <h2 id="a-small-table">A small table</h2>
+              <p>The numbers below are made up to keep the arithmetic easy.</p>
+              <div class="table-responsive">
+                <table class="table table-striped" style="width:100%">
+                  <thead><tr><th scope="col">Asset</th><th scope="col">Estimated vol</th><th scope="col">Weight</th></tr></thead>
+                  <tbody>
+                    <tr><td>Pretend bond</td><td>5%</td><td>2.00 (capped)</td></tr>
+                    <tr><td>Pretend index</td><td>20%</td><td>0.50</td></tr>
+                    <tr><td colspan="2">Target</td><td>10%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <p><cite>Source: arithmetic done by hand for this fixture.</cite></p>
+              <h3 id="steps">Steps</h3>
+              <ol>
+                <li>Estimate recent volatility, for example with an exponentially weighted window.
+                  <ul><li>Shorter windows react faster.</li><li>Longer windows are steadier.</li></ul>
+                </li>
+                <li>Divide the target by the estimate.</li>
+                <li>Apply the cap.</li>
+              </ol>
+              <blockquote><p>A rule you can state in one sentence is a rule you can test.</p></blockquote>
+              <p>In code the whole thing is short:</p>
+              <pre><code>def weight(target, est, cap=2.0):
+    return min(target / est, cap)</code></pre>
+              <picture><source srcset="images/vol-chart.webp" type="image/webp"><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" data-src="images/vol-chart.png" alt="Weight against estimated volatility"></picture>
+              <p><cite>Figure 1. The weight falls as estimated volatility rises.</cite></p>
+              <p>Scaling does not make returns better on its own. What it does is make one month look more like the next, which makes every other decision easier to judge.</p>
+            </div>
+          </div></div></div>
+        </div>
+        <div class="col-12 col-lg-4">
+          <div id="article-subscribe-text" class="render-component"><a id="article-subscribe-button" class="btn" href="/insights#subscribe"><span>Subscribe to Man Insights</span></a></div>
+          <div id="article-authors" class="render-component author-compact"><h4>Author(s)</h4><a href="/cy-testwriter"><span class="text-blue fw-600">Cy Testwriter</span></a></div>
+        </div>
+      </div></div>
+    </div></div></div></div>
+    <div id="important-information" class="section"><div id="insights-important-information-section" class="render-component section-component">
+      <div class="accordion"><div class="accordion-item">
+        <div class="accordion-header"><button class="accordion-button" type="button"><h2 id="insights-important-information-section-title" class="section-header"><span class="d-none d-md-inline-block">Important information</span><span class="d-md-none">Important information</span></h2></button></div>
+        <div class="accordion-collapse collapse"><div class="accordion-body px-0"><div class="render-fieldset">
+          <p>Every figure on this page was invented for a regression test and describes no real fund.</p>
+          <p>© Fixture Authors 2026. This material may not be copied without the permission of the people who wrote the test.</p>
+        </div></div></div>
+      </div></div>
+    </div></div>
+  </div></div></main>
+  <footer class="digital-app-footer"><p>Footer links</p></footer>
+</div></div>
+</body>
+</html>
