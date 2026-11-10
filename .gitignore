@@ -1,0 +1,20 @@
+# 密钥
+.env
+
+# 抓取与输出（含原文内容，公开仓库绝不提交）
+raw/
+output/
+state.db
+*.db-journal
+.scrapy/
+tests/local_samples/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
