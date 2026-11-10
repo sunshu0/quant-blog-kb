@@ -1,0 +1,18 @@
+# 术语表（design.md 4.5）。英文 → 中文，同步到 DeepL glossary。
+# 改动后递增 version，翻译记忆会记录用的是哪一版。
+
+version: 1
+terms:
+  drawdown: 回撤
+  trend following: 趋势跟踪
+  momentum: 动量
+  carry: 套息
+  Sharpe ratio: 夏普比率
+  factor: 因子
+  alpha: alpha
+  beta: beta
+  volatility: 波动率
+  backtest: 回测
+  mean reversion: 均值回归
+  risk parity: 风险平价
+  CTA: CTA

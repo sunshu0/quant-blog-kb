@@ -142,48 +142,13 @@ compliance:
 
 ## 5. 数据模型（SQLite：`state.db`）
 
-```sql
-CREATE TABLE articles (
-  url            TEXT PRIMARY KEY,
-  site           TEXT NOT NULL,
-  slug           TEXT NOT NULL,
-  status         TEXT NOT NULL,  -- discovered|fetched|extracted|filtered|skipped|
-                                 -- translated|published|failed|pdf_pending
-  lastmod        TEXT,
-  etag           TEXT,
-  http_status    INTEGER,
-  raw_path       TEXT,
-  body_hash      TEXT,           -- 整篇正文 hash
-  title          TEXT,
-  title_zh       TEXT,
-  author         TEXT,
-  published      TEXT,
-  category       TEXT,
-  value_score    REAL,
-  rubric_version TEXT,
-  md_path        TEXT,
-  error          TEXT,
-  retries        INTEGER NOT NULL DEFAULT 0,
-  updated_at     TEXT NOT NULL
-);
+表结构以 [`src/qbkb/store/schema.sql`](../src/qbkb/store/schema.sql) 为准，这里只写要点：
 
-CREATE TABLE segments (            -- 文章由哪些段落组成、顺序如何
-  article_url TEXT NOT NULL REFERENCES articles(url),
-  idx         INTEGER NOT NULL,
-  src_hash    TEXT NOT NULL,
-  PRIMARY KEY (article_url, idx)
-);
+- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、http_status、raw_path）、正文 hash、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、输出路径、失败原因和重试次数。
+- `segments`：文章由哪些段落组成，**同时存段落 HTML**，translate 直接从这里取要翻的正文。
+- `translation_memory`：段落级翻译记忆，主键 `(src_hash, backend)`；**术语表版本不同视为未命中**。
 
-CREATE TABLE translation_memory (  -- 段落级翻译记忆
-  src_hash         TEXT NOT NULL,
-  backend          TEXT NOT NULL,  -- deepl | azure | ...
-  src_html         TEXT NOT NULL,
-  tgt_html         TEXT NOT NULL,
-  glossary_version TEXT,
-  created_at       TEXT NOT NULL,
-  PRIMARY KEY (src_hash, backend)
-);
-```
+增量规则（`upsert_discovered`）：lastmod 变化时文章退回 `discovered`，同时清掉 etag、error、retries；打分保留；filter 比较当前 body_hash 和 scored_body_hash，相同就复用打分；translate 靠段落翻译记忆复用。
 
 ---
 
