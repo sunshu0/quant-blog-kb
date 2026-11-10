@@ -44,3 +44,17 @@ def test_invalid_compliance_is_rejected(tmp_path: Path, body: str) -> None:
     d = _write_site(tmp_path, "bad", body)
     with pytest.raises(ValueError):
         config.load_site("bad", d)
+
+
+def test_config_dir_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    _write_site(tmp_path, "envsite", "compliance: {decision: allowed}")
+    monkeypatch.setenv("QBKB_CONFIG_DIR", str(tmp_path))
+    reloaded = importlib.reload(config)
+    try:
+        assert tmp_path == reloaded.CONFIG_DIR
+        assert reloaded.list_sites() == ["envsite"]
+    finally:
+        monkeypatch.delenv("QBKB_CONFIG_DIR")
+        importlib.reload(config)

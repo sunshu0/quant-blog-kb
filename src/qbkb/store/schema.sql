@@ -14,9 +14,14 @@ CREATE TABLE IF NOT EXISTS articles (
   title_zh       TEXT,
   author         TEXT,
   published      TEXT,
+  tags           TEXT,     -- JSON 数组字符串
   category       TEXT,
   value_score    REAL,
+  evergreen      INTEGER,  -- 0 / 1
+  score_reason   TEXT,
   rubric_version TEXT,
+  translator     TEXT,
+  translated_at  TEXT,
   md_path        TEXT,
   error          TEXT,
   retries        INTEGER NOT NULL DEFAULT 0,
@@ -25,13 +30,16 @@ CREATE TABLE IF NOT EXISTS articles (
 
 CREATE INDEX IF NOT EXISTS idx_articles_status ON articles (status, site);
 
+-- 文章由哪些段落组成。存 HTML，translate 直接从这里取要翻的正文，不用回头调 extract。
 CREATE TABLE IF NOT EXISTS segments (
   article_url TEXT NOT NULL REFERENCES articles (url) ON DELETE CASCADE,
   idx         INTEGER NOT NULL,
   src_hash    TEXT NOT NULL,
+  src_html    TEXT NOT NULL,
   PRIMARY KEY (article_url, idx)
 );
 
+-- 段落级翻译记忆。glossary_version 不同视为未命中（术语表升级后要重翻含术语的段落）。
 CREATE TABLE IF NOT EXISTS translation_memory (
   src_hash         TEXT NOT NULL,
   backend          TEXT NOT NULL,

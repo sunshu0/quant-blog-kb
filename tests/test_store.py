@@ -55,6 +55,48 @@ def test_changed_lastmod_resets_to_discovered(conn: sqlite3.Connection) -> None:
     assert row["lastmod"] == "2026-02-01"
 
 
+def test_changed_lastmod_clears_fetch_state(conn: sqlite3.Connection) -> None:
+    _discover(conn)
+    store.set_status(conn, URL, Status.FETCHED, etag='"abc"', body_hash="h1", value_score=8.0)
+    store.record_failure(conn, URL, "HTTP 500")
+    assert _discover(conn, lastmod="2026-02-01") is True
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert (row["etag"], row["error"], row["retries"]) == (None, None, 0)
+    # 下游靠这两个判断能否复用打分和翻译记忆，必须保留
+    assert (row["body_hash"], row["value_score"]) == ("h1", 8.0)
+
+
+def test_rediscover_twice_with_same_new_lastmod(conn: sqlite3.Connection) -> None:
+    _discover(conn)
+    assert _discover(conn, lastmod="2026-02-01") is True
+    store.set_status(conn, URL, Status.FETCHED)
+    assert _discover(conn, lastmod="2026-02-01") is False
+
+
+def test_null_lastmod_then_real_lastmod(conn: sqlite3.Connection) -> None:
+    _discover(conn, lastmod=None)
+    store.set_status(conn, URL, Status.FETCHED)
+    assert _discover(conn, lastmod="2026-01-01") is True
+
+
+def test_set_status_accepts_score_and_translation_columns(conn: sqlite3.Connection) -> None:
+    _discover(conn)
+    store.set_status(
+        conn,
+        URL,
+        Status.TRANSLATED,
+        tags='["trend"]',
+        evergreen=1,
+        score_reason="讲解趋势跟踪",
+        translator="deepl",
+        translated_at="2026-11-11T00:00:00+00:00",
+    )
+    row = store.get_article(conn, URL)
+    assert row is not None
+    assert (row["evergreen"], row["translator"]) == (1, "deepl")
+
+
 def test_missing_lastmod_does_not_reset(conn: sqlite3.Connection) -> None:
     _discover(conn)
     store.set_status(conn, URL, Status.TRANSLATED)
@@ -99,15 +141,30 @@ def test_replace_segments(conn: sqlite3.Connection) -> None:
     _discover(conn)
     first = [Segment(0, "<p>a</p>"), Segment(1, "<p>b</p>")]
     store.replace_segments(conn, URL, first)
+    assert store.get_segments(conn, URL) == first
     store.replace_segments(conn, URL, first[:1])
     assert store.get_segment_hashes(conn, URL) == [first[0].src_hash]
+    assert store.get_segments(conn, URL) == first[:1]
 
 
 def test_translation_memory_roundtrip(conn: sqlite3.Connection) -> None:
     h = Segment(0, "<p>Momentum works.</p>").src_hash
-    assert store.tm_get(conn, h, "deepl") is None
+    assert store.tm_get(conn, h, "deepl", "1") is None
     store.tm_put(conn, h, "deepl", "<p>Momentum works.</p>", "<p>动量有效。</p>", "1")
-    assert store.tm_get(conn, h, "deepl") == "<p>动量有效。</p>"
-    assert store.tm_get(conn, h, "azure") is None
-    store.tm_put(conn, h, "deepl", "<p>Momentum works.</p>", "<p>动量策略有效。</p>", "2")
-    assert store.tm_get(conn, h, "deepl") == "<p>动量策略有效。</p>"
+    assert store.tm_get(conn, h, "deepl", "1") == "<p>动量有效。</p>"
+    assert store.tm_get(conn, h, "azure", "1") is None
+
+
+def test_translation_memory_misses_on_new_glossary(conn: sqlite3.Connection) -> None:
+    h = Segment(0, "<p>Drawdown matters.</p>").src_hash
+    store.tm_put(conn, h, "deepl", "<p>Drawdown matters.</p>", "<p>缩水很重要。</p>", "1")
+    assert store.tm_get(conn, h, "deepl", "2") is None
+    store.tm_put(conn, h, "deepl", "<p>Drawdown matters.</p>", "<p>回撤很重要。</p>", "2")
+    assert store.tm_get(conn, h, "deepl", "2") == "<p>回撤很重要。</p>"
+    assert store.tm_get(conn, h, "deepl", "1") is None
+
+
+def test_translation_memory_none_glossary(conn: sqlite3.Connection) -> None:
+    h = Segment(0, "<p>x</p>").src_hash
+    store.tm_put(conn, h, "fake", "<p>x</p>", "<p>叉</p>")
+    assert store.tm_get(conn, h, "fake", None) == "<p>叉</p>"

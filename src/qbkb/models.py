@@ -117,11 +117,18 @@ class Scorer(Protocol):
 
 
 _WS = re.compile(r"\s+")
+_PRE = re.compile(r"(<pre\b.*?</pre>)", re.IGNORECASE | re.DOTALL)
 
 
 def normalize_html(html: str) -> str:
-    """折叠空白，让只差空格换行的片段得到同一个 hash。"""
-    return _WS.sub(" ", html).strip()
+    """折叠空白，让只差空格换行的片段得到同一个 hash。
+
+    <pre> 里的空白是内容（代码缩进），原样保留。
+    """
+    parts = _PRE.split(html)
+    # split 带捕获组：偶数下标是 <pre> 之外的文本，奇数下标是 <pre> 块本身
+    out = [p if i % 2 else _WS.sub(" ", p) for i, p in enumerate(parts)]
+    return "".join(out).strip()
 
 
 def segment_hash(html: str) -> str:

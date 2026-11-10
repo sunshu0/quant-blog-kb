@@ -26,9 +26,14 @@ UPDATABLE_COLUMNS = frozenset(
         "title_zh",
         "author",
         "published",
+        "tags",
         "category",
         "value_score",
+        "evergreen",
+        "score_reason",
         "rubric_version",
+        "translator",
+        "translated_at",
         "md_path",
         "error",
         "retries",
@@ -55,25 +60,32 @@ def upsert_discovered(conn: sqlite3.Connection, d: DiscoveredUrl) -> bool:
     """记录 discover 发现的 URL。
 
     返回 True 表示需要（重新）处理：URL 是新的，或者 lastmod 变了。
-    lastmod 变了的文章会退回 discovered 状态重新抓取；
-    之后正文没变的段落会命中翻译记忆，不花额度。
+
+    lastmod 变了的文章退回 discovered 状态完整重抓：
+    - 清掉 etag，避免条件请求拿到 304 却已经丢了原来的流程位置；
+    - 清掉 error、retries，原文更新后给失败过的文章一次新机会。
+    body_hash、value_score 等保留：正文 hash 没变时，下游可以直接复用打分和翻译记忆，
+    不重复花 LLM / DeepL 额度（由 filter、translate 各自比较 body_hash 决定）。
+
+    INSERT ... ON CONFLICT 让"查询 + 插入"成为一条语句，两个 discover 并发也不会撞主键。
     """
-    row = conn.execute("SELECT lastmod FROM articles WHERE url = ?", (d.url,)).fetchone()
+    now = _now()
     with conn:
-        if row is None:
-            conn.execute(
-                "INSERT INTO articles (url, site, slug, status, lastmod, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (d.url, d.site, d.slug, Status.DISCOVERED.value, d.lastmod, _now()),
-            )
+        cur = conn.execute(
+            "INSERT INTO articles (url, site, slug, status, lastmod, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (url) DO NOTHING",
+            (d.url, d.site, d.slug, Status.DISCOVERED.value, d.lastmod, now),
+        )
+        if cur.rowcount == 1:
             return True
-        if d.lastmod is not None and d.lastmod != row["lastmod"]:
-            conn.execute(
-                "UPDATE articles SET lastmod = ?, status = ?, updated_at = ? WHERE url = ?",
-                (d.lastmod, Status.DISCOVERED.value, _now(), d.url),
-            )
-            return True
-    return False
+        if d.lastmod is None:
+            return False
+        cur = conn.execute(
+            "UPDATE articles SET lastmod = ?, status = ?, etag = NULL, error = NULL,"
+            " retries = 0, updated_at = ? WHERE url = ? AND lastmod IS NOT ?",
+            (d.lastmod, Status.DISCOVERED.value, now, d.url, d.lastmod),
+        )
+        return cur.rowcount == 1
 
 
 def get_article(conn: sqlite3.Connection, url: str) -> sqlite3.Row | None:
@@ -129,9 +141,17 @@ def replace_segments(conn: sqlite3.Connection, url: str, segments: Sequence[Segm
     with conn:
         conn.execute("DELETE FROM segments WHERE article_url = ?", (url,))
         conn.executemany(
-            "INSERT INTO segments (article_url, idx, src_hash) VALUES (?, ?, ?)",
-            [(url, s.idx, s.src_hash) for s in segments],
+            "INSERT INTO segments (article_url, idx, src_hash, src_html) VALUES (?, ?, ?, ?)",
+            [(url, s.idx, s.src_hash, s.html) for s in segments],
         )
+
+
+def get_segments(conn: sqlite3.Connection, url: str) -> list[Segment]:
+    """按顺序取文章的全部段落（translate / export 的输入）。"""
+    rows = conn.execute(
+        "SELECT idx, src_html FROM segments WHERE article_url = ? ORDER BY idx", (url,)
+    )
+    return [Segment(idx=int(r["idx"]), html=str(r["src_html"])) for r in rows]
 
 
 def get_segment_hashes(conn: sqlite3.Connection, url: str) -> list[str]:
@@ -139,11 +159,17 @@ def get_segment_hashes(conn: sqlite3.Connection, url: str) -> list[str]:
     return [r["src_hash"] for r in rows]
 
 
-def tm_get(conn: sqlite3.Connection, src_hash: str, backend: str) -> str | None:
-    """查翻译记忆。命中就返回译文，不用再花额度。"""
+def tm_get(
+    conn: sqlite3.Connection, src_hash: str, backend: str, glossary_version: str | None
+) -> str | None:
+    """查翻译记忆。命中就返回译文，不用再花额度。
+
+    术语表版本不同视为未命中：术语表升级后，旧译文可能用的是旧译名。
+    """
     row = conn.execute(
-        "SELECT tgt_html FROM translation_memory WHERE src_hash = ? AND backend = ?",
-        (src_hash, backend),
+        "SELECT tgt_html FROM translation_memory"
+        " WHERE src_hash = ? AND backend = ? AND glossary_version IS ?",
+        (src_hash, backend, glossary_version),
     ).fetchone()
     return None if row is None else str(row["tgt_html"])
 

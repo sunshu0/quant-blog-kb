@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+# 默认指向仓库里的 config/（源码目录运行，即 uv sync 的可编辑安装）；
+# 打包安装或换配置目录时用环境变量 QBKB_CONFIG_DIR 覆盖。
+CONFIG_DIR = Path(
+    os.environ.get("QBKB_CONFIG_DIR") or Path(__file__).resolve().parents[2] / "config"
+)
 ALLOWED_DECISIONS = frozenset({"allowed", "permission_needed", "blocked"})
 
 

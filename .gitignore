@@ -1,11 +1,20 @@
 # 密钥
 .env
+.env.*
+!.env.example
+.claude/settings.local.json
 
 # 抓取与输出（含原文内容，公开仓库绝不提交）
 raw/
 output/
 state.db
+*.db
+*.sqlite
 *.db-journal
+*.db-wal
+*.db-shm
+*.log
+logs/
 .scrapy/
 tests/local_samples/
 

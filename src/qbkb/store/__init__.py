@@ -4,6 +4,7 @@ from qbkb.store.db import (
     connect,
     get_article,
     get_segment_hashes,
+    get_segments,
     list_by_status,
     record_failure,
     replace_segments,
@@ -16,6 +17,7 @@ from qbkb.store.db import (
 __all__ = [
     "connect",
     "get_article",
+    "get_segments",
     "get_segment_hashes",
     "list_by_status",
     "record_failure",

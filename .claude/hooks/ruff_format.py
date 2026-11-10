@@ -13,7 +13,9 @@ import sys
 
 def main() -> int:
     try:
-        payload = json.load(sys.stdin)
+        # 中文 Windows 上 sys.stdin 默认按 GBK 解码，payload 里的中文路径/内容会解析失败；
+        # hook JSON 是 UTF-8，直接读字节再解码。
+        payload = json.loads(sys.stdin.buffer.read().decode("utf-8"))
         path = payload.get("tool_input", {}).get("file_path", "")
         if isinstance(path, str) and path.endswith(".py"):
             subprocess.run(["ruff", "format", "--quiet", path], check=False, timeout=60)
