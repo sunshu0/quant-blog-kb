@@ -1,5 +1,6 @@
 # 术语表（design.md 4.5）。英文 → 中文，同步到 DeepL glossary。
-# 改动后递增 version，翻译记忆会记录用的是哪一版。
+# 改动后递增 version。翻译记忆按"version + 术语内容指纹"区分，忘了递增也不会误用旧译文；
+# DeepL 上的术语表按同样的名字（qbkb-v<version>-<指纹>）复用，内容变了才新建。
 
 version: 1
 terms:
