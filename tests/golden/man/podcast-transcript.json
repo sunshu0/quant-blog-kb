@@ -1,0 +1,36 @@
+{
+  "url": "https://www.man.com/insights/fixture-habits-podcast",
+  "method": "rule:insight",
+  "meta": {
+    "title": "Fixture Podcast: Habits, Incentives and Portfolios",
+    "author": "Dee Hostname",
+    "published": "2024-02-14",
+    "tags": [
+      "PODCAST"
+    ]
+  },
+  "n_body": 17,
+  "issues": [],
+  "segments": [
+    "<p>Two invented guests talk about why people stick with habits that cost them money.</p>",
+    "<p><cite>Recording date: 9 January 2024</cite></p>",
+    "<h2>Episode Transcript</h2>",
+    "<p>Note: this transcript was typed up for a test and has never been spoken aloud.</p>",
+    "<p><b>Dee Hostname:</b></p>",
+    "<p>Welcome back. Today we are asking why a sensible person keeps paying a fee they could easily avoid.</p>",
+    "<p><b>Guest One:</b></p>",
+    "<p>Part of it is attention. If the charge is small and arrives every month, it fades into the background like the hum of a fridge.</p>",
+    "<p>Part of it is also identity. People keep doing what they believe someone like them does, <em>even when</em> the numbers say otherwise.<br>That is hard to fix with a spreadsheet.</p>",
+    "<p><b>Dee Hostname:</b></p>",
+    "<p>So what would you change first, if you ran a fund?</p>",
+    "<p><b>Guest One:</b></p>",
+    "<p>I would make the default the cheap option, and I would hide the cookie jar of short-term rewards a little further back on the shelf.</p>",
+    "<p><img alt=\"Portrait of the invented guest\" src=\"https://www.man.com/sites/default/files/uploads/fixture/guest-one.jpg\"></p>",
+    "<p>Defaults do a lot of quiet work. Most people never open the settings page, so whatever is already ticked becomes the decision, and a good default can save more than a clever reminder ever will.</p>",
+    "<p><b>Dee Hostname:</b></p>",
+    "<p>Thanks for joining us on this imaginary episode.</p>",
+    "<h2>Important information</h2>",
+    "<p>Every figure on this page was invented for a regression test and describes no real fund.</p>",
+    "<p>© Fixture Authors 2026. This material may not be copied without the permission of the people who wrote the test.</p>"
+  ]
+}

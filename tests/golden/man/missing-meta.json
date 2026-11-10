@@ -1,0 +1,20 @@
+{
+  "url": "https://www.man.com/insights/fixture-missing-meta",
+  "method": "rule:insight",
+  "meta": {
+    "title": "",
+    "author": null,
+    "published": null,
+    "tags": []
+  },
+  "n_body": 1,
+  "issues": [
+    "正文太短：93 字符（下限 1000）",
+    "缺少标题",
+    "缺少发布日期",
+    "没有找到版权声明（extract.keep）"
+  ],
+  "segments": [
+    "<p>A page with a body but no usable title, no parseable date and no important-information block.</p>"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "url": "https://www.man.com/insights/fixture-legacy-drawdowns",
+  "method": "trafilatura",
+  "meta": {
+    "title": "Legacy Layout: Notes on Drawdowns",
+    "author": "Hal Stub",
+    "published": "2019-08-30",
+    "tags": [
+      "drawdowns",
+      "risk"
+    ]
+  },
+  "n_body": 8,
+  "issues": [
+    "没有匹配的站点规则，用了 trafilatura 兜底"
+  ],
+  "segments": [
+    "<p>This page uses an older layout that the site rules do not know about, so the extractor has to fall back to a general-purpose content finder.</p>",
+    "<h2>Why drawdowns matter</h2>",
+    "<p>A strategy that falls by half needs to double just to get back to where it started. That asymmetry is why risk teams watch the depth of losses at least as closely as their frequency, and why a modest but steady return can beat a spectacular but fragile one.</p>",
+    "<p>In the toy example behind this fixture, two pretend strategies earn the same average return. The one with shallower drawdowns ends the period with more money because it never has to climb out of a deep hole.</p>",
+    "<h2>Measuring them</h2>",
+    "<ul><li>Maximum drawdown: the largest fall from a peak to a later trough.</li> <li>Time under water: how long it takes to recover the previous peak.</li></ul>",
+    "<p>Neither number tells the whole story alone. Read together they give a fair sense of how painful a strategy would have been to hold through its worst stretch.</p>",
+    "<p>Both measures depend on the sampling frequency: daily data will usually show deeper and longer drawdowns than monthly data for the same pretend strategy.</p>",
+    "<h2>Important information</h2>",
+    "<p>© Fixture Authors 2026. This material may not be copied without the permission of the people who wrote the test.</p>"
+  ]
+}

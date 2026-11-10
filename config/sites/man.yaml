@@ -22,4 +22,50 @@ discover:
     - /es/
     - /insights/subscription
 
-extract: {}
+extract:
+  # 正文少于这么多字符就标记"正文太短"（视频页、播客页通常会被标出来）
+  min_chars: 1000
+  # 出现在正文里就标记出来给人看（不自动删除）。按整词、不分大小写匹配；
+  # 不用单独的 "cookie"：正文里谈 cookies 的句子会误报
+  noise_keywords:
+    - You are leaving
+    - You are now leaving
+    - accept cookies
+    - cookie policy
+    - cookie settings
+    - Subscribe to Man Insights
+    - Thank you for subscribing
+    - Please select your country
+  # og:title 带站名后缀
+  title_strip: '\s*\|\s*Man Group\s*$'
+  # 全站噪音（在默认的 script/iframe/form/button/nav 等之外）
+  remove:
+    - .modal
+    - "[id^=qumu-video]"
+    - .digital-media
+    - .d-md-none # 响应式布局里给手机看的重复内容
+  # 纯文字匹配就删掉的段落（和图注同一个 class，选择器区分不了）
+  drop_text:
+    - '^Problems loading this infographic\?'
+  # 版权声明和重要信息：每篇都一样，翻译记忆只翻一次；原样附在正文后（design.md 3.3）
+  # 只做安全清理，不套用上面的 remove / drop_text；同一选择器的全部匹配都附上（重复内容只留一份）
+  keep:
+    - "#pdf-article-header"
+    - selector: "#insights-important-information-section-title"
+      remove:
+        - .d-md-none # 标题里给手机看的重复文字
+    - "#insights-important-information-section .accordion-body"
+  templates:
+    # /insights/ 下的文章、视频、播客共用一个 Drupal 模板
+    - name: insight
+      url_prefix: /insights/
+      require: "#article-body-text"
+      title: "#article-title-text h1"
+      published: "#article-date-text p"
+      author: "#article-authors a span.fw-600"
+      tags:
+        selector: "#article-tagline-text p"
+        pattern: '^\s*([^|]+?)\s*(?:\||$)' # "ARTICLE | 8 MIN" -> ARTICLE
+      body:
+        - "#article-intro-blurb-text .paragraph-body"
+        - "#article-body-text .digital-article"

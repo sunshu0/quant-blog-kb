@@ -1,0 +1,25 @@
+{
+  "url": "https://www.man.com/insights/fixture-carry-video",
+  "method": "rule:insight",
+  "meta": {
+    "title": "Explainer: Carry in Two Minutes",
+    "author": null,
+    "published": "2016-03-01",
+    "tags": [
+      "VIDEO"
+    ]
+  },
+  "n_body": 3,
+  "issues": [
+    "正文太短：197 字符（下限 1000）"
+  ],
+  "segments": [
+    "<p>A short clip on why higher-yielding assets tend to pay you for waiting.</p>",
+    "<p>In this pretend episode, the presenter sketches carry on a whiteboard using two imaginary currencies.</p>",
+    "<p><cite>Released on 01 March 2016</cite></p>",
+    "<p>Fixture notice: this page is for automated tests only and is not investment material.</p>",
+    "<h2>Important information</h2>",
+    "<p>Every figure on this page was invented for a regression test and describes no real fund.</p>",
+    "<p>© Fixture Authors 2026. This material may not be copied without the permission of the people who wrote the test.</p>"
+  ]
+}
