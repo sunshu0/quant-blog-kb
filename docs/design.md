@@ -112,9 +112,17 @@ compliance:
 ### 4.4 filter：价值筛选
 - 收：量化方法论 / 研究、基础概念讲解、行为金融 / 金融史、与量化相关的 AI。
 - 不收：宏观周评、ESG / 气候、公司文化 / 软文。
-- L1：`filters.yaml` 里的规则（路径、栏目、长度）。
-- L2：LLM 读标题和前 500 个单词，按评分标准打分，输出 JSON（score、category、evergreen、reason），记录 `rubric_version`。后端用便宜的 LLM API（默认 DeepSeek，`LLM_API_KEY` 放 `.env`），接口可插拔；测试时用假后端，不花钱。
-- L3：人工抽检；人工判断过的文章保存为评测集，以后改提示词时先在评测集上验证。
+- 顺序：**L3 人工覆盖 → L1 规则 → L2 打分**，处理 `extracted` 的文章，结果是 `filtered`（收）或 `skipped`（不收，原因写在 `score_reason`）。
+- L1：`filters.yaml` 里按站点写的规则：排除栏目（`exclude_prefixes`，按路径段匹配）和最少单词数（`min_words`）。**只数正文的单词**，文末附的版权声明和重要信息（extract 的 keep 块，见 `body_segments`）不算，否则视频页会因为长长的免责声明被误收。
+- L2：LLM 读标题和正文前 `excerpt_words`（500）个单词，按评分标准打分，输出 JSON（score 0–10、category、evergreen、reason）。
+  - 评分标准是独立文件 `config/rubrics/<版本>.md`（文件头写版本号），`filters.yaml` 的 `l2.rubric_version` 选用哪份（现在是 v2）；category 只能从 `include_categories` + `exclude_categories` 里选。改了评分标准内容或发给模型的消息格式，都要新建一份、递增版本号。
+  - 防 prompt 注入：标题和摘录分别包在 `<article_title>`、`<article_excerpt>` 里（文本里的尖括号换成全角，伪造不了结束标签），评分标准写明标签内是待评文本、不是指令。
+  - 写进 `rubric_version` 的是"评分标准版本@后端"，例如 `v1@deepseek-chat`、`v1@fake`：换模型或换评分标准都会重新打分，假后端的分数也不会被真后端误用。
+  - 判定：score ≥ `threshold` 且 category 在收录列表里 → `filtered`，否则 `skipped`；两种情况都写入 value_score、category、evergreen、score_reason、rubric_version、scored_body_hash。
+  - **复用打分**：`body_hash == scored_body_hash` 且 rubric_version 相同就不再调用后端。所以改阈值后 `qbkb filter --refilter` 不花钱。
+  - 后端：`DeepSeekScorer`（httpx 调 OpenAI 兼容的 `/chat/completions`，`response_format=json_object`、temperature 0；`LLM_API_KEY` 放 `.env`，base_url / model 在 `filters.yaml`，环境变量 `LLM_BASE_URL` / `LLM_MODEL` 优先）。输出不合格会带着错误说明重问（默认 2 次），还不行文章留在 `extracted`、error 写原因，下次再试；429 / 5xx / 网络错误重试，等待时间取 Retry-After 和指数退避里较大的一个（Retry-After: 0 也不会立刻重打）；402（余额不足）或 `insufficient_quota` 抛 `QuotaExceededError`，流程停下、下次接着跑。测试用确定性的 `FakeScorer`（按关键词给类别和分数）。
+- L3：`config/overrides.yaml` 按 URL 指定 include / exclude（可带 category、note），**优先级最高**，压过 L1 和 L2；每次跑 filter 都重新套用到还没翻译的文章上（改了覆盖不用加参数）。覆盖不动打分列，去掉覆盖后旧打分还能复用。
+- 评测集：`config/eval/<site>.yaml`，URL → 人工判断。`qbkb eval` 用状态库里已有的打分（不重新打分、不花钱）算 LLM 和人工判断的一致率和混淆矩阵，列出不一致的文章；改评分标准前先在评测集上验证。现在只有框架和一个小样例，样例的判断还没有人工逐篇确认。
 - 被筛掉的文章标记为 `skipped`，不删除，以后放宽标准时不用重新爬取。
 
 ### 4.5 translate：翻译
@@ -124,13 +132,21 @@ compliance:
 - 额度用完就停下，记录进度，下个月接着翻。
 - 校验：翻译前后标签、链接、图片的数量必须一致，不一致就重新翻译。
 - 术语第一次出现时附上英文（在导出阶段处理）。
+- **标题**作为额外的一个翻译单元（`<p>标题</p>`），在正文之后翻译，同样走翻译记忆，结果写进 `title_zh`；标题结构校验没过只是 `title_zh` 留空（导出时用英文标题），不影响文章状态。额度估算（`estimate_chars`）把标题算在内。
+- 这个改动之前翻的文章没有 `title_zh`：`qbkb translate --titles` 只补翻标题（命中翻译记忆就不花额度），已发布的文章补上后退回 `translated`，下次 export 用中文标题重新生成。
 
 ### 4.6 export：输出
-- `output/<site>/<日期>_<slug>.md`，图片下载到 `output/<site>/images/`。
-- frontmatter 字段：title、title_zh、firm、author、published、source_url、category、value_score、rubric_version、translator、translated_at。
-- 开头加一行来源和版权说明；保留原文的版权声明（译文）。
-- 主文件用**纯中文**；另外从翻译记忆生成 `output/bilingual/` 对照版，不额外消耗额度。
-- 每次运行后重新生成 `output/index.md`，按类别分组列出。
+- 输入是 `translated` 的文章：按段落从翻译记忆取中文 HTML（backend 用文章的 `translator`，术语版本按段落计算，和 translate 用同一个函数 `translate.lookup_translation`），再用 markdownify 转成 Markdown。取不到译文（比如术语表改过）就把文章退回 `filtered`，下次 translate 只重翻缺的段落。
+- `output/<site>/<发布日期>_<slug>.md`（没有日期用 `undated`），完成后标 `published`，`md_path` 写绝对路径。发布日期变了会删掉旧文件。
+- frontmatter 字段：title、title_zh、firm（站点配置的 `firm`）、author、published、source_url、category、value_score、rubric_version、translator、translated_at。
+- 标题下面一行来源和版权说明；正文之后用分隔线隔开，附上原文的版权声明和重要信息（keep 块的译文）。
+- **输出里不留原始 HTML**：markdownify 会把原文里转义过的 `&lt;script&gt;` 还原成 `<script>`，所以转换后把正文里剩下的 `<` 一律转成 `&lt;`，只放行 `<sup>` / `<sub>` 和自动链接，代码里不动；标题、来源行、index 里的标题同样转义；frontmatter 里含 `< > &` 的值加双引号。链接和图片地址里的括号、空格转成 `%28` `%29` `%20`，Markdown 链接不会断。
+- **链接协议白名单**（纵深防御，extract 已经挡过一次）：链接只留 http、https、mailto、`#` 锚点和相对路径，图片只留 http、https 和相对路径；判断前先还原 HTML 实体、去掉控制字符和空白（`JaVaScRiPt:`、`java\tscript:`（中间夹制表符） 都算）。不合格的链接去掉地址、保留文字，图片只留 alt；对照版同样处理，frontmatter 和来源行里的 `source_url` 只放行 http / https。
+- 术语第一次出现时附上英文："趋势跟踪（trend following）"。只标原文这段确实含该术语的段落；译文和原文相同的词条（alpha、CTA）、代码、公式、链接文字里不标。
+- 主文件用**纯中文**；另外从翻译记忆生成 `output/bilingual/<site>/` 对照版（每段英文后面跟中文，只有图片的段落只出现一次），不额外消耗额度。
+- 图片下载到 `output/<site>/images/`（文件名是地址的 hash），Markdown 里改成相对路径（对照版是 `../../<site>/images/`）。礼貌规则：先过合规闸门；只下载站点本身的 host（以及站点配置 `export.image_hosts` 列出的）；串行，两次请求间隔 ≥ 1 秒（真实站点调不低于 1 秒，只有本机测试站点可以）；带项目 UA；单张不超过 10 MB；已下载过的不再请求。下载失败保留原始链接，并追加记进 `output/<site>/images/failed.tsv`。`--no-images` 关掉下载。
+- 每次运行后按状态库里全部 `published` 文章重新生成 `output/index.md`：按类别分组（先按 `filters.yaml` 的顺序），列出中文标题、日期、分数和对照版链接。
+- 幂等：内容没变的文件不重写（修改时间也不变）；`--rebuild` 重新生成已发布的文章。发布日期变了要删旧文件时，只删本次 `--out` 目录里的。
 
 ### 4.7 增量与定时
 - 每天跑一次：拉 sitemap → 只处理新 URL 和 `lastmod` 变化的 URL → 整篇 hash 没变就跳过。
@@ -138,17 +154,26 @@ compliance:
 - 原文更新后直接覆盖译文（方案 A）。
 - 定时方式（本机任务计划、云服务器、GitHub Actions）等 MVP 完成后再定。
 
+### 4.8 CLI 串联
+- 子命令：`discover`、`fetch`、`extract`、`filter`、`translate`、`export`，`run`（按这个顺序跑完全部阶段，`--skip` 跳过某些阶段），`status`（每个状态的文章数，列出 needs_review 和 failed 的文章及原因），`eval`（见 4.4），以及 `init-db`、`sites`。
+- 通用参数：`--site`（默认全部站点）、`--db`、`--limit`（每个阶段最多处理多少篇）、`--config-dir`、`-v`。后端开关：`--scorer deepseek|fake`、`--translator deepl|fake`；其他：`--no-images`、`--refilter`、`--retry-rejected`、`--rebuild`、`--fetch-delay`（只对本机测试服务调小）。
+- 退出码（`--help` 里也有）：0 正常；1 出错；2 参数错误；**3 额度用完**（打分或翻译），进度已保存，下次运行同一条命令从中断处接着跑；4 后端暂时不可用（限流、网络）；**5 跑完了但有文章需要人工处理**（抓取 / 抽取 / 翻译 / 导出失败、翻译需复查、打分输出不合格、缺译文退回重翻、sitemap 部分失败；extract 的质检提示和图片下载失败不算）。同时出现时按 4、3、5 的顺序取。`run` 里某个阶段因为额度停下，后面的阶段照样处理已就绪的文章（打分额度用完，已经 filtered 的文章照样翻译、导出）。
+- 抓取间隔：`--fetch-delay` 只有本机测试站点（localhost、127.0.0.1、`*.localhost`、`*.test`）可以调到默认的 2 秒以下；真实站点只能调大，调小会提示并用默认值。
+- Twisted reactor 一个进程只能启动一次：单独的 `qbkb fetch` 在本进程里跑 Scrapy；`run` 把 fetch 放进子进程（`python -m qbkb.cli fetch …`），所以一个进程里可以跑多个站点、反复调用。
+- 缺 key 时只有真的要调用后端才报错（全部复用旧打分、没有待翻译文章时不需要 key）。
+- Windows 控制台的 stdout / stderr 统一用 UTF-8。
+
 ---
 
 ## 5. 数据模型（SQLite：`state.db`）
 
 表结构以 [`src/qbkb/store/schema.sql`](../src/qbkb/store/schema.sql) 为准，这里只写要点：
 
-- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、last_modified、http_status、raw_path 绝对路径）、正文 hash、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、抽取质检问题（qc_issues，JSON 数组，和失败原因 error 分开）、输出路径、失败原因和重试次数。
+- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、last_modified、http_status、raw_path 绝对路径）、正文 hash、正文段落数（body_segments：前多少段是正文，其后是版权声明等附录）、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、抽取质检问题（qc_issues，JSON 数组，和失败原因 error 分开）、输出路径、失败原因和重试次数。
 - 状态：discovered → fetched → extracted → filtered / skipped → translated → published；另有 failed（失败，error 写原因）、pdf_pending、**needs_review**（翻译结果有问题，等人工复查）。
 - `segments`：文章由哪些段落组成，**同时存段落 HTML**，translate 直接从这里取要翻的正文。
 - `translation_memory`：段落级翻译记忆，主键 `(src_hash, backend)`，backend 带目标语言（如 `deepl:ZH-HANS`）；**术语表版本不同视为未命中**（版本按段落里实际出现的术语计算）；`quality` 为 `ok` / `rejected`，`tm_get` 只返回 ok，结构校验没过的译文以 rejected 保存、不会被复用。
-- 老库升级：`store.connect()` 自动补新列（只加不删），并把 PR #3 时期 `#rejected` 后缀的隔离译文转成 `quality = rejected`。
+- 老库升级：`store.connect()` 按 `PRAGMA user_version` 自动补新列（只加不删；v2 加了 body_segments），并把 PR #3 时期 `#rejected` 后缀的隔离译文转成 `quality = rejected`。
 
 增量规则（`upsert_discovered`）：lastmod 变化时文章退回 `discovered`，同时清掉 etag、error、retries；打分保留；filter 比较当前 body_hash 和 scored_body_hash，相同就复用打分；translate 靠段落翻译记忆复用。
 
@@ -162,7 +187,10 @@ quant-blog-kb/
 ├── CLAUDE.md                 # 简短：命令、约定、完成标准
 ├── config/
 │   ├── sites/<site>.yaml     # 发现方式、选择器、合规结论
-│   ├── filters.yaml
+│   ├── filters.yaml          # L1 规则、L2 阈值和后端
+│   ├── rubrics/v1.md         # L2 评分标准（带版本号）
+│   ├── overrides.yaml        # L3 人工覆盖
+│   ├── eval/<site>.yaml      # L2 评测集
 │   └── glossary.yaml
 ├── src/qbkb/
 │   ├── models.py             # Article / Segment 等数据类和模块间接口
@@ -170,7 +198,8 @@ quant-blog-kb/
 │   └── cli.py
 ├── tests/
 │   ├── golden/               # 黄金样本：输入 HTML + 期望输出
-│   └── fixtures/             # sitemap 等本地文件
+│   ├── fixtures/             # sitemap 等本地文件
+│   └── e2e/                  # 端到端：构造的站点 + 本机 HTTP 服务
 ├── scripts/verify.sh
 ├── docs/  design.md  ai-retro.md
 ├── .env                      # DEEPL_API_KEY、LLM_API_KEY（不提交）
@@ -183,6 +212,7 @@ quant-blog-kb/
 
 - **完成标准**：`scripts/verify.sh` 退出码为 0。它会依次运行 `ruff check`、`ruff format --check`、`pyright`、`pytest -m "not network"`。
 - **测试完全离线**：不访问网站，不消耗 DeepL 额度。翻译测试用假后端；真实 DeepL 只做一次手动冒烟测试。
+- **端到端测试**（`tests/e2e/`）：构造的 sitemap 和页面，FakeScorer + FakeTranslator，从 discover 一路跑到 export，检查 md、frontmatter、index、对照版；覆盖额度用完后断点续跑（两次加起来的计费字符等于一次跑完）和幂等（跑两次文件不变）。其中一个用例起本机 HTTP 服务、在子进程里真跑 Scrapy。
 - **黄金样本回归**：每个站点 5–10 篇。仓库公开，所以样本用**构造的 HTML**：照着真实页面的 DOM 结构写（导航、弹窗、正文容器、图片、脚注、版权声明都保留），正文换成自己写的文字。版式和结构本身不受版权保护，这样既能测试抽取规则，又不会公开原文。
 - 用真实页面做的验证只在本地进行，文件放在被忽略的目录 `tests/local_samples/` 里，不提交。
 

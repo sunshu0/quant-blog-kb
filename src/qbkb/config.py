@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -48,6 +49,23 @@ def ensure_allowed(site: SiteConfig) -> None:
     """任何会访问站点的代码在开始前都必须调用它。"""
     if site.compliance_decision != "allowed":
         raise ComplianceError(f"站点 {site.name} 的合规结论是 {site.compliance_decision}，不能抓取")
+
+
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def is_local_host(host: str | None) -> bool:
+    """本机测试站点：localhost、127.0.0.1、::1、*.localhost、*.test（RFC 2606 保留域名）。
+
+    只有这些站点可以把抓取 / 图片下载的间隔调到默认值以下。
+    """
+    h = (host or "").lower().rstrip(".")
+    return h in LOCAL_HOSTS or h.endswith((".localhost", ".test")) or h == "test"
+
+
+def is_local_site(site: SiteConfig) -> bool:
+    base = site.raw.get("base_url")
+    return isinstance(base, str) and is_local_host(urlsplit(base).hostname)
 
 
 def list_sites(config_dir: Path = CONFIG_DIR) -> list[str]:

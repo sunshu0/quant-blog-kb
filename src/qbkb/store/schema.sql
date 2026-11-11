@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS articles (
   http_status    INTEGER,
   raw_path       TEXT,
   body_hash      TEXT,
+  body_segments  INTEGER,  -- 前多少段是正文，其后是版权声明等附录（keep）；NULL 表示全是正文
   title          TEXT,
   title_zh       TEXT,
   author         TEXT,

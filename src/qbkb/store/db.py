@@ -18,7 +18,7 @@ from qbkb.models import DiscoveredUrl, Segment, Status
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # 改了表结构（加列等）就加 1，并在 _migrate 里补升级步骤
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ UPDATABLE_COLUMNS = frozenset(
         "http_status",
         "raw_path",
         "body_hash",
+        "body_segments",
         "title",
         "title_zh",
         "author",
@@ -56,6 +57,7 @@ UPDATABLE_COLUMNS = frozenset(
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("articles", "last_modified", "TEXT"),
     ("articles", "qc_issues", "TEXT"),
+    ("articles", "body_segments", "INTEGER"),  # v2（Phase 2）
     ("translation_memory", "quality", "TEXT NOT NULL DEFAULT 'ok'"),
 )
 # PR #3 时期用 backend 名加这个后缀隔离坏译文；升级时改成 quality = 'rejected'。
@@ -200,6 +202,32 @@ def list_by_status(conn: sqlite3.Connection, status: Status, site: str | None = 
             (status.value, site),
         )
     return [r["url"] for r in rows]
+
+
+def count_by_status(conn: sqlite3.Connection, site: str | None = None) -> dict[Status, int]:
+    """每个状态有多少篇文章（没有文章的状态不出现）。"""
+    if site is None:
+        rows = conn.execute("SELECT status, COUNT(*) AS n FROM articles GROUP BY status")
+    else:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM articles WHERE site = ? GROUP BY status", (site,)
+        )
+    return {Status(r["status"]): int(r["n"]) for r in rows}
+
+
+def list_rows(
+    conn: sqlite3.Connection, statuses: Sequence[Status], site: str | None = None
+) -> list[sqlite3.Row]:
+    """若干状态下的整行记录，按 URL 排序（status、index.md 用）。"""
+    if not statuses:
+        return []
+    marks = ", ".join("?" for _ in statuses)
+    params: list[str] = [s.value for s in statuses]
+    sql = f"SELECT * FROM articles WHERE status IN ({marks})"
+    if site is not None:
+        sql += " AND site = ?"
+        params.append(site)
+    return list(conn.execute(sql + " ORDER BY url", params))
 
 
 def set_status(conn: sqlite3.Connection, url: str, status: Status, **fields: Value) -> None:

@@ -12,7 +12,11 @@ uv sync
 bash scripts/verify.sh      # 离线检查：lint、类型、测试
 uv run qbkb init-db
 uv run qbkb sites
+uv run qbkb run --site man --limit 5   # 发现 → 抓取 → 抽取 → 筛选 → 翻译 → 输出
+uv run qbkb status
 ```
+
+不想花额度时加 `--scorer fake --translator fake`（假后端，跑通流程用）。退出码：0 正常，1 出错，3 额度用完（进度已保存，下个月再跑同一条命令即可接着翻），4 后端暂时不可用（稍后再跑），5 跑完了但有文章需要人工处理（`qbkb status` 查看）。完整说明见 `uv run qbkb --help`。
 
 需要真实翻译时，复制 `.env.example` 为 `.env` 并填写 API key。
 
@@ -23,5 +27,5 @@ uv run qbkb sites
 ## 进度
 
 - [x] Phase 0：骨架、共享模型、状态库、验证脚本
-- [ ] Phase 1：发现+抓取 / 抽取 / 翻译（并行）
-- [ ] Phase 2：筛选、输出、CLI 串联
+- [x] Phase 1：发现+抓取 / 抽取 / 翻译（并行）
+- [x] Phase 2：筛选、输出、CLI 串联

@@ -15,10 +15,15 @@ from qbkb.translate.pipeline import (
     QuotaStopped,
     TranslateStats,
     TranslationStopped,
+    backfill_titles,
     estimate_chars,
     glossary_upgrade_cost,
+    lookup_translation,
+    missing_titles,
     needs_review,
+    title_unit,
     translate_article,
+    translated_title,
 )
 from qbkb.translate.structure import same_structure
 
@@ -38,7 +43,12 @@ __all__ = [
     "estimate_chars",
     "glossary_upgrade_cost",
     "load_glossary",
+    "backfill_titles",
+    "lookup_translation",
+    "missing_titles",
     "needs_review",
     "same_structure",
+    "title_unit",
     "translate_article",
+    "translated_title",
 ]

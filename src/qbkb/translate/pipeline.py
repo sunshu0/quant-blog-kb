@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import html
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from qbkb import store
-from qbkb.models import QuotaExceededError, Segment, Status, Translator
+from qbkb.models import QuotaExceededError, Segment, Status, Translator, segment_hash
 from qbkb.translate.base import (
     MAX_REQUEST_CHARS,
     MAX_TEXTS_PER_REQUEST,
@@ -59,6 +60,53 @@ class BackendStopped(TranslationStopped):
 def needs_review(row: sqlite3.Row) -> bool:
     """文章是否在等人工复查（区别于真正的失败）。"""
     return row["status"] == Status.NEEDS_REVIEW
+
+
+def title_unit(title: str) -> str:
+    """标题作为一个额外的翻译单元：包成一个 <p>，和正文段落一样走翻译记忆。"""
+    return f"<p>{html.escape(' '.join(title.split()), quote=False)}</p>"
+
+
+def lookup_translation(
+    conn: sqlite3.Connection, src_html: str, backend: str, glossary: Glossary
+) -> str | None:
+    """按 translate 的规则查一段的合格译文（backend + 这段的术语版本）。export 也用它。"""
+    return store.tm_get(conn, segment_hash(src_html), backend, glossary.version_for(src_html))
+
+
+def translated_title(
+    conn: sqlite3.Connection, title: str | None, backend: str, glossary: Glossary
+) -> str | None:
+    """标题的中文（纯文本）；翻译记忆里没有就返回 None。"""
+    if not title or not title.strip():
+        return None
+    tgt = lookup_translation(conn, title_unit(title), backend, glossary)
+    if tgt is None:
+        return None
+    return plain_text(tgt) or None
+
+
+def _translate_title(
+    conn: sqlite3.Connection,
+    title: str | None,
+    translator: Translator,
+    glossary: Glossary,
+    context: str,
+    stats: TranslateStats,
+) -> str | None:
+    """翻译标题（命中翻译记忆就不花额度）。结构校验没过就放弃标题、不影响正文。"""
+    if not title or not title.strip():
+        return None
+    unit = title_unit(title)
+    found = translated_title(conn, title, translator.name, glossary)
+    if found is not None:
+        return found
+    (tgt,) = _call(translator, [unit], glossary, context)
+    stats.chars += len(unit)
+    if not same_structure(unit, tgt):
+        return None
+    store.tm_put(conn, segment_hash(unit), translator.name, unit, tgt, glossary.version_for(unit))
+    return plain_text(tgt) or None
 
 
 def _call(translator: Translator, texts: list[str], glossary: Glossary, context: str) -> list[str]:
@@ -113,6 +161,8 @@ def translate_article(
       error 列写明是哪些段落，等人工复查。
     - 额度用完抛 QuotaStopped，后端重试用尽抛 BackendStopped（都是 TranslationStopped，
       带 stats），文章状态不变。
+    - 标题（articles.title）作为额外的一个翻译单元（title_unit）在正文之后翻译，同样走
+      翻译记忆，结果写进 title_zh；标题结构校验没过只是 title_zh 留空，不影响文章状态。
     """
     segments = store.get_segments(conn, url)
     if not segments:
@@ -192,6 +242,10 @@ def translate_article(
                         quality=store.TM_REJECTED,
                     )
                     rejected.add(seg.src_hash)
+        row = store.get_article(conn, url)
+        title = None if row is None else row["title"]
+        context = plain_text(segments[0].html)[:context_chars] if context_chars > 0 else ""
+        title_zh = _translate_title(conn, title, translator, glossary, context, stats)
     except QuotaExceededError as e:
         finish_lists()
         raise QuotaStopped(stats, f"额度用完（{e}）") from e
@@ -212,11 +266,23 @@ def translate_article(
             )
         error = "；".join(parts)
         store.set_status(
-            conn, url, Status.NEEDS_REVIEW, translator=backend, translated_at=now, error=error
+            conn,
+            url,
+            Status.NEEDS_REVIEW,
+            translator=backend,
+            translated_at=now,
+            title_zh=title_zh,
+            error=error,
         )
     else:
         store.set_status(
-            conn, url, Status.TRANSLATED, translator=backend, translated_at=now, error=None
+            conn,
+            url,
+            Status.TRANSLATED,
+            translator=backend,
+            translated_at=now,
+            title_zh=title_zh,
+            error=None,
         )
     return stats
 
@@ -232,18 +298,71 @@ def _unique_segments(conn: sqlite3.Connection, urls: Iterable[str]) -> list[Segm
     return out
 
 
+def _title_units(conn: sqlite3.Connection, urls: Iterable[str]) -> list[str]:
+    """这些文章标题的翻译单元（去重，没有标题的跳过）。"""
+    out: dict[str, None] = {}
+    for url in urls:
+        row = store.get_article(conn, url)
+        title = None if row is None else row["title"]
+        if title and str(title).strip():
+            out[title_unit(str(title))] = None
+    return list(out)
+
+
 def estimate_chars(
     conn: sqlite3.Connection, urls: Iterable[str], backend: str, glossary: Glossary
 ) -> int:
-    """估算翻完这些文章还要多少字符（只算翻译记忆未命中的段落，跨文章去重）。
+    """估算翻完这些文章还要多少字符（只算翻译记忆未命中的段落和标题，跨文章去重）。
 
     和 base.FREE_MONTHLY_CHARS 比较，就知道这个月的额度够不够。
     """
+    urls = list(urls)
+    units = [seg.html for seg in _unique_segments(conn, urls)] + _title_units(conn, urls)
     return sum(
-        len(seg.html)
-        for seg in _unique_segments(conn, urls)
-        if store.tm_get(conn, seg.src_hash, backend, glossary.version_for(seg.html)) is None
+        len(unit)
+        for unit in dict.fromkeys(units)
+        if lookup_translation(conn, unit, backend, glossary) is None
     )
+
+
+def missing_titles(conn: sqlite3.Connection, site: str | None = None) -> list[str]:
+    """已经 translated / published、有英文标题但没有中文标题的文章（PR #7 之前翻的）。"""
+    rows = store.list_rows(conn, [Status.TRANSLATED, Status.PUBLISHED], site)
+    return [
+        str(r["url"]) for r in rows if r["title"] and str(r["title"]).strip() and not r["title_zh"]
+    ]
+
+
+def backfill_titles(
+    conn: sqlite3.Connection, urls: Iterable[str], translator: Translator, glossary: Glossary
+) -> int:
+    """只补翻标题（走翻译记忆，命中就不花额度），返回补上了几篇。
+
+    已发布的文章补上后退回 translated，下次 export 用中文标题重新生成。
+    额度用完抛 QuotaStopped、后端不可用抛 BackendStopped，已补的都已落库。
+    """
+    done = 0
+    for url in urls:
+        row = store.get_article(conn, url)
+        if row is None or row["title_zh"] or not row["title"]:
+            continue
+        stats = TranslateStats(url=url)
+        segments = store.get_segments(conn, url)
+        context = plain_text(segments[0].html)[:CONTEXT_CHARS] if segments else ""
+        try:
+            title_zh = _translate_title(conn, row["title"], translator, glossary, context, stats)
+        except QuotaExceededError as e:
+            raise QuotaStopped(stats, f"额度用完（{e}）") from e
+        except TranslatorUnavailableError as e:
+            raise BackendStopped(stats, str(e)) from e
+        if title_zh is None:
+            continue
+        status = Status(row["status"])
+        if status is Status.PUBLISHED:
+            status = Status.TRANSLATED
+        store.set_status(conn, url, status, title_zh=title_zh)
+        done += 1
+    return done
 
 
 def glossary_upgrade_cost(
@@ -253,10 +372,12 @@ def glossary_upgrade_cost(
     old: Glossary,
     new: Glossary,
 ) -> int:
-    """术语表从 old 换成 new，会让多少字符的已翻段落重翻（换之前先看一眼）。"""
+    """术语表从 old 换成 new，会让多少字符的已翻段落和标题重翻（换之前先看一眼）。"""
+    urls = list(urls)
+    units = [seg.html for seg in _unique_segments(conn, urls)] + _title_units(conn, urls)
     total = 0
-    for seg in _unique_segments(conn, urls):
-        before, after = old.version_for(seg.html), new.version_for(seg.html)
-        if before != after and store.tm_get(conn, seg.src_hash, backend, before) is not None:
-            total += len(seg.html)
+    for unit in dict.fromkeys(units):
+        before, after = old.version_for(unit), new.version_for(unit)
+        if before != after and store.tm_get(conn, segment_hash(unit), backend, before) is not None:
+            total += len(unit)
     return total

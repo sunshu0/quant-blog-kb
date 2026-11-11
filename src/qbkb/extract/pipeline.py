@@ -58,6 +58,7 @@ def extract_one(
         url,
         Status.EXTRACTED,
         body_hash=art.body_hash,
+        body_segments=result.n_body,
         title=art.meta.title or None,
         author=art.meta.author,
         published=art.meta.published,

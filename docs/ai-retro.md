@@ -14,6 +14,8 @@
 | 2026-11-11 | 共享 PR 时 heredoc 补丁又一次解析失败（同类问题第二次） | 改成 Write 写 `.py` 补丁脚本 | CLAUDE.md「约定」 |
 | 2026-11-11 | 被 .gitignore 忽略的 `tests/local_samples/` 仍被 pyright 检查，本地脚本放进去会让 verify 失败（A 线） | pyproject 加 pyright exclude | 配置：`[tool.pyright] exclude` |
 | 2026-11-11 | Phase 1 三条线第一轮审查：#4、#5 修完再合并（#5 有 MathML 事件属性 XSS），#3 可以合并但有 9 条建议 | 发回原线修，三条线合并树先跑 verify 再合并 | 流程：并行线各自审查 + 合并树 verify |
+| 2026-11-11 | Phase 2 对照版里图片相对路径少了站点目录（`../../images/` 应为 `../../<site>/images/`），冒烟时肉眼没看出来 | 对照版的中文段落单独按对照版目录改写图片路径 | 测试：`test_export_pipeline` 断言对照版里没有 `](images/` |
+| 2026-11-11 | Phase 2 审查：markdownify 会把原文里转义的 `&lt;script&gt;` 还原成真标签，Markdown 里出现原始 HTML（同类：#5 的 MathML XSS） | 转换后统一转义 `<`，只放行上下标和自动链接；标题、frontmatter 同样处理 | 测试：`test_export_review_fixes`（script、img onerror、标题带尖括号）；以后审查 brief 固定加"输出里有没有原始 HTML" |
 
 ## 度量
 
@@ -23,3 +25,4 @@
 | #4 | Phase 1 A 发现+抓取 | 2026-11-11 02:51 | 2026-11-11 12:01 | 开 PR 约 20 min；合并等用户醒来 | 1（审查 9 项） | — | Sonnet 审查 1 轮 |
 | #5 | Phase 1 B 抽取 | 2026-11-11 02:50 | 2026-11-11 12:01 | 开 PR 约 20 min；合并等用户醒来 | 1（审查 11 项） | — | Sonnet 审查 1 轮 |
 | #3 | Phase 1 C 翻译 | 2026-11-11 02:48 | 2026-11-11 12:01 | 开 PR 约 12 min；合并等用户醒来 | 1（审查 9 项建议） | — | Sonnet 审查 1 轮；结论可以合并，仍按建议修了 |
+| Phase 2（本 PR） | filter + export + CLI 串联 | 2026-11-11 12:31 | — | 开 PR 约 25 min | 1（审查 9 项：3 中 6 低） | — | 共享文件改动见 PR 说明 |

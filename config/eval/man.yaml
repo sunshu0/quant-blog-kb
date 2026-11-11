@@ -1,0 +1,12 @@
+# L2 评测集（design.md 4.4）：URL → 人工判断（include / exclude）。
+# 改评分标准（config/rubrics/）之前，先用 `qbkb eval --site man` 看 LLM 和人工判断的一致率。
+# 只放 URL 和判断，不放原文。被 L1 规则筛掉的文章（排除栏目、太短）不打分，放进来也比不了。
+#
+# 下面是框架自带的小样例，按标题和栏目初判，还没有人工逐篇读过；
+# 人工复核过的文章（包括 overrides.yaml 里的）可以陆续补进来。
+items:
+  https://www.man.com/insights/what-is-volatility: include
+  https://www.man.com/insights/backtesting: include
+  https://www.man.com/insights/skewness: include
+  https://www.man.com/insights/overfitting-and-its-impact-on-the-investor: include
+  https://www.man.com/insights/views-from-the-floor-2025-march-18: exclude
