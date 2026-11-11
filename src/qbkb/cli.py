@@ -120,6 +120,14 @@ def _translate_opts(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="重翻结构校验没过的段落（包括 needs_review 的文章）",
     )
+    p.add_argument(
+        "--recheck",
+        action="store_true",
+        help=(
+            "已翻译 / 已发布 / 需复查的文章也按现在的校验规则、术语表和固定译文重新过一遍："
+            "合格的译文直接复用（不花额度），不合格的进 needs_review（配合 --retry-rejected 重翻）"
+        ),
+    )
     p.add_argument("--fake-quota", type=int, help="假翻译后端的字符额度（测试断点续跑用）")
     p.add_argument(
         "--titles",
@@ -450,8 +458,11 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
     conn = store.connect(args.db)
     try:
         urls = store.list_by_status(conn, Status.FILTERED, site.name)
-        if args.retry_rejected:
+        if args.retry_rejected or getattr(args, "recheck", False):
             urls = sorted(urls + store.list_by_status(conn, Status.NEEDS_REVIEW, site.name))
+        if getattr(args, "recheck", False):
+            for st in (Status.TRANSLATED, Status.PUBLISHED):
+                urls = sorted(urls + store.list_by_status(conn, st, site.name))
         if args.limit is not None:
             urls = urls[: args.limit]
         if not urls:
@@ -465,7 +476,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             f"预计约 {need} 字符（不含命中翻译记忆的）"
         )
         _print_quota(translator, "翻译前")
-        done = review = failed = chars = 0
+        done = review = failed = chars = free = 0
         for url in urls:
             try:
                 st = tr.translate_article(
@@ -484,13 +495,14 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 failed += 1
                 continue
             chars += st.chars
+            free += st.fixed + st.speaker_labels + st.revalidated
             if st.needs_review:
                 review += 1
             else:
                 done += 1
         print(
             f"[translate] {site.name}: 完成 {done} 篇、需复查 {review} 篇、失败 {failed} 篇，"
-            f"送出 {chars} 字符"
+            f"送出 {chars} 字符；固定译文 / 说话人标签 / 按新规则复用 {free} 段（不计费）"
         )
         _print_quota(translator, "翻译后")
         return EXIT_ATTENTION if review or failed else EXIT_OK

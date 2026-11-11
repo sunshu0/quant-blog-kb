@@ -170,7 +170,7 @@ def test_glossary_with_wrong_entry_count_is_not_reused() -> None:
 def test_plain_mapping_glossary_named_by_fingerprint() -> None:
     assert glossary_name({"a": "甲"}).startswith("qbkb-")
     assert glossary_name({"a": "甲"}) != glossary_name({"a": "乙"})
-    assert glossary_name(load_glossary()).startswith("qbkb-v1-")
+    assert glossary_name(load_glossary()).startswith("qbkb-v2-")
 
 
 def test_quota_exceeded_is_translated() -> None:

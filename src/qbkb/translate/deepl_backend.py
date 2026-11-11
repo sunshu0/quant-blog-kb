@@ -19,8 +19,9 @@ from qbkb.translate.base import (
     chunk_texts,
     count_chars,
 )
-from qbkb.translate.footnotes import protect_sups, restore_sups
+from qbkb.translate.footnotes import SUP_MARK, protect_sups, repair_marks, restore_sups
 from qbkb.translate.glossary import Glossary, case_variants, terms_fingerprint
+from qbkb.translate.lines import LineSplit, split_lines
 
 GLOSSARY_PREFIX = "qbkb-"
 # 这些标签连同里面的内容原样保留、不送去翻译（DeepL 的 ignore_tags）。
@@ -137,13 +138,25 @@ class DeepLTranslator:
         if not segments:
             return []
         # 先按原文切批：超长段落在发任何请求之前就报 SegmentTooLargeError
-        chunks = chunk_texts(segments, self.max_texts, self.max_chars)
+        chunk_texts(segments, self.max_texts, self.max_chars)
         glossary_id = self.sync_glossary(glossary)
+        # 分行排版的段落一行一个单元（lines.py）；脚注上标换成占位链接（footnotes.py）
+        units: list[str] = []
+        plans: list[tuple[LineSplit | None, int, int]] = []
+        for seg in segments:
+            plan = split_lines(seg)
+            pieces = plan.lines if plan is not None else [seg]
+            plans.append((plan, len(units), len(pieces)))
+            units.extend(protect_sups(p) for p in pieces)
+        translated: list[str] = []
+        for chunk in chunk_texts(units, self.max_texts, self.max_chars):
+            translated.extend(self._request([units[i] for i in chunk], glossary_id, context))
         out: list[str] = []
-        for chunk in chunks:
-            # 脚注上标换成占位链接再送出去，译文回来后还原（见 footnotes.py）
-            texts = [protect_sups(segments[i]) for i in chunk]
-            out.extend(restore_sups(t) for t in self._request(texts, glossary_id, context))
+        for seg, (plan, start, n) in zip(segments, plans, strict=True):
+            keep = SUP_MARK in seg
+            parts = [restore_sups(t, keep_marks=keep) for t in translated[start : start + n]]
+            tgt = plan.join(parts) if plan is not None else parts[0]
+            out.append(repair_marks(seg, tgt))
         return out
 
     def sync_glossary(self, glossary: Mapping[str, str]) -> str | None:

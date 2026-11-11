@@ -16,7 +16,7 @@ from qbkb.translate.structure import footnote_marks
 
 URL = "https://example.test/insights/f"
 SRC = "<p>Growth of 3 percent at a zero discount rate<sup>3</sup> is rare.</p>"
-PLACEHOLDER = '<a href="#qbkb-sup-3">3</a>'
+PLACEHOLDER = '<a href="#qbkb-sup-3">†</a>'
 
 
 def test_footnote_marks() -> None:

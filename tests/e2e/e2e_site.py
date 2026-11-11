@@ -121,7 +121,10 @@ def responses(base: str, pages: tuple[Page, ...] = PAGES) -> dict[str, tuple[str
 def make_config(root: Path, base: str) -> Path:
     """仓库 config/ 的副本，加一个指向 base 的站点 local（规则照抄 man.yaml）。"""
     cfg = root / "config"
-    shutil.copytree(CONFIG_DIR, cfg, ignore=shutil.ignore_patterns("sites"))
+    # 本机的固定译文（不提交，见 .gitignore）不带进来：测试结果不能取决于开发机上有没有这个文件
+    shutil.copytree(
+        CONFIG_DIR, cfg, ignore=shutil.ignore_patterns("sites", "fixed_translations.yaml")
+    )
     man = yaml.safe_load((CONFIG_DIR / "sites" / "man.yaml").read_text(encoding="utf-8"))
     man["base_url"] = base
     man["firm"] = "Example Capital"
