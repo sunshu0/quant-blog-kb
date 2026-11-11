@@ -19,10 +19,12 @@ from qbkb.export.markdown import (
     ArticleDoc,
     TermAnnotator,
     date_part,
+    escape_text,
     md_filename,
     render,
     render_bilingual,
     rewrite_images,
+    safe_url,
     to_markdown,
 )
 from qbkb.models import Status
@@ -62,7 +64,8 @@ def firm_name(site: SiteConfig) -> str:
 def source_line(firm: str, title: str, url: str) -> str:
     """每篇开头的来源和版权说明（design.md 3.3）。"""
     return (
-        f"> 来源：{firm}《{title}》，<{url}>。原文版权归 {firm} 所有；本文为机器翻译，"
+        f"> 来源：{escape_text(firm)}《{escape_text(title)}》，<{safe_url(url)}>。"
+        f"原文版权归 {escape_text(firm)} 所有；本文为机器翻译，"
         "仅供内部学习参考，未经许可不得再分发。文末附原文的重要信息与版权声明（译文）。"
     )
 
@@ -197,8 +200,10 @@ def export_article(
     if not wrote:
         stats.unchanged += 1
     # 发布日期变了，文件名跟着变：删掉旧文件，避免同一篇出现两份
+    # 只删本次 out_dir 里的：换了 --out 重建时，不能动别的输出目录
     old = row["md_path"]
-    if old and Path(old) != main.resolve():
+    root = out_dir.resolve()
+    if old and Path(old).resolve() != main.resolve() and Path(old).resolve().is_relative_to(root):
         old_path = Path(old)
         old_bi = out_dir / BILINGUAL_DIR / str(row["site"]) / old_path.name
         for p in (old_path, old_bi):
@@ -259,7 +264,8 @@ def run(
 def _index_entry(row: sqlite3.Row) -> str:
     site, published, slug = str(row["site"]), row["published"], str(row["slug"])
     name = md_filename(published, slug)
-    title = str(row["title_zh"] or row["title"] or slug).replace("[", "［").replace("]", "］")
+    title = escape_text(str(row["title_zh"] or row["title"] or slug))
+    title = title.replace("[", "［").replace("]", "］")
     score = row["value_score"]
     bits = [date_part(published)]
     if score is not None:

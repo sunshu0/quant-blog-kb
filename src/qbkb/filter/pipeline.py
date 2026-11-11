@@ -191,19 +191,15 @@ def targets(
     limit: int | None = None,
 ) -> list[str]:
     """要处理的文章：全部 extracted；refilter 时加上 filtered / skipped（改了阈值或规则之后）；
-    另外，人工覆盖里点名、当前状态和判断不一致的 filtered / skipped 文章也重新处理。"""
+    另外，人工覆盖里点名的 filtered / skipped 文章每次都重新套用（改了 category / note 也生效）。"""
     urls = store.list_by_status(conn, Status.EXTRACTED, site)
     if refilter:
         urls += store.list_by_status(conn, Status.FILTERED, site)
         urls += store.list_by_status(conn, Status.SKIPPED, site)
-    else:
-        for url, o in overrides.items():
-            row = store.get_article(conn, url)
-            if row is None or row["site"] != site:
-                continue
-            want = Status.FILTERED if o.decision is Decision.INCLUDE else Status.SKIPPED
-            if row["status"] in (Status.FILTERED, Status.SKIPPED) and row["status"] != want:
-                urls.append(url)
+    for url in overrides:
+        row = store.get_article(conn, url)
+        if row is not None and row["site"] == site and row["status"] in OVERRIDABLE:
+            urls.append(url)
     urls = sorted(set(urls))
     return urls if limit is None else urls[:limit]
 

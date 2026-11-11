@@ -100,7 +100,7 @@ def test_eval_reports_agreement(tmp_path: Path, capsys: pytest.CaptureFixture[st
     capsys.readouterr()
     assert cli.main(["eval", "--site", "man", "--db", str(db)]) == 0
     out = capsys.readouterr().out
-    assert "可比较 1 条，一致 1 条，一致率 100%" in out and "v1@fake" in out
+    assert "可比较 1 条，一致 1 条，一致率 100%" in out and "v2@fake" in out
     assert "还没打分 / 不在状态库" in out
 
 

@@ -128,6 +128,19 @@ class FakeScorer:
         )
 
 
+def _fence(text: str) -> str:
+    """待评文本里的尖括号换成全角：文章里写的 </article_excerpt> 关不掉我们的分隔标签。"""
+    return text.replace("<", "＜").replace(">", "＞")
+
+
+def user_message(title: str, excerpt: str) -> str:
+    """发给模型的用户消息：标题和摘录各包在一对标签里（评分标准里说明标签内不是指令）。"""
+    return (
+        f"<article_title>{_fence(title)}</article_title>\n"
+        f"<article_excerpt>\n{_fence(excerpt)}\n</article_excerpt>"
+    )
+
+
 def _retry_after(resp: httpx.Response) -> float | None:
     value = resp.headers.get("Retry-After")
     if value is None:
@@ -153,8 +166,10 @@ class DeepSeekScorer:
     - 只发标题和摘录（调用方截好的前约 500 个单词），要求 JSON 输出，temperature 0；
     - 输出不是合格 JSON（或类别不在列表里）时，带上错误说明重问，最多 parse_retries 次，
       还不行抛 ScoreFormatError；
-    - 429 / 5xx / 网络错误按 backoff_s、2×backoff_s……退避（有 Retry-After 就照它，不超过
-      max_backoff_s），最多 retries 次，之后抛 ScorerUnavailableError；
+    - 429 / 5xx / 网络错误按 backoff_s、2×backoff_s……退避（有 Retry-After 且更长就照它，
+      不超过 max_backoff_s），最多 retries 次，之后抛 ScorerUnavailableError；
+    - 标题和摘录包在 <article_title> / <article_excerpt> 里（见 user_message），
+      评分标准说明标签内是待评文本、不是指令；
     - 余额 / 额度用完（402，或 429 + insufficient_quota）抛 QuotaExceededError；
     - 401 / 403 等其他错误直接抛 RuntimeError（key 不对，重试没用）。
     """
@@ -224,7 +239,7 @@ class DeepSeekScorer:
             raise RuntimeError("没有找到 LLM_API_KEY：请在 .env 里设置")
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self.rubric.prompt},
-            {"role": "user", "content": f"标题：{title}\n\n正文开头：\n{excerpt}"},
+            {"role": "user", "content": user_message(title, excerpt)},
         ]
         last: ScoreFormatError | None = None
         for _ in range(self.parse_retries + 1):
@@ -280,7 +295,8 @@ class DeepSeekScorer:
                 raise ScorerUnavailableError(
                     f"LLM 接口暂时不可用，重试 {self.retries} 次后放弃：{problem}"
                 )
-            backoff = self.backoff_s * 2**attempt if wait is None else wait
+            # Retry-After 只能让等待更长：服务器给 0 或很小的值时仍按指数退避
+            backoff = max(self.backoff_s * 2**attempt, wait or 0.0)
             self._sleep(min(backoff, self.max_backoff_s))
             attempt += 1
 

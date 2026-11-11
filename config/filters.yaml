@@ -20,8 +20,9 @@ sites:
     min_words: 300
 
 l2:
-  # 选用哪份评分标准（config/rubrics/v1.md）。改版本号 = 所有文章重新打分
-  rubric_version: v1
+  # 选用哪份评分标准（config/rubrics/v2.md）。改版本号 = 所有文章重新打分；
+  # 改了评分标准的内容或发给模型的消息格式，都要新建一份并递增版本号
+  rubric_version: v2
   # 分数 ≥ threshold 且类别在 include_categories 里才收
   threshold: 7
   # 只给 LLM 看标题和正文前这么多个单词

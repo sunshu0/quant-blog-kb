@@ -16,7 +16,7 @@ uv run qbkb run --site man --limit 5   # 发现 → 抓取 → 抽取 → 筛选
 uv run qbkb status
 ```
 
-不想花额度时加 `--scorer fake --translator fake`（假后端，跑通流程用）。退出码 3 表示额度用完，进度已保存，下个月再跑同一条命令即可接着翻。
+不想花额度时加 `--scorer fake --translator fake`（假后端，跑通流程用）。退出码：0 正常，1 出错，3 额度用完（进度已保存，下个月再跑同一条命令即可接着翻），4 后端暂时不可用（稍后再跑），5 跑完了但有文章需要人工处理（`qbkb status` 查看）。完整说明见 `uv run qbkb --help`。
 
 需要真实翻译时，复制 `.env.example` 为 `.env` 并填写 API key。
 

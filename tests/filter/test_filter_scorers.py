@@ -101,9 +101,9 @@ def test_request_shape_and_success() -> None:
         return _reply(json.dumps(GOOD, ensure_ascii=False))
 
     s = _scorer(handler)
-    assert s.version == "v1@m1"
+    assert s.version == "v2@m1"
     score = s.score("A title", "first words")
-    assert score.category == "量化方法论" and score.rubric_version == "v1@m1"
+    assert score.category == "量化方法论" and score.rubric_version == "v2@m1"
     (req,) = seen
     assert str(req.url) == "https://llm.example.test/v1/chat/completions"
     assert req.headers["Authorization"] == "Bearer sk-test"
@@ -183,6 +183,6 @@ def test_missing_key_fails_only_when_scoring(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("LLM_MODEL", "other-model")
     cfg = load_filter_config()
     s = DeepSeekScorer.from_env(load_rubric(cfg.rubric_version, cfg), cfg, env_file=None)
-    assert s.version == "v1@other-model"  # 环境变量优先于 filters.yaml
+    assert s.version == "v2@other-model"  # 环境变量优先于 filters.yaml
     with pytest.raises(RuntimeError, match="LLM_API_KEY"):
         s.score("t", "e")

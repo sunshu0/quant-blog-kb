@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from qbkb.config import SiteConfig, ensure_allowed
+from qbkb.config import SiteConfig, ensure_allowed, is_local_host
 from qbkb.fetch.settings import TIMEOUT_SECONDS, USER_AGENT
 
 MIN_INTERVAL_SECONDS = 1.0
@@ -45,7 +45,7 @@ class ImageFetcher:
     - 只下载站点本身（base_url 的 host）和站点配置 export.image_hosts 里列出的 host，
       其他地址抛 ImageError（保留原链接）；
     - 已经下载过的直接返回，不发请求；同一次运行里失败过的不再重试；
-    - 串行，任意两次请求之间至少间隔 min_interval 秒。
+    - 串行，任意两次请求之间至少间隔 min_interval 秒（真实站点不低于 1 秒）。
     """
 
     def __init__(
@@ -69,12 +69,16 @@ class ImageFetcher:
             raise ValueError(f"站点 {site.name}: export.image_hosts 必须是列表")
         self.hosts = frozenset({urlsplit(base).netloc.lower(), *(str(h).lower() for h in extra)})
         self.images_dir = images_dir
-        self.min_interval = min_interval
+        # 真实站点不能低于 MIN_INTERVAL_SECONDS；本机测试站点（*.test、127.0.0.1……）不限
+        local = all(is_local_host(h.split(":")[0]) for h in self.hosts)
+        self.min_interval = min_interval if local else max(min_interval, MIN_INTERVAL_SECONDS)
         self.max_bytes = max_bytes
         self._sleep = sleep
         self._clock = clock
         self._last: float | None = None
         self._failed: dict[str, str] = {}
+        # 已下载图片的 stem → 文件名。第一次用时扫一遍目录，之后不再 glob
+        self._known: dict[str, str] | None = None
         self._client = httpx.Client(
             headers={"User-Agent": USER_AGENT},
             timeout=TIMEOUT_SECONDS,
@@ -87,11 +91,13 @@ class ImageFetcher:
         self._client.close()
 
     def existing(self, url: str) -> str | None:
-        stem = image_stem(url)
-        if not self.images_dir.is_dir():
-            return None
-        found = sorted(p.name for p in self.images_dir.glob(f"{stem}.*") if p.suffix != ".tmp")
-        return found[0] if found else None
+        if self._known is None:
+            self._known = {}
+            if self.images_dir.is_dir():
+                for p in sorted(self.images_dir.iterdir()):
+                    if p.is_file() and p.suffix not in (".tmp", ".tsv"):
+                        self._known.setdefault(p.stem, p.name)
+        return self._known.get(image_stem(url))
 
     def get(self, src: str) -> str:
         """src 是 HTML 里的地址（可能带 &amp;）。返回 images_dir 下的文件名。"""
@@ -149,4 +155,6 @@ class ImageFetcher:
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
             raise ImageError(f"写盘失败：{e}") from e
+        if self._known is not None:
+            self._known[image_stem(url)] = name
         return name

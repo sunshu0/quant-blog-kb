@@ -25,9 +25,58 @@ _CONVERTER = MarkdownConverter(
 )
 
 
+# 转换结果里允许保留的 HTML：上下标（sup_symbol / sub_symbol 产生的）和 markdownify 的自动链接
+_ALLOWED_HTML = re.compile(r"</?(?:sup|sub)>|<(?:https?|mailto):[^\s<>]+>", re.IGNORECASE)
+# 代码块和行内代码里 Markdown 不解析 HTML，不用（也不能）转义
+_CODE = re.compile(r"(```.*?```|`+[^`\n]*`+)", re.DOTALL)
+_URL_ATTR = re.compile(r"(\s(?:href|src)=)([\"'])(.*?)\2", re.IGNORECASE | re.DOTALL)
+# 链接地址里会让 Markdown 的 [文字](地址) 断开的字符
+_URL_UNSAFE = {"(": "%28", ")": "%29", " ": "%20", "<": "%3C", ">": "%3E"}
+
+
+def escape_text(text: str) -> str:
+    """纯文本放进 Markdown（标题、来源行）：< 转成 &lt;，不让它变成真正的 HTML。"""
+    return text.replace("<", "&lt;")
+
+
+def _escape_html(md: str) -> str:
+    """转换结果里剩下的 < 一律转义，只放行白名单（上下标、自动链接）；代码里不动。
+
+    markdownify 会把原文里转义过的 &lt;script&gt; 还原成 <script>，不处理的话
+    Markdown 渲染器会把它当成真正的 HTML。
+    """
+    parts = _CODE.split(md)
+    for i in range(0, len(parts), 2):  # 偶数下标是代码之外的部分
+        text, out, pos = parts[i], [], 0
+        for m in _ALLOWED_HTML.finditer(text):
+            out += [escape_text(text[pos : m.start()]), m.group()]
+            pos = m.end()
+        out.append(escape_text(text[pos:]))
+        parts[i] = "".join(out)
+    return "".join(parts)
+
+
+def safe_url(url: str) -> str:
+    """链接 / 图片地址里的括号、空格、尖括号转成 %xx，Markdown 链接不会断。"""
+    return "".join(_URL_UNSAFE.get(c, c) for c in url)
+
+
+def _safe_url_attrs(html: str) -> str:
+    def sub(m: re.Match[str]) -> str:
+        return f"{m.group(1)}{m.group(2)}{safe_url(m.group(3))}{m.group(2)}"
+
+    parts = _TAG.split(html)
+    for i in range(1, len(parts), 2):  # 奇数下标是标签
+        parts[i] = _URL_ATTR.sub(sub, parts[i])
+    return "".join(parts)
+
+
 def to_markdown(html: str) -> str:
-    """一个块级 HTML 片段 → Markdown（去掉首尾空行）。"""
-    return _CONVERTER.convert(html).strip()
+    """一个块级 HTML 片段 → Markdown（去掉首尾空行）。
+
+    结果里不含原始 HTML（上下标除外），链接地址里的括号、空格已转义。
+    """
+    return _escape_html(_CONVERTER.convert(_safe_url_attrs(html)).strip())
 
 
 def rewrite_images(html: str, replace: Callable[[str], str]) -> str:
@@ -111,8 +160,22 @@ def md_filename(published: str | None, slug: str) -> str:
     return f"{date_part(published)}_{slug}.md"
 
 
+class _QuotingDumper(yaml.SafeDumper):
+    """含 < > & 的字符串一律加双引号，frontmatter 渲染时也不会被当成 HTML。"""
+
+
+def _str_representer(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
+    style = '"' if any(c in value for c in "<>&") else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_QuotingDumper.add_representer(str, _str_representer)
+
+
 def frontmatter_text(data: Mapping[str, object]) -> str:
-    body = yaml.safe_dump(dict(data), allow_unicode=True, sort_keys=False, width=1000)
+    body = yaml.dump(
+        dict(data), Dumper=_QuotingDumper, allow_unicode=True, sort_keys=False, width=1000
+    )
     return f"---\n{body}---\n"
 
 
@@ -124,7 +187,8 @@ def render(doc: ArticleDoc) -> str:
     """纯中文主文件。"""
     body = _join(doc.zh_blocks[: doc.n_body])
     appendix = _join(doc.zh_blocks[doc.n_body :])
-    parts = [frontmatter_text(doc.frontmatter), f"# {doc.title_zh}", doc.source_line, body]
+    head = f"# {escape_text(doc.title_zh)}"
+    parts = [frontmatter_text(doc.frontmatter), head, doc.source_line, body]
     if appendix:
         parts += ["---", appendix]
     return "\n\n".join(p.strip("\n") for p in parts if p) + "\n"
@@ -143,8 +207,8 @@ def render_bilingual(doc: ArticleDoc, title_en: str) -> str:
         pairs.append(en if _plain(en) == _plain(zh) else _join([en, zh]))
     head = [
         frontmatter_text(doc.frontmatter),
-        f"# {doc.title_zh}",
-        f"*{title_en}*" if title_en and title_en != doc.title_zh else "",
+        f"# {escape_text(doc.title_zh)}",
+        f"*{escape_text(title_en)}*" if title_en and title_en != doc.title_zh else "",
         doc.source_line,
     ]
     return "\n\n".join(p.strip("\n") for p in [*head, *pairs] if p) + "\n"

@@ -1,7 +1,6 @@
 """命令行入口：各阶段子命令、run（按顺序跑完全部阶段）、status、eval。
 
-退出码：0 正常；1 出错；2 参数错误（argparse）；3 额度用完，进度已保存，下次接着跑；
-4 后端暂时不可用（限流 / 网络），稍后再跑。
+退出码见 EXIT_CODES_HELP。
 """
 
 from __future__ import annotations
@@ -20,12 +19,26 @@ from typing import TextIO
 import httpx
 
 from qbkb import config, store
+from qbkb.fetch.settings import DOWNLOAD_DELAY_SECONDS as DEFAULT_FETCH_DELAY
 from qbkb.models import Scorer, Status, Translator
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_QUOTA = 3
 EXIT_UNAVAILABLE = 4
+EXIT_ATTENTION = 5
+# 同时出现多种情况时，按这个顺序取第一个（先告诉用户"要等一会儿 / 等额度再跑"）
+_STOP_PRIORITY = (EXIT_UNAVAILABLE, EXIT_QUOTA, EXIT_ATTENTION)
+
+EXIT_CODES_HELP = """退出码：
+  0  正常完成
+  1  出错（配置错误、缺 key、网络错误等），看 stderr
+  2  参数错误
+  3  额度用完（打分或翻译）：进度已保存，额度恢复后运行同一条命令接着跑
+  4  后端暂时不可用（限流 / 网络）：稍后运行同一条命令接着跑
+  5  跑完了，但有文章需要人工处理：抓取 / 抽取 / 翻译 / 导出失败、翻译需复查、
+     打分输出不合格、因缺译文退回重翻、sitemap 部分失败（qbkb status 查看）
+同时出现多种情况时按 4、3、5 的顺序取第一个。"""
 
 STAGES = ("discover", "fetch", "extract", "filter", "translate", "export")
 RESUME_HINT = "进度已保存在状态库里，下次运行同一条命令会从中断处接着跑。"
@@ -84,7 +97,10 @@ def _fetch_opts(p: argparse.ArgumentParser) -> None:
         "--fetch-delay",
         type=float,
         default=None,
-        help="两次请求的间隔秒数（默认 2；只有对本机测试服务才应该调小）",
+        help=(
+            f"两次请求的间隔秒数（默认 {DEFAULT_FETCH_DELAY:g}）。只有本机测试站点"
+            "（localhost、127.0.0.1、*.test）可以调小，真实站点只能调大"
+        ),
     )
 
 
@@ -102,6 +118,11 @@ def _translate_opts(p: argparse.ArgumentParser) -> None:
         help="重翻结构校验没过的段落（包括 needs_review 的文章）",
     )
     p.add_argument("--fake-quota", type=int, help="假翻译后端的字符额度（测试断点续跑用）")
+    p.add_argument(
+        "--titles",
+        action="store_true",
+        help="只补翻标题：已翻译 / 已发布但还没有中文标题的文章（走翻译记忆），补完重新导出",
+    )
 
 
 def _export_opts(p: argparse.ArgumentParser) -> None:
@@ -111,40 +132,49 @@ def _export_opts(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="qbkb", description="量化机构博客中文知识库")
+    fmt = argparse.RawDescriptionHelpFormatter
+    parser = argparse.ArgumentParser(
+        prog="qbkb",
+        description="量化机构博客中文知识库",
+        epilog=EXIT_CODES_HELP,
+        formatter_class=fmt,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init-db", help="创建或升级状态库")
     p_init.add_argument("--db", default="state.db")
     sub.add_parser("sites", help="列出已配置站点及其合规结论")
 
-    p = sub.add_parser("discover", help="拉 sitemap，把新的 / 更新过的 URL 写进状态库")
+    def stage(name: str, help: str) -> argparse.ArgumentParser:
+        return sub.add_parser(name, help=help, epilog=EXIT_CODES_HELP, formatter_class=fmt)
+
+    p = stage("discover", "拉 sitemap，把新的 / 更新过的 URL 写进状态库")
     _common(p)
-    p = sub.add_parser("fetch", help="抓取 discovered 的文章（Scrapy）")
+    p = stage("fetch", "抓取 discovered 的文章（Scrapy）")
     _common(p)
     _fetch_opts(p)
-    p = sub.add_parser("extract", help="从原始 HTML 抽取正文")
+    p = stage("extract", "从原始 HTML 抽取正文")
     _common(p)
     p.add_argument("--retry-failed", action="store_true", help="重试抽取阶段失败过的文章")
-    p = sub.add_parser("filter", help="价值筛选（L1 规则、L2 打分、L3 人工覆盖）")
+    p = stage("filter", "价值筛选（L1 规则、L2 打分、L3 人工覆盖）")
     _common(p)
     _filter_opts(p)
-    p = sub.add_parser("translate", help="翻译 filtered 的文章")
+    p = stage("translate", "翻译 filtered 的文章")
     _common(p)
     _translate_opts(p)
-    p = sub.add_parser("export", help="把 translated 的文章输出成 Markdown")
+    p = stage("export", "把 translated 的文章输出成 Markdown")
     _common(p)
     _export_opts(p)
-    p = sub.add_parser("run", help="按顺序跑完全部阶段：" + " → ".join(STAGES))
+    p = stage("run", "按顺序跑完全部阶段：" + " → ".join(STAGES))
     _common(p)
     _fetch_opts(p)
     _filter_opts(p)
     _translate_opts(p)
     _export_opts(p)
     p.add_argument("--skip", action="append", choices=STAGES, default=[], help="跳过某个阶段")
-    p = sub.add_parser("status", help="各状态的文章数，列出 needs_review 和 failed")
+    p = stage("status", "各状态的文章数，列出 needs_review 和 failed")
     _common(p)
-    p = sub.add_parser("eval", help="L2 评测：LLM 判断和人工判断的一致率")
+    p = stage("eval", "L2 评测：LLM 判断和人工判断的一致率")
     _common(p)
     p.add_argument("--file", type=Path, help="评测集（默认 config/eval/<site>.yaml）")
     p.add_argument("--rubric-version", help="只比较这个打分版本（例如 v1@deepseek-chat）")
@@ -162,7 +192,7 @@ class Stopped(Exception):
 # ---- 各阶段 ----------------------------------------------------------------
 
 
-def stage_discover(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> None:
+def stage_discover(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
     from qbkb.discover import discover_site
 
     conn = store.connect(args.db)
@@ -177,6 +207,24 @@ def stage_discover(args: argparse.Namespace, deps: Deps, site: config.SiteConfig
     )
     for e in s.errors:
         print(f"  ! {e}")
+    return EXIT_ATTENTION if s.errors else EXIT_OK
+
+
+def fetch_delay_overrides(delay: float | None, site: config.SiteConfig) -> dict[str, object]:
+    """--fetch-delay 对应的 Scrapy 设置。真实站点不能低于默认间隔（调小时提示并用默认值）。"""
+    if delay is None:
+        return {}
+    if delay < DEFAULT_FETCH_DELAY and not config.is_local_site(site):
+        print(
+            f"[fetch] {site.name} 不是本机测试站点，间隔不能低于 {DEFAULT_FETCH_DELAY:g} 秒，"
+            f"忽略 --fetch-delay {delay:g}"
+        )
+        return {}
+    return {
+        "DOWNLOAD_DELAY": delay,
+        "AUTOTHROTTLE_START_DELAY": delay,
+        "AUTOTHROTTLE_ENABLED": delay > 0,
+    }
 
 
 def fetch_in_process(args: argparse.Namespace, site_name: str) -> int:
@@ -184,13 +232,7 @@ def fetch_in_process(args: argparse.Namespace, site_name: str) -> int:
     from qbkb.fetch import run_fetch
 
     site = config.load_site(site_name, _cfg(args))
-    overrides: dict[str, object] = {}
-    if args.fetch_delay is not None:
-        overrides = {
-            "DOWNLOAD_DELAY": args.fetch_delay,
-            "AUTOTHROTTLE_START_DELAY": args.fetch_delay,
-            "AUTOTHROTTLE_ENABLED": args.fetch_delay > 0,
-        }
+    overrides = fetch_delay_overrides(args.fetch_delay, site)
     s = run_fetch(
         site,
         args.db,
@@ -203,7 +245,7 @@ def fetch_in_process(args: argparse.Namespace, site_name: str) -> int:
         f"[fetch] {site.name}: 抓到 {s.fetched}、没变（304）{s.not_modified}、"
         f"PDF {s.pdf}、失败 {s.failed}"
     )
-    return EXIT_OK
+    return EXIT_ATTENTION if s.failed else EXIT_OK
 
 
 def fetch_in_subprocess(args: argparse.Namespace, site_name: str) -> int:
@@ -224,7 +266,7 @@ def fetch_in_subprocess(args: argparse.Namespace, site_name: str) -> int:
     return subprocess.run(cmd, check=False).returncode
 
 
-def stage_extract(args: argparse.Namespace, site: config.SiteConfig) -> None:
+def stage_extract(args: argparse.Namespace, site: config.SiteConfig) -> int:
     from qbkb import extract
 
     conn = store.connect(args.db)
@@ -235,6 +277,7 @@ def stage_extract(args: argparse.Namespace, site: config.SiteConfig) -> None:
     print(f"[extract] {site.name}: 抽取 {s.extracted}、失败 {s.failed}、质检提示 {len(s.flagged)}")
     for url, issues in s.flagged.items():
         print(f"  ? {url}：{'；'.join(issues)}")
+    return EXIT_ATTENTION if s.failed else EXIT_OK  # 质检提示只是提示，不算
 
 
 def _make_scorer(args: argparse.Namespace, deps: Deps) -> Scorer:
@@ -249,7 +292,7 @@ def _make_scorer(args: argparse.Namespace, deps: Deps) -> Scorer:
     return flt.DeepSeekScorer.from_env(rubric, cfg)
 
 
-def stage_filter(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> None:
+def stage_filter(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
     from qbkb import filter as flt
 
     cfg = flt.load_filter_config(_cfg(args) / "filters.yaml")
@@ -279,6 +322,7 @@ def stage_filter(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
         raise Stopped(EXIT_QUOTA, f"[filter] 打分额度用完，停下：{stopped}")
     if stopped is not None:
         raise Stopped(EXIT_UNAVAILABLE, f"[filter] 打分后端暂时不可用，停下：{stopped}")
+    return EXIT_ATTENTION if s.errors else EXIT_OK
 
 
 def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
@@ -291,9 +335,40 @@ def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
     return DeepLTranslator.from_env()
 
 
-def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> None:
+def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
+    """translate --titles：只补翻缺中文标题的文章。"""
     from qbkb import translate as tr
 
+    conn = store.connect(args.db)
+    try:
+        urls = tr.missing_titles(conn, site.name)
+        if args.limit is not None:
+            urls = urls[: args.limit]
+        if not urls:
+            print(f"[translate] {site.name}: 没有缺中文标题的文章")
+            return EXIT_OK
+        translator = _make_translator(args, deps)
+        glossary = tr.load_glossary(_cfg(args) / "glossary.yaml")
+        try:
+            n = tr.backfill_titles(conn, urls, translator, glossary)
+        except tr.QuotaStopped as e:
+            raise Stopped(EXIT_QUOTA, f"[translate] 补翻标题时额度用完，停下：{e}") from e
+        except tr.BackendStopped as e:
+            raise Stopped(EXIT_UNAVAILABLE, f"[translate] 翻译后端暂时不可用：{e}") from e
+        print(
+            f"[translate] {site.name}: 补翻标题 {n} / {len(urls)} 篇"
+            "（已发布的退回 translated，下次 export 重新生成）"
+        )
+        return EXIT_OK if n == len(urls) else EXIT_ATTENTION
+    finally:
+        conn.close()
+
+
+def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
+    from qbkb import translate as tr
+
+    if getattr(args, "titles", False):
+        return stage_titles(args, deps, site)
     conn = store.connect(args.db)
     try:
         urls = store.list_by_status(conn, Status.FILTERED, site.name)
@@ -303,7 +378,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             urls = urls[: args.limit]
         if not urls:
             print(f"[translate] {site.name}: 没有待翻译的文章")
-            return
+            return EXIT_OK
         translator = _make_translator(args, deps)
         glossary = tr.load_glossary(_cfg(args) / "glossary.yaml")
         need = tr.estimate_chars(conn, urls, translator.name, glossary)
@@ -337,11 +412,12 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             f"[translate] {site.name}: 完成 {done} 篇、需复查 {review} 篇、失败 {failed} 篇，"
             f"送出 {chars} 字符"
         )
+        return EXIT_ATTENTION if review or failed else EXIT_OK
     finally:
         conn.close()
 
 
-def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> None:
+def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
     from qbkb import export
     from qbkb import filter as flt
     from qbkb.translate import load_glossary
@@ -381,7 +457,11 @@ def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
         print(f"  ! 图片 {f.image_url}：{f.reason}（保留原链接）")
     for e in s.failed:
         print(f"  ! {e}")
+    for url in s.requeued:
+        print(f"  ! {url}：缺译文，已退回 filtered，下次 translate 重翻")
     print(f"  索引：{out / export.INDEX_NAME}")
+    # 图片失败不算：原链接保留了，外站图片按规则本来就不下载
+    return EXIT_ATTENTION if s.failed or s.requeued else EXIT_OK
 
 
 # ---- 汇总命令 ----------------------------------------------------------------
@@ -411,7 +491,6 @@ def cmd_eval(args: argparse.Namespace) -> int:
     from qbkb import filter as flt
 
     cfg = flt.load_filter_config(_cfg(args) / "filters.yaml")
-    code = EXIT_OK
     conn = store.connect(args.db)
     try:
         for site in _sites(args):
@@ -439,29 +518,31 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 print(f"  还没打分 / 不在状态库：{len(r.missing)} 条")
     finally:
         conn.close()
-    return code
+    return EXIT_OK
 
 
 def _run_stage(name: str, args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
+    """跑一个阶段，返回 EXIT_OK / EXIT_ATTENTION / EXIT_ERROR；额度 / 后端问题抛 Stopped。"""
     if name == "discover":
-        stage_discover(args, deps, site)
-    elif name == "fetch":
+        return stage_discover(args, deps, site)
+    if name == "fetch":
         runner = deps.fetch_runner or (
             fetch_in_process if args.command == "fetch" else fetch_in_subprocess
         )
         code = runner(args, site.name)
-        if code != EXIT_OK:
+        if code not in (EXIT_OK, EXIT_ATTENTION):
             print(f"[fetch] {site.name}: 抓取进程退出码 {code}")
             return EXIT_ERROR
-    elif name == "extract":
-        stage_extract(args, site)
-    elif name == "filter":
-        stage_filter(args, deps, site)
-    elif name == "translate":
-        stage_translate(args, deps, site)
-    elif name == "export":
-        stage_export(args, deps, site)
-    return EXIT_OK
+        return code
+    if name == "extract":
+        return stage_extract(args, site)
+    if name == "filter":
+        return stage_filter(args, deps, site)
+    if name == "translate":
+        return stage_translate(args, deps, site)
+    if name == "export":
+        return stage_export(args, deps, site)
+    raise ValueError(f"未知阶段 {name}")
 
 
 def cmd_stages(args: argparse.Namespace, deps: Deps) -> int:
@@ -471,21 +552,25 @@ def cmd_stages(args: argparse.Namespace, deps: Deps) -> int:
     （比如打分额度用完，已经 filtered 的文章照样翻译、导出），最后用对应的退出码结束。
     """
     stages = [s for s in STAGES if s not in args.skip] if args.command == "run" else [args.command]
-    final = EXIT_OK
+    seen: set[int] = set()
     for site in _sites(args):
         for name in stages:
             try:
                 code = _run_stage(name, args, deps, site)
             except Stopped as e:
                 print(e)
-                final = max(final, e.code)
+                seen.add(e.code)
                 continue
-            if code != EXIT_OK:
+            if code == EXIT_ERROR:
                 return code
-    if final == EXIT_QUOTA:
+            seen.add(code)
+    final = next((c for c in _STOP_PRIORITY if c in seen), EXIT_OK)
+    if EXIT_QUOTA in seen:
         print(f"额度用完。{RESUME_HINT}")
-    elif final == EXIT_UNAVAILABLE:
+    if EXIT_UNAVAILABLE in seen:
         print(f"后端暂时不可用。{RESUME_HINT}")
+    if EXIT_ATTENTION in seen:
+        print("有文章需要人工处理（失败、需复查或退回重翻），用 qbkb status 查看。")
     return final
 
 
