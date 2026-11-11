@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 from dotenv import load_dotenv
 
-from qbkb.filter.rules import FilterConfig, Rubric
+from qbkb.filter.rules import DEFAULT_MODEL, FilterConfig, Rubric
 from qbkb.models import QuotaExceededError, Score
 
 # 理由太长就截断（写进状态库、status 输出里看）
@@ -28,20 +28,43 @@ class ScoreFormatError(ValueError):
     """后端返回的内容不是合格的打分 JSON（重试之后还是不行）。"""
 
 
+# 留给"思考 + 输出"的 token 上限。deepseek-flash 这类推理模型的思考过程（reasoning_content）
+# 也算在 max_tokens 里：上限太小时思考把额度用完，content 被截断或是空的，只能重问。
+# 打分的 JSON 本身不到 100 token，这里给思考留足余量。
+DEFAULT_MAX_TOKENS = 2000
+
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
+_DECODER = json.JSONDecoder()
+
+
+def extract_json(content: str) -> object:
+    """从模型输出里取出 JSON：整段就是 JSON、被 ``` 代码块包住、或前后带说明文字都接受。
+
+    前后有别的文字时取第一个完整的 JSON 对象。取不到抛 ScoreFormatError。
+    """
+    m = _FENCE.match(content)
+    text = (m.group(1) if m else content).strip()
+    if not text:
+        raise ScoreFormatError("不是 JSON：输出是空的")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        first = e
+    pos = text.find("{")
+    while pos >= 0:
+        try:
+            return _DECODER.raw_decode(text, pos)[0]
+        except json.JSONDecodeError:
+            pos = text.find("{", pos + 1)
+    raise ScoreFormatError(f"不是 JSON：{first}") from first
 
 
 def parse_score(content: str, categories: Sequence[str], rubric_version: str) -> Score:
     """把模型输出解析成 Score；格式不对抛 ScoreFormatError。
 
-    接受被 ```json 代码块包住的输出。score 必须是 0–10 的数字，category 必须原样在列表里。
+    JSON 的取法见 extract_json。score 必须是 0–10 的数字，category 必须原样在列表里。
     """
-    m = _FENCE.match(content)
-    text = m.group(1) if m else content
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ScoreFormatError(f"不是 JSON：{e}") from e
+    data = extract_json(content)
     if not isinstance(data, dict):
         raise ScoreFormatError("JSON 顶层不是对象")
     value = data.get("score")
@@ -165,7 +188,10 @@ class DeepSeekScorer:
 
     - 只发标题和摘录（调用方截好的前约 500 个单词），要求 JSON 输出，temperature 0；
     - 输出不是合格 JSON（或类别不在列表里）时，带上错误说明重问，最多 parse_retries 次，
-      还不行抛 ScoreFormatError；
+      还不行抛 ScoreFormatError；输出被 max_tokens 截断（finish_reason = length）时
+      原样再问一次；
+    - 用量：requests（成功返回的请求数）、tokens（total_tokens 累计，含思考）、
+      format_retries（因为输出不合格而重问的次数）；
     - 429 / 5xx / 网络错误按 backoff_s、2×backoff_s……退避（有 Retry-After 且更长就照它，
       不超过 max_backoff_s），最多 retries 次，之后抛 ScorerUnavailableError；
     - 标题和摘录包在 <article_title> / <article_excerpt> 里（见 user_message），
@@ -181,10 +207,11 @@ class DeepSeekScorer:
         categories: Sequence[str],
         *,
         base_url: str = "https://api.deepseek.com",
-        model: str = "deepseek-chat",
+        model: str = DEFAULT_MODEL,
         timeout_s: float = 60.0,
         retries: int = 5,
         parse_retries: int = 2,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         backoff_s: float = 2.0,
         max_backoff_s: float = 60.0,
         transport: httpx.BaseTransport | None = None,
@@ -197,12 +224,14 @@ class DeepSeekScorer:
         self.model = model
         self.retries = retries
         self.parse_retries = parse_retries
+        self.max_tokens = max_tokens
         self.backoff_s = backoff_s
         self.max_backoff_s = max_backoff_s
         self._sleep = sleep
         self._client = httpx.Client(timeout=timeout_s, transport=transport)
         self.requests = 0
         self.tokens = 0
+        self.format_retries = 0
 
     @classmethod
     def from_env(
@@ -242,7 +271,9 @@ class DeepSeekScorer:
             {"role": "user", "content": user_message(title, excerpt)},
         ]
         last: ScoreFormatError | None = None
-        for _ in range(self.parse_retries + 1):
+        for attempt in range(self.parse_retries + 1):
+            if attempt:
+                self.format_retries += 1
             content: str | None = None
             try:
                 content = self._complete(messages)
@@ -250,7 +281,7 @@ class DeepSeekScorer:
             except ScoreFormatError as e:
                 last = e
                 if content is None:
-                    continue  # 响应本身就坏了（不是模型输出的问题），原样再问一次
+                    continue  # 响应本身坏了或被截断（不是模型写错了格式），原样再问一次
                 messages = [
                     *messages,
                     {"role": "assistant", "content": content},
@@ -267,7 +298,7 @@ class DeepSeekScorer:
             "model": self.model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": 300,
+            "max_tokens": self.max_tokens,
             "response_format": {"type": "json_object"},
         }
         headers = {"Authorization": f"Bearer {self._api_key}"}
@@ -306,9 +337,15 @@ class DeepSeekScorer:
             data = resp.json()
             usage = data.get("usage") or {}
             self.tokens += int(usage.get("total_tokens") or 0)
-            content = data["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as e:
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
+            finish = choice.get("finish_reason")
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             raise ScoreFormatError(f"响应格式不对：{e}") from e
+        if finish == "length":
+            raise ScoreFormatError(
+                f"输出被截断：max_tokens = {self.max_tokens} 不够（推理模型的思考也算在里面）"
+            )
         if not isinstance(content, str):
             raise ScoreFormatError("响应里没有文本内容")
         return content

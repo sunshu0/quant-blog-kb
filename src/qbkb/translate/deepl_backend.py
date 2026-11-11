@@ -19,9 +19,14 @@ from qbkb.translate.base import (
     chunk_texts,
     count_chars,
 )
+from qbkb.translate.footnotes import protect_sups, restore_sups
 from qbkb.translate.glossary import Glossary, case_variants, terms_fingerprint
 
 GLOSSARY_PREFIX = "qbkb-"
+# 这些标签连同里面的内容原样保留、不送去翻译（DeepL 的 ignore_tags）。
+# 光靠它保不住脚注上标（真实请求验证过，仍会丢标签），纯数字的上标另有占位链接
+# （footnotes.py）；这里管剩下的上标（"20<sup>th</sup>" 之类），内容本来也不该翻译。
+IGNORE_TAGS: tuple[str, ...] = ("sup",)
 
 
 class DeepLApi(Protocol):
@@ -36,6 +41,7 @@ class DeepLApi(Protocol):
         context: str | None = ...,
         glossary: Any = ...,
         tag_handling: Any = ...,
+        ignore_tags: Any = ...,
     ) -> Any: ...
 
     def list_glossaries(self) -> list[deepl.GlossaryInfo]: ...
@@ -84,6 +90,7 @@ class DeepLTranslator:
         source_lang: str = "EN",
         target_lang: str = "ZH-HANS",
         glossary_target_lang: str = "ZH",
+        ignore_tags: Sequence[str] = IGNORE_TAGS,
         max_texts: int = MAX_TEXTS_PER_REQUEST,
         max_chars: int = MAX_REQUEST_CHARS,
         retries: int = 5,
@@ -95,6 +102,7 @@ class DeepLTranslator:
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.glossary_target_lang = glossary_target_lang
+        self.ignore_tags = tuple(ignore_tags)
         self.max_texts = max_texts
         self.max_chars = max_chars
         self.retries = retries
@@ -128,12 +136,14 @@ class DeepLTranslator:
     ) -> list[str]:
         if not segments:
             return []
-        # 先切批：超长段落在发任何请求之前就报 SegmentTooLargeError
+        # 先按原文切批：超长段落在发任何请求之前就报 SegmentTooLargeError
         chunks = chunk_texts(segments, self.max_texts, self.max_chars)
         glossary_id = self.sync_glossary(glossary)
         out: list[str] = []
         for chunk in chunks:
-            out.extend(self._request([segments[i] for i in chunk], glossary_id, context))
+            # 脚注上标换成占位链接再送出去，译文回来后还原（见 footnotes.py）
+            texts = [protect_sups(segments[i]) for i in chunk]
+            out.extend(restore_sups(t) for t in self._request(texts, glossary_id, context))
         return out
 
     def sync_glossary(self, glossary: Mapping[str, str]) -> str | None:
@@ -198,6 +208,7 @@ class DeepLTranslator:
                 source_lang=self.source_lang,
                 target_lang=self.target_lang,
                 tag_handling="html",
+                ignore_tags=list(self.ignore_tags) or None,
                 context=context or None,
                 # 传 id 而不是 GlossaryInfo：SDK 对 GlossaryInfo 的语言比对区分大小写
                 glossary=glossary_id,

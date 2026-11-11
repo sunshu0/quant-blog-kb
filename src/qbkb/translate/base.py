@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-# DeepL API Free 每月额度（字符）
-FREE_MONTHLY_CHARS = 500_000
+# DeepL API Free 每月额度（字符）。2026-11 账户实测上限是 1,000,000；只在 usage() 取不到时用它兜底
+FREE_MONTHLY_CHARS = 1_000_000
 # 单次请求的上限，pipeline 分批和 DeepLTranslator 共用这一处定义。
 # DeepL 限制：最多 50 条文本、请求体最多 128 KiB；字符上限留足余量给 JSON 转义和 context。
 MAX_TEXTS_PER_REQUEST = 50
