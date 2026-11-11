@@ -65,7 +65,7 @@ def test_parse_score_rejects_bad_fields(patch: dict[str, object]) -> None:
 
 
 def test_parse_score_rejects_non_json() -> None:
-    with pytest.raises(ScoreFormatError, match="不是 JSON"):
+    with pytest.raises(ScoreFormatError, match="没有找到合格的打分 JSON"):
         parse_score("分数 8", CATS, "v1")
 
 

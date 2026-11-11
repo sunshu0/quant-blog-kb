@@ -47,7 +47,9 @@ def restore_sups(html: str) -> str:
     """protect_sups 的逆操作，容忍 DeepL 把旁边的字包进了占位链接。
 
     数字以 href 为准：链接文字里数字前后多出来的字放回原位；链接文字里连数字都没有了，
-    就把剩下的字放在上标前面。占位链接被整个丢掉时无法还原，结构校验会拦下这一段。
+    就把剩下的字放在上标前面。占位链接被整个丢掉时无法还原：译文里少一个 <sup>，
+    structure.same_structure（标签指纹 + footnote_marks）会拦下这一段，重翻一次，
+    还不行就标 rejected、文章进 needs_review。
     """
 
     def sub(m: re.Match[str]) -> str:

@@ -45,7 +45,7 @@ def test_filter_prints_llm_usage(tmp_path: Path, capsys: pytest.CaptureFixture[s
     deps = cli.Deps(scorer=CountingScorer())
     assert cli.main(["filter", "--site", "man", "--db", str(db)], deps=deps) == 0
     out = capsys.readouterr().out
-    assert "LLM 用量：请求 2 次（其中格式重问 1 次），共 1500 token" in out
+    assert "LLM 用量：请求 2 次（其中格式重问 1 次、截断重问 0 次），共 1500 token" in out
 
 
 def test_filter_with_fake_scorer_prints_no_usage(
@@ -99,7 +99,7 @@ def test_translate_prints_real_quota_before_and_after(
 def test_translate_quota_falls_back_to_constant(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert FREE_MONTHLY_CHARS == 1_000_000
+    assert FREE_MONTHLY_CHARS == 500_000  # 保守的回退值；真实上限以 usage() 为准
     assert _translate(tmp_path, MeteredTranslator(10, None)) == 0
     out = capsys.readouterr().out
     assert f"已用 10 / 上限 {FREE_MONTHLY_CHARS} 字符" in out and "按 API Free 的默认值" in out

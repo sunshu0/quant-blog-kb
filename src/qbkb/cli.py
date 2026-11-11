@@ -10,6 +10,7 @@ import io
 import logging
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ EXIT_CODES_HELP = """退出码：
 同时出现多种情况时按 4、3、5 的顺序取第一个。"""
 
 STAGES = ("discover", "fetch", "extract", "filter", "translate", "export")
+# 查翻译额度（只用来显示）最多等这么久
+USAGE_TIMEOUT_S = 5.0
 RESUME_HINT = "进度已保存在状态库里，下次运行同一条命令会从中断处接着跑。"
 
 log = logging.getLogger("qbkb")
@@ -299,7 +302,11 @@ def scorer_usage_line(scorer: object) -> str | None:
     if not isinstance(requests, int) or not isinstance(tokens, int):
         return None
     retries = getattr(scorer, "format_retries", 0)
-    return f"  LLM 用量：请求 {requests} 次（其中格式重问 {retries} 次），共 {tokens} token"
+    truncated = getattr(scorer, "truncated_retries", 0)
+    return (
+        f"  LLM 用量：请求 {requests} 次（其中格式重问 {retries} 次、"
+        f"截断重问 {truncated} 次），共 {tokens} token"
+    )
 
 
 def stage_filter(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
@@ -351,7 +358,8 @@ def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
 def translator_quota(translator: object) -> tuple[int | None, int, bool] | None:
     """翻译后端本月的 (已用字符, 上限, 上限是不是实测的)；后端没有额度概念就返回 None。
 
-    问后端的 usage()（DeepL 的这个接口不消耗额度）。取不到用量时已用为 None；
+    问后端的 usage()（DeepL 的这个接口不消耗额度；只问一次，最多等 USAGE_TIMEOUT_S 秒）。
+    取不到用量时已用为 None；
     取不到上限时退回 FREE_MONTHLY_CHARS。
     """
     from qbkb.translate import FREE_MONTHLY_CHARS
@@ -359,10 +367,23 @@ def translator_quota(translator: object) -> tuple[int | None, int, bool] | None:
     usage = getattr(translator, "usage", None)
     if not callable(usage):
         return None
+    box: list[object] = []
+
+    def ask() -> None:
+        try:
+            box.append(usage())
+        except Exception as e:  # 只是显示用：取不到不影响翻译
+            log.info("取不到翻译额度：%s", e)
+
+    # 放在守护线程里问，最多等 USAGE_TIMEOUT_S 秒：接口卡住时跳过，不拖住翻译也不拖住退出
+    worker = threading.Thread(target=ask, daemon=True)
+    worker.start()
+    worker.join(USAGE_TIMEOUT_S)
+    if worker.is_alive():
+        log.info("取不到翻译额度：%s 秒内没有返回", USAGE_TIMEOUT_S)
     try:
-        used, limit = cast("tuple[object, object]", usage())
-    except Exception as e:  # 只是显示用：取不到不影响翻译
-        log.info("取不到翻译额度：%s", e)
+        used, limit = cast("tuple[object, object]", box[0])
+    except (IndexError, TypeError, ValueError):
         return None, FREE_MONTHLY_CHARS, False
     if not isinstance(used, int):
         used = None

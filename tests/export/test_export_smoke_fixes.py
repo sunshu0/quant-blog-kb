@@ -4,7 +4,7 @@ from qbkb.export.markdown import split_image_rows, tidy_zh_spacing, to_markdown
 
 
 def test_tidy_removes_space_after_chinese_punctuation() -> None:
-    assert tidy_zh_spacing("有影响。 如果利率上升， 那么；  结果：　如下、 等等") == (
+    assert tidy_zh_spacing("有影响。 如果利率上升， 那么；  结果：\t如下、 等等") == (
         "有影响。如果利率上升，那么；结果：如下、等等"
     )
     assert tidy_zh_spacing("真的吗？ 是的！ 好") == "真的吗？是的！好"

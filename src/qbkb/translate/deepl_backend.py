@@ -180,8 +180,12 @@ class DeepLTranslator:
         return found.glossary_id
 
     def usage(self) -> tuple[int | None, int | None]:
-        """本月已用字符数和上限（访问 DeepL，但不消耗额度）。"""
-        chars = self._with_retry(self._client.get_usage).character
+        """本月已用字符数和上限（访问 DeepL，但不消耗额度）。
+
+        只问一次、不走退避重试：这个数字只用来显示，取不到就算了（调用方自己兜底），
+        不能因为它卡住翻译。失败时抛 deepl.DeepLException。
+        """
+        chars = self._client.get_usage().character
         return chars.count, chars.limit
 
     def _with_retry[T](self, fn: Callable[[], T]) -> T:
