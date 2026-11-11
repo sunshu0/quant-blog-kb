@@ -26,6 +26,7 @@ from qbkb.export.markdown import (
     rewrite_images,
     safe_url,
     to_markdown,
+    url_allowed,
 )
 from qbkb.models import Status
 from qbkb.translate import Glossary, lookup_translation, translated_title
@@ -61,10 +62,17 @@ def firm_name(site: SiteConfig) -> str:
     return str(firm) if firm else site.name
 
 
+def checked_source_url(url: str) -> str | None:
+    """原文地址也过协议白名单（只放行 http / https）；不合格就不写进输出。"""
+    return url if url_allowed(url, "image") and "://" in url else None
+
+
 def source_line(firm: str, title: str, url: str) -> str:
     """每篇开头的来源和版权说明（design.md 3.3）。"""
+    checked = checked_source_url(url)
+    where = f"，<{safe_url(checked)}>" if checked else ""
     return (
-        f"> 来源：{escape_text(firm)}《{escape_text(title)}》，<{safe_url(url)}>。"
+        f"> 来源：{escape_text(firm)}《{escape_text(title)}》{where}。"
         f"原文版权归 {escape_text(firm)} 所有；本文为机器翻译，"
         "仅供内部学习参考，未经许可不得再分发。文末附原文的重要信息与版权声明（译文）。"
     )
@@ -101,6 +109,8 @@ def _localize(
         return html
 
     def replace(src: str) -> str:
+        if not url_allowed(src, "image"):
+            return src  # 协议不在白名单里：不下载，to_markdown 会把它去掉
         before = images.requests
         try:
             name = images.get(src)
@@ -178,7 +188,7 @@ def export_article(
         "firm": firm,
         "author": row["author"],
         "published": row["published"],
-        "source_url": url,
+        "source_url": checked_source_url(url),
         "category": category,
         "value_score": None if score is None else float(score),
         "rubric_version": row["rubric_version"],

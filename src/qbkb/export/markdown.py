@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import html as htmllib
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import yaml
 from markdownify import MarkdownConverter
@@ -56,25 +58,74 @@ def _escape_html(md: str) -> str:
     return "".join(parts)
 
 
+# 浏览器解析地址前会去掉的字符：控制字符和空白（"java\tscript:" 照样能执行）
+_URL_IGNORED = re.compile(r"[\x00-\x20\x7f]+")
+_SCHEME = re.compile(r"^([a-z][a-z0-9+.\-]*):", re.IGNORECASE)
+LINK_SCHEMES = frozenset({"http", "https", "mailto"})
+IMAGE_SCHEMES = frozenset({"http", "https"})
+_TAG_NAME = re.compile(r"^<\s*([a-zA-Z][a-zA-Z0-9]*)")
+_ALT = re.compile(r"\salt=([\"'])(.*?)\1", re.IGNORECASE | re.DOTALL)
+
+
+def url_allowed(url: str, kind: Literal["link", "image"] = "link") -> bool:
+    """协议白名单（纵深防御，extract 已经挡过一次）。
+
+    链接：http、https、mailto、# 锚点、相对路径；图片：http、https、相对路径。
+    先还原 HTML 实体、去掉控制字符和空白再判断，所以 JaVaScRiPt:、java\\tscript:、
+    &#106;avascript: 这些变体都会被拦下。
+    """
+    cleaned = _URL_IGNORED.sub("", htmllib.unescape(url))
+    if cleaned.startswith("#"):
+        return kind == "link"
+    m = _SCHEME.match(cleaned)
+    if m is None:
+        return True  # 相对路径（包括 //host/x 这种跟随页面协议的）
+    allowed = LINK_SCHEMES if kind == "link" else IMAGE_SCHEMES
+    return m.group(1).lower() in allowed
+
+
 def safe_url(url: str) -> str:
-    """链接 / 图片地址里的括号、空格、尖括号转成 %xx，Markdown 链接不会断。"""
+    """链接 / 图片地址里的括号、空格、尖括号转成 %xx，Markdown 链接不会断。
+
+    只做转义，不做协议检查（见 url_allowed）。
+    """
     return "".join(_URL_UNSAFE.get(c, c) for c in url)
 
 
-def _safe_url_attrs(html: str) -> str:
-    def sub(m: re.Match[str]) -> str:
-        return f"{m.group(1)}{m.group(2)}{safe_url(m.group(3))}{m.group(2)}"
+def _clean_tag(tag: str) -> str:
+    """检查一个标签的 href / src：协议不在白名单里就去掉这个属性；
+    图片没了地址就只留 alt 文字（链接去掉 href 后 markdownify 只输出链接文字）。"""
+    m = _TAG_NAME.match(tag)
+    name = m.group(1).lower() if m else ""
+    kind: Literal["link", "image"] = "image" if name == "img" else "link"
+    dropped = False
 
+    def sub(a: re.Match[str]) -> str:
+        nonlocal dropped
+        if not url_allowed(a.group(3), kind):
+            dropped = True
+            return ""
+        return f"{a.group(1)}{a.group(2)}{safe_url(a.group(3))}{a.group(2)}"
+
+    out = _URL_ATTR.sub(sub, tag)
+    if dropped and name == "img":
+        alt = _ALT.search(tag)
+        return htmllib.escape(htmllib.unescape(alt.group(2)), quote=False) if alt else ""
+    return out
+
+
+def _safe_url_attrs(html: str) -> str:
     parts = _TAG.split(html)
     for i in range(1, len(parts), 2):  # 奇数下标是标签
-        parts[i] = _URL_ATTR.sub(sub, parts[i])
+        parts[i] = _clean_tag(parts[i])
     return "".join(parts)
 
 
 def to_markdown(html: str) -> str:
     """一个块级 HTML 片段 → Markdown（去掉首尾空行）。
 
-    结果里不含原始 HTML（上下标除外），链接地址里的括号、空格已转义。
+    结果里不含原始 HTML（上下标除外）；链接和图片只留白名单协议（url_allowed），
+    地址里的括号、空格已转义。
     """
     return _escape_html(_CONVERTER.convert(_safe_url_attrs(html)).strip())
 

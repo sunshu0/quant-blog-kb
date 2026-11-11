@@ -141,6 +141,7 @@ compliance:
 - frontmatter 字段：title、title_zh、firm（站点配置的 `firm`）、author、published、source_url、category、value_score、rubric_version、translator、translated_at。
 - 标题下面一行来源和版权说明；正文之后用分隔线隔开，附上原文的版权声明和重要信息（keep 块的译文）。
 - **输出里不留原始 HTML**：markdownify 会把原文里转义过的 `&lt;script&gt;` 还原成 `<script>`，所以转换后把正文里剩下的 `<` 一律转成 `&lt;`，只放行 `<sup>` / `<sub>` 和自动链接，代码里不动；标题、来源行、index 里的标题同样转义；frontmatter 里含 `< > &` 的值加双引号。链接和图片地址里的括号、空格转成 `%28` `%29` `%20`，Markdown 链接不会断。
+- **链接协议白名单**（纵深防御，extract 已经挡过一次）：链接只留 http、https、mailto、`#` 锚点和相对路径，图片只留 http、https 和相对路径；判断前先还原 HTML 实体、去掉控制字符和空白（`JaVaScRiPt:`、`java	script:` 都算）。不合格的链接去掉地址、保留文字，图片只留 alt；对照版同样处理，frontmatter 和来源行里的 `source_url` 只放行 http / https。
 - 术语第一次出现时附上英文："趋势跟踪（trend following）"。只标原文这段确实含该术语的段落；译文和原文相同的词条（alpha、CTA）、代码、公式、链接文字里不标。
 - 主文件用**纯中文**；另外从翻译记忆生成 `output/bilingual/<site>/` 对照版（每段英文后面跟中文，只有图片的段落只出现一次），不额外消耗额度。
 - 图片下载到 `output/<site>/images/`（文件名是地址的 hash），Markdown 里改成相对路径（对照版是 `../../<site>/images/`）。礼貌规则：先过合规闸门；只下载站点本身的 host（以及站点配置 `export.image_hosts` 列出的）；串行，两次请求间隔 ≥ 1 秒（真实站点调不低于 1 秒，只有本机测试站点可以）；带项目 UA；单张不超过 10 MB；已下载过的不再请求。下载失败保留原始链接，并追加记进 `output/<site>/images/failed.tsv`。`--no-images` 关掉下载。
