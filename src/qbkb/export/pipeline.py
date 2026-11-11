@@ -25,6 +25,7 @@ from qbkb.export.markdown import (
     render_bilingual,
     rewrite_images,
     safe_url,
+    tidy_zh_spacing,
     to_markdown,
     url_allowed,
 )
@@ -175,8 +176,11 @@ def export_article(
     en_blocks: list[str] = []
     for seg, tgt in zip(segments, zh_html, strict=True):
         tgt = annotator.annotate(tgt, glossary.terms_in(seg.html))
-        zh_blocks.append(to_markdown(_localize(tgt, "", url, images, stats, seen)))
-        zh_bi_blocks.append(to_markdown(_localize(tgt, bi_prefix, url, images, stats, seen)))
+        zh = to_markdown(_localize(tgt, "", url, images, stats, seen))
+        zh_bi = to_markdown(_localize(tgt, bi_prefix, url, images, stats, seen))
+        # 中文段落去掉标点后面多余的空格（英文段落不动）
+        zh_blocks.append(tidy_zh_spacing(zh))
+        zh_bi_blocks.append(tidy_zh_spacing(zh_bi))
         en_blocks.append(to_markdown(_localize(seg.html, bi_prefix, url, images, stats, seen)))
 
     category = row["category"]

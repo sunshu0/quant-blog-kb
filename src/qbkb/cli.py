@@ -10,11 +10,12 @@ import io
 import logging
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
 import httpx
 
@@ -41,6 +42,8 @@ EXIT_CODES_HELP = """退出码：
 同时出现多种情况时按 4、3、5 的顺序取第一个。"""
 
 STAGES = ("discover", "fetch", "extract", "filter", "translate", "export")
+# 查翻译额度（只用来显示）最多等这么久
+USAGE_TIMEOUT_S = 5.0
 RESUME_HINT = "进度已保存在状态库里，下次运行同一条命令会从中断处接着跑。"
 
 log = logging.getLogger("qbkb")
@@ -177,7 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = stage("eval", "L2 评测：LLM 判断和人工判断的一致率")
     _common(p)
     p.add_argument("--file", type=Path, help="评测集（默认 config/eval/<site>.yaml）")
-    p.add_argument("--rubric-version", help="只比较这个打分版本（例如 v1@deepseek-chat）")
+    p.add_argument("--rubric-version", help="只比较这个打分版本（例如 v2@deepseek-flash）")
     return parser
 
 
@@ -292,6 +295,20 @@ def _make_scorer(args: argparse.Namespace, deps: Deps) -> Scorer:
     return flt.DeepSeekScorer.from_env(rubric, cfg)
 
 
+def scorer_usage_line(scorer: object) -> str | None:
+    """打分后端这次运行的用量（请求数、token、格式重问次数）；后端不统计就返回 None。"""
+    requests = getattr(scorer, "requests", None)
+    tokens = getattr(scorer, "tokens", None)
+    if not isinstance(requests, int) or not isinstance(tokens, int):
+        return None
+    retries = getattr(scorer, "format_retries", 0)
+    truncated = getattr(scorer, "truncated_retries", 0)
+    return (
+        f"  LLM 用量：请求 {requests} 次（其中格式重问 {retries} 次、"
+        f"截断重问 {truncated} 次），共 {tokens} token"
+    )
+
+
 def stage_filter(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
     from qbkb import filter as flt
 
@@ -316,6 +333,9 @@ def stage_filter(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
         f"[filter] {site.name}: 收 {s.kept}、L1 筛掉 {s.skipped_l1}、L2 筛掉 {s.skipped_l2}、"
         f"人工覆盖 {s.overridden}（打分 {s.scored} 次，复用 {s.reused} 次）"
     )
+    usage = scorer_usage_line(scorer)
+    if usage:
+        print(usage)
     for e in s.errors:
         print(f"  ! {e}")
     if isinstance(stopped, flt.FilterQuotaStopped):
@@ -333,6 +353,64 @@ def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
     if args.translator == "fake":
         return FakeTranslator(quota_chars=args.fake_quota)
     return DeepLTranslator.from_env()
+
+
+def translator_quota(translator: object) -> tuple[int | None, int, bool] | None:
+    """翻译后端本月的 (已用字符, 上限, 上限是不是实测的)；后端没有额度概念就返回 None。
+
+    问后端的 usage()（DeepL 的这个接口不消耗额度；只问一次，最多等 USAGE_TIMEOUT_S 秒）。
+    取不到用量时已用为 None；
+    取不到上限时退回 FREE_MONTHLY_CHARS。
+    """
+    from qbkb.translate import FREE_MONTHLY_CHARS
+
+    usage = getattr(translator, "usage", None)
+    if not callable(usage):
+        return None
+    box: list[object] = []
+
+    def ask() -> None:
+        try:
+            box.append(usage())
+        except Exception as e:  # 只是显示用：取不到不影响翻译
+            log.info("取不到翻译额度：%s", e)
+
+    # 放在守护线程里问，最多等 USAGE_TIMEOUT_S 秒：接口卡住时跳过，不拖住翻译也不拖住退出
+    worker = threading.Thread(target=ask, daemon=True)
+    worker.start()
+    worker.join(USAGE_TIMEOUT_S)
+    if worker.is_alive():
+        log.info("取不到翻译额度：%s 秒内没有返回", USAGE_TIMEOUT_S)
+    try:
+        used, limit = cast("tuple[object, object]", box[0])
+    except (IndexError, TypeError, ValueError):
+        return None, FREE_MONTHLY_CHARS, False
+    if not isinstance(used, int):
+        used = None
+    if not isinstance(limit, int) or limit <= 0:
+        return used, FREE_MONTHLY_CHARS, False
+    return used, limit, True
+
+
+def quota_line(translator: object, when: str) -> str | None:
+    """ "本月额度：已用 / 上限"这一行；后端没有额度概念就返回 None。"""
+    quota = translator_quota(translator)
+    if quota is None:
+        return None
+    used, limit, measured = quota
+    source = "" if measured else "（取不到真实上限，按 API Free 的默认值）"
+    if used is None:
+        return f"[translate] {when}本月额度：已用未知 / 上限 {limit} 字符{source}"
+    return (
+        f"[translate] {when}本月额度：已用 {used} / 上限 {limit} 字符"
+        f"（剩余 {max(limit - used, 0)}）{source}"
+    )
+
+
+def _print_quota(translator: object, when: str) -> None:
+    line = quota_line(translator, when)
+    if line:
+        print(line)
 
 
 def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
@@ -386,6 +464,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             f"[translate] {site.name}: 待翻译 {len(urls)} 篇，"
             f"预计约 {need} 字符（不含命中翻译记忆的）"
         )
+        _print_quota(translator, "翻译前")
         done = review = failed = chars = 0
         for url in urls:
             try:
@@ -395,6 +474,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             except tr.QuotaStopped as e:
                 chars += e.stats.chars
                 print(f"[translate] 完成 {done} 篇、需复查 {review} 篇，送出 {chars} 字符")
+                _print_quota(translator, "翻译后")
                 raise Stopped(EXIT_QUOTA, f"[translate] 翻译额度用完，停下：{e}") from e
             except tr.BackendStopped as e:
                 print(f"[translate] 完成 {done} 篇、需复查 {review} 篇")
@@ -412,6 +492,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             f"[translate] {site.name}: 完成 {done} 篇、需复查 {review} 篇、失败 {failed} 篇，"
             f"送出 {chars} 字符"
         )
+        _print_quota(translator, "翻译后")
         return EXIT_ATTENTION if review or failed else EXIT_OK
     finally:
         conn.close()

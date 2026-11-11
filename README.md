@@ -18,7 +18,14 @@ uv run qbkb status
 
 不想花额度时加 `--scorer fake --translator fake`（假后端，跑通流程用）。退出码：0 正常，1 出错，3 额度用完（进度已保存，下个月再跑同一条命令即可接着翻），4 后端暂时不可用（稍后再跑），5 跑完了但有文章需要人工处理（`qbkb status` 查看）。完整说明见 `uv run qbkb --help`。
 
-需要真实翻译时，复制 `.env.example` 为 `.env` 并填写 API key。
+需要真实翻译时，复制 `.env.example` 为 `.env` 并填写 API key。filter 结束时会打印 LLM 的请求数和 token 数，translate 前后会打印 DeepL 本月的"已用 / 上限"字符数。
+
+## 已知局限
+
+- **原文里 iframe 嵌入的交互图表不会出现在译文里**，位置上也没有提示；需要看图表请打开每篇开头的原文链接。
+- 不处理 PDF；图表图片里的文字不翻译。
+- 机器翻译，结构校验没过的段落会进 `needs_review` 等人工复查。
+- 完整列表见 [docs/design.md](docs/design.md) 第 9 节。
 
 ## 版权说明
 

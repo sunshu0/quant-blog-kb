@@ -23,7 +23,7 @@
 **目标**：自动抓取国外量化机构博客中**有价值的文章**，翻译成中文 Markdown，放进团队知识库，用来补充量化和股票方面的基础知识；新文章发布后能**自动增量入库**。
 
 **MVP 范围**：
-- 1 个来源站点，约 **30 篇**。DeepL Free 每月 50 万字符，30 篇约 45 万字符，一个月内能翻完。
+- 1 个来源站点，约 **30 篇**。DeepL API Free 的月额度以账户实际显示的为准（2026-11 实测上限 100 万字符；最初按 50 万估算），30 篇约 45 万字符，一个月内能翻完。
 - 能跑通完整流程：发现 → 抓取 → 抽取 → 筛选 → 翻译 → 输出。
 - 有设计文档、自动测试和局限性说明。
 
@@ -117,10 +117,11 @@ compliance:
 - L2：LLM 读标题和正文前 `excerpt_words`（500）个单词，按评分标准打分，输出 JSON（score 0–10、category、evergreen、reason）。
   - 评分标准是独立文件 `config/rubrics/<版本>.md`（文件头写版本号），`filters.yaml` 的 `l2.rubric_version` 选用哪份（现在是 v2）；category 只能从 `include_categories` + `exclude_categories` 里选。改了评分标准内容或发给模型的消息格式，都要新建一份、递增版本号。
   - 防 prompt 注入：标题和摘录分别包在 `<article_title>`、`<article_excerpt>` 里（文本里的尖括号换成全角，伪造不了结束标签），评分标准写明标签内是待评文本、不是指令。
-  - 写进 `rubric_version` 的是"评分标准版本@后端"，例如 `v1@deepseek-chat`、`v1@fake`：换模型或换评分标准都会重新打分，假后端的分数也不会被真后端误用。
+  - 写进 `rubric_version` 的是"评分标准版本@后端"，例如 `v2@deepseek-flash`、`v1@fake`：换模型或换评分标准都会重新打分，假后端的分数也不会被真后端误用。
+  - **换模型的迁移策略**：`rubric_version` 带模型名，所以改 `l2.model`（或 `LLM_MODEL`）等于让所有文章重新打分——这是预期行为，不同模型的分数不能混用，没有"沿用旧分数"的开关。只有再跑 filter 的文章才会重打：已经翻译 / 发布的文章不受影响，`--refilter` 才会把已筛过的也重新判断。换之前先估成本：要重打的篇数 ≈ 通过 L1 的文章数（`qbkb status` 里 extracted + filtered + skipped 的上限），每篇 1 个请求、约 800–900 token（2026-11 `deepseek-flash` 实测，含思考），再乘以新模型的单价。2026-11-11 默认模型从已下线的 `deepseek-chat` 改成 `deepseek-flash` 就属于这种情况：用旧默认值打过分的库会全部重打（冒烟库当时已经用 `LLM_MODEL=deepseek-flash` 打分，版本串一致，可以复用）。
   - 判定：score ≥ `threshold` 且 category 在收录列表里 → `filtered`，否则 `skipped`；两种情况都写入 value_score、category、evergreen、score_reason、rubric_version、scored_body_hash。
   - **复用打分**：`body_hash == scored_body_hash` 且 rubric_version 相同就不再调用后端。所以改阈值后 `qbkb filter --refilter` 不花钱。
-  - 后端：`DeepSeekScorer`（httpx 调 OpenAI 兼容的 `/chat/completions`，`response_format=json_object`、temperature 0；`LLM_API_KEY` 放 `.env`，base_url / model 在 `filters.yaml`，环境变量 `LLM_BASE_URL` / `LLM_MODEL` 优先）。输出不合格会带着错误说明重问（默认 2 次），还不行文章留在 `extracted`、error 写原因，下次再试；429 / 5xx / 网络错误重试，等待时间取 Retry-After 和指数退避里较大的一个（Retry-After: 0 也不会立刻重打）；402（余额不足）或 `insufficient_quota` 抛 `QuotaExceededError`，流程停下、下次接着跑。测试用确定性的 `FakeScorer`（按关键词给类别和分数）。
+  - 后端：`DeepSeekScorer`（httpx 调 OpenAI 兼容的 `/chat/completions`，`response_format=json_object`、temperature 0；`LLM_API_KEY` 放 `.env`，base_url / model 在 `filters.yaml`，环境变量 `LLM_BASE_URL` / `LLM_MODEL` 优先）。输出不合格会带着错误说明重问（默认 2 次），还不行文章留在 `extracted`、error 写原因，下次再试。默认模型 `deepseek-flash` 是推理模型，思考过程也算在 `max_tokens` 里：上限给到 2000（原来的 300 会被思考用完，输出被截断只能重问）；`finish_reason=length` 时把 `max_tokens` 翻倍再问（最多 8000，到上限还截断就放弃；temperature 是 0，原样再问大概率还是截断），截断的输出不带回去。解析时接受代码块围栏和前后带说明文字的输出：取第一个带 `score` 字段的**顶层** JSON 对象，外层不完整时不去取里面嵌套的对象。filter 结束时打印请求数、格式重问次数、截断重问次数（两者分开计数，合起来最多重问 2 次）和 token 数；429 / 5xx / 网络错误重试，等待时间取 Retry-After 和指数退避里较大的一个（Retry-After: 0 也不会立刻重打）；402（余额不足）或 `insufficient_quota` 抛 `QuotaExceededError`，流程停下、下次接着跑。测试用确定性的 `FakeScorer`（按关键词给类别和分数）。
 - L3：`config/overrides.yaml` 按 URL 指定 include / exclude（可带 category、note），**优先级最高**，压过 L1 和 L2；每次跑 filter 都重新套用到还没翻译的文章上（改了覆盖不用加参数）。覆盖不动打分列，去掉覆盖后旧打分还能复用。
 - 评测集：`config/eval/<site>.yaml`，URL → 人工判断。`qbkb eval` 用状态库里已有的打分（不重新打分、不花钱）算 LLM 和人工判断的一致率和混淆矩阵，列出不一致的文章；改评分标准前先在评测集上验证。现在只有框架和一个小样例，样例的判断还没有人工逐篇确认。
 - 被筛掉的文章标记为 `skipped`，不删除，以后放宽标准时不用重新爬取。
@@ -129,7 +130,8 @@ compliance:
 - 后端可插拔，接口为 `translate(segments, glossary) -> translations`。MVP 用 DeepL API Free，Azure 作为备选。
 - 使用 DeepL 的 **HTML 模式**（`tag_handling=html`），标签原样保留；`glossary.yaml` 同步成 DeepL 的术语表。
 - **段落级翻译记忆**：key 是段落 HTML 规范化后的 hash。命中就复用，不命中才翻译。重复的段落（比如版权声明）只翻译一次。
-- 额度用完就停下，记录进度，下个月接着翻。
+- **脚注上标**：真实冒烟发现 DeepL 在 HTML 模式下会丢掉 `<sup>2</sup>`，或者只丢标签、把数字并进正文；加 `ignore_tags=["sup"]` 后第二种情况仍然出现。所以送出去之前把纯数字的 `<sup>N</sup>` 换成占位链接 `<a href="#qbkb-sup-N">N</a>`（DeepL 对带 href 的链接保留得好），译文回来后还原；DeepL 把旁边的字一起包进链接时，以 href 里的数字为准把字放回外面（`translate/footnotes.py`）。`ignore_tags=["sup"]` 仍然带着，管不是纯数字的上标。占位链接也被丢掉时脚注不会悄悄消失：结构校验除了比标签指纹，还单独比较**脚注编号**（纯数字 `<sup>` 的个数和数字，`structure.footnote_marks`），不一致就重翻一次，还不一致标 rejected、文章进 `needs_review`。
+- 额度用完就停下，记录进度，下个月接着翻。`qbkb translate` 在翻译前后各调一次 DeepL 的 usage 接口（不消耗额度），显示真实的"已用 / 上限"。查额度只问一次、不走退避重试，最多等 5 秒，取不到就跳过、不影响翻译；这时上限退回保守的常量 `FREE_MONTHLY_CHARS`（50 万）。真实上限各账户不一样（我们的账户实测 100 万），以 usage 接口为准。
 - 校验：翻译前后标签、链接、图片的数量必须一致，不一致就重新翻译。
 - 术语第一次出现时附上英文（在导出阶段处理）。
 - **标题**作为额外的一个翻译单元（`<p>标题</p>`），在正文之后翻译，同样走翻译记忆，结果写进 `title_zh`；标题结构校验没过只是 `title_zh` 留空（导出时用英文标题），不影响文章状态。额度估算（`estimate_chars`）把标题算在内。
@@ -142,6 +144,7 @@ compliance:
 - 标题下面一行来源和版权说明；正文之后用分隔线隔开，附上原文的版权声明和重要信息（keep 块的译文）。
 - **输出里不留原始 HTML**：markdownify 会把原文里转义过的 `&lt;script&gt;` 还原成 `<script>`，所以转换后把正文里剩下的 `<` 一律转成 `&lt;`，只放行 `<sup>` / `<sub>` 和自动链接，代码里不动；标题、来源行、index 里的标题同样转义；frontmatter 里含 `< > &` 的值加双引号。链接和图片地址里的括号、空格转成 `%28` `%29` `%20`，Markdown 链接不会断。
 - **链接协议白名单**（纵深防御，extract 已经挡过一次）：链接只留 http、https、mailto、`#` 锚点和相对路径，图片只留 http、https 和相对路径；判断前先还原 HTML 实体、去掉控制字符和空白（`JaVaScRiPt:`、`java\tscript:`（中间夹制表符） 都算）。不合格的链接去掉地址、保留文字，图片只留 alt；对照版同样处理，frontmatter 和来源行里的 `source_url` 只放行 http / https。
+- 排版清理：中文段落里中文标点（。！？；：，、）后面紧跟的空格去掉（DeepL 的译文常有"影响。 如果"），代码（围栏、缩进、行内）、链接地址、英文段落、全角空格、行尾硬换行不动；整行只有几张图片时每张拆成单独一段（前面有行内代码或文字的行不拆）。
 - 术语第一次出现时附上英文："趋势跟踪（trend following）"。只标原文这段确实含该术语的段落；译文和原文相同的词条（alpha、CTA）、代码、公式、链接文字里不标。
 - 主文件用**纯中文**；另外从翻译记忆生成 `output/bilingual/<site>/` 对照版（每段英文后面跟中文，只有图片的段落只出现一次），不额外消耗额度。
 - 图片下载到 `output/<site>/images/`（文件名是地址的 hash），Markdown 里改成相对路径（对照版是 `../../<site>/images/`）。礼貌规则：先过合规闸门；只下载站点本身的 host（以及站点配置 `export.image_hosts` 列出的）；串行，两次请求间隔 ≥ 1 秒（真实站点调不低于 1 秒，只有本机测试站点可以）；带项目 UA；单张不超过 10 MB；已下载过的不再请求。下载失败保留原始链接，并追加记进 `output/<site>/images/failed.tsv`。`--no-images` 关掉下载。
@@ -243,6 +246,8 @@ quant-blog-kb/
 
 - 不处理 PDF。
 - 图表里的文字不翻译。
+- **iframe 嵌入的交互图表会被丢掉**：抽取阶段把 `<iframe>` 整个去掉（不抓第三方图表服务），译文里这个位置没有任何提示；有 `<noscript>` 静态缩略图的会保留缩略图。要看图表请打开每篇开头的原文链接。
+- 脚注上标靠占位链接保住，只覆盖纯数字的 `<sup>N</sup>`；其他上标仍可能被 DeepL 改动，由结构校验拦下后人工复查。
 - 机翻质量受限：术语一致性靠术语表，长难句可能生硬；以后可以换成 LLM 后端。
 - 需要 JS 渲染或有反爬挑战的站点暂不支持。
 - 合规检查是人工完成的，代码只负责强制执行检查结论。

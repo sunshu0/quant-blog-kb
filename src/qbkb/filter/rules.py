@@ -13,7 +13,7 @@ from qbkb.config import CONFIG_DIR
 
 DEFAULT_EXCERPT_WORDS = 500
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-flash"
 
 
 @dataclass(frozen=True, slots=True)

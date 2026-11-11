@@ -121,13 +121,76 @@ def _safe_url_attrs(html: str) -> str:
     return "".join(parts)
 
 
+# 一张 Markdown 图片；一整行只有两张以上图片时拆成每张一行（见 split_image_rows）
+_IMAGE_MD = r"!\[[^\]\n]*\]\([^)\n]*\)"
+_IMAGE = re.compile(_IMAGE_MD)
+_IMAGE_ROW = re.compile(rf"{_IMAGE_MD}(?:[ \t]*{_IMAGE_MD})+[ \t]*")
+# 中文标点后面紧跟的半角空格 / 制表符（后面还有内容的才算：行尾的两个空格是 Markdown 的硬换行；
+# 表格的 | 不动）。全角空格（U+3000）是有意的排版，不删
+_ZH_PUNCT_SPACE = re.compile(r"(?<=[。！？；：，、])[ \t]+(?=[^\s|])")
+# 链接 / 图片的地址部分：里面的内容不动
+_LINK_DEST = re.compile(r"(\]\([^)\n]*\))")
+_INLINE_CODE = re.compile(r"(`+[^`\n]*`+)")
+_FENCE_LINE = re.compile(r"^ {0,3}(```|~~~)")
+
+
+def _text_lines(md: str, fn: Callable[[str], str]) -> str:
+    """对代码块之外的每一行调用 fn。围栏代码块（``` / ~~~）和缩进代码块（4 个空格或制表符开头）
+    原样保留。缩进的列表续行也会被当成代码跳过：宁可少处理，不改代码。"""
+    out: list[str] = []
+    fence: str | None = None
+    for line in md.split("\n"):
+        m = _FENCE_LINE.match(line)
+        if fence is not None:
+            if m and m.group(1) == fence:
+                fence = None
+        elif m:
+            fence = m.group(1)
+        elif not line.startswith(("    ", "\t")):
+            line = fn(line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def split_image_rows(md: str) -> str:
+    """块级图片各自单独成段：一行里只有几张图片（"![](a)![](b)"）时，每张拆成一段。
+
+    夹在文字中间的行内图片、表格和列表里的图片、代码里的内容都不动。
+    """
+
+    def fix(line: str) -> str:
+        # 整行都是图片才拆："`code`![](a)![](b)" 这种前面还有东西的行不动
+        return "\n\n".join(_IMAGE.findall(line)) if _IMAGE_ROW.fullmatch(line) else line
+
+    return _text_lines(md, fix)
+
+
+def tidy_zh_spacing(md: str) -> str:
+    """去掉中文标点（。！？；：，、）后面多余的空格：DeepL 的译文里常有"影响。 如果"。
+
+    只用在中文段落上。代码（围栏、缩进、行内）、链接和图片的地址不动；英文标点后面的空格、
+    全角空格、行尾的硬换行不动。
+    """
+
+    def fix(line: str) -> str:
+        pieces = _INLINE_CODE.split(line)
+        for i in range(0, len(pieces), 2):  # 偶数下标是行内代码之外的部分
+            parts = _LINK_DEST.split(pieces[i])
+            for j in range(0, len(parts), 2):  # 偶数下标是链接地址之外的部分
+                parts[j] = _ZH_PUNCT_SPACE.sub("", parts[j])
+            pieces[i] = "".join(parts)
+        return "".join(pieces)
+
+    return _text_lines(md, fix)
+
+
 def to_markdown(html: str) -> str:
     """一个块级 HTML 片段 → Markdown（去掉首尾空行）。
 
     结果里不含原始 HTML（上下标除外）；链接和图片只留白名单协议（url_allowed），
-    地址里的括号、空格已转义。
+    地址里的括号、空格已转义；相邻的块级图片各占一段。
     """
-    return _escape_html(_CONVERTER.convert(_safe_url_attrs(html)).strip())
+    return split_image_rows(_escape_html(_CONVERTER.convert(_safe_url_attrs(html)).strip()))
 
 
 def rewrite_images(html: str, replace: Callable[[str], str]) -> str:
