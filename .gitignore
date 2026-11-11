@@ -27,3 +27,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+
+# 固定译文（man.com 免责声明的译文，属于原文衍生内容；格式见 config/fixed_translations.example.yaml）
+config/fixed_translations.yaml

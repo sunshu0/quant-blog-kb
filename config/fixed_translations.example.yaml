@@ -1,0 +1,12 @@
+# 固定译文的格式示例（translate/fixed.py，design.md 4.5）。
+# 真正的文件是同目录的 fixed_translations.yaml：内容是站点免责声明的译文，属于原文的衍生内容，
+# 不提交（.gitignore）。复制本文件改名后填写即可；文件不存在时没有固定译文，照常走 DeepL。
+#
+# 键是原文段落的 hash（qbkb.models.segment_hash，即 state.db 里 segments.src_hash）；
+# zh 是中文 HTML，标签、链接、脚注要和原文一致（translate 时会做结构校验，不一致就报错）。
+# 命中的段落不送 DeepL、不计费，术语表改了也不重翻。
+
+entries:
+  0000000000000000000000000000000000000000000000000000000000000000:
+    note: 示例：构造的段落 "<h2>Important notes</h2>"
+    zh: <h2>重要说明</h2>

@@ -17,7 +17,9 @@ from qbkb.translate.base import (
     chunk_texts,
     count_chars,
 )
-from qbkb.translate.glossary import Glossary
+from qbkb.translate.fixed import FIXED_FILE, is_interview, untranslated_units
+from qbkb.translate.footnotes import repair_marks, sent_length
+from qbkb.translate.glossary import PREVIOUS_SEGMENT_RULES, SEGMENT_RULES, Glossary
 from qbkb.translate.structure import plain_text, same_structure
 
 # 一批请求的 context 总长上限（字符）。DeepL 不对 context 计费，但它占请求体。
@@ -35,6 +37,10 @@ class TranslateStats:
     retried: int = 0  # 结构校验没过、重翻过的段落
     rejected: list[int] = field(default_factory=list)  # 两次都没过校验、需人工复查的段落 idx
     oversized: list[int] = field(default_factory=list)  # 超过单次请求上限、没送出去的段落 idx
+    fixed: int = 0  # 用了固定译文的段落（不计费）
+    speaker_labels: int = 0  # 原样保留的说话人标签（不计费）
+    revalidated: int = 0  # 翻译记忆里按新规则改判合格或就地修好的段落（不计费）
+    changed: int = 0  # 这次写进翻译记忆、让导出结果可能变化的段落（新译、修好、换成固定译文）
 
     @property
     def needs_review(self) -> bool:
@@ -70,8 +76,14 @@ def title_unit(title: str) -> str:
 def lookup_translation(
     conn: sqlite3.Connection, src_html: str, backend: str, glossary: Glossary
 ) -> str | None:
-    """按 translate 的规则查一段的合格译文（backend + 这段的术语版本）。export 也用它。"""
-    return store.tm_get(conn, segment_hash(src_html), backend, glossary.version_for(src_html))
+    """按 translate 的规则查一段的合格译文（backend + 这段的术语版本）。export 也用它。
+
+    有固定译文的段落直接返回固定译文（翻译记忆里可能还是以前 DeepL 的版本）。
+    """
+    h = segment_hash(src_html)
+    if h in glossary.fixed:
+        return glossary.fixed[h]
+    return store.tm_get(conn, h, backend, glossary.version_for(src_html))
 
 
 def translated_title(
@@ -159,6 +171,9 @@ def translate_article(
     - 单段超过 max_batch_chars 的不送出，记为 oversized，其余段落照常翻。
     - 结果：全部通过 → translated；有 rejected / oversized → needs_review，
       error 列写明是哪些段落，等人工复查。
+    - 已经 translated / published 的文章（translate --recheck）：没有任何段落变化时保持原状态和
+      translated_at，不会把已发布的文章降回 translated；有段落新译、修好或换成固定译文的，
+      回到 translated，下次 export 重新生成。
     - 额度用完抛 QuotaStopped，后端重试用尽抛 BackendStopped（都是 TranslationStopped，
       带 stats），文章状态不变。
     - 标题（articles.title）作为额外的一个翻译单元（title_unit）在正文之后翻译，同样走
@@ -169,12 +184,15 @@ def translate_article(
         raise ValueError(f"{url} 没有段落，先跑 extract")
     backend = translator.name
     stats = TranslateStats(url=url, segments=len(segments))
+    before = store.get_article(conn, url)
 
     rejected: set[str] = set()
     oversized: set[str] = set()
     pending: list[int] = []  # 要送去翻译的段落位置（每个 hash 只取第一次出现）
     versions: dict[int, str] = {}
     seen: set[str] = set()
+    interview = before is not None and is_interview(before["tags"])
+    fixed_units = untranslated_units(segments, glossary.fixed, interview=interview)
     for pos, seg in enumerate(segments):
         h = seg.src_hash
         if h in seen:
@@ -183,19 +201,38 @@ def translate_article(
         seen.add(h)
         version = versions[pos] = glossary.version_for(seg.html)
         entry = store.tm_lookup(conn, h, backend, version)
-        if (
-            entry is not None
-            and entry.quality == store.TM_OK
-            and same_structure(seg.html, entry.tgt_html)
-        ):
-            stats.tm_hits += 1
+        if h in fixed_units:
+            # 固定译文 / 说话人标签：不送翻译、不计费，写进翻译记忆给 export 用
+            tgt, kind = fixed_units[h]
+            if not same_structure(seg.html, tgt):
+                raise ValueError(f"固定译文 {h[:12]}… 和原文结构不一致，请检查 {FIXED_FILE}")
+            if entry is None or entry.quality != store.TM_OK or entry.tgt_html != tgt:
+                store.tm_put(conn, h, backend, seg.html, tgt, version)
+                stats.changed += 1
+            if kind == "fixed":
+                stats.fixed += 1
+            else:
+                stats.speaker_labels += 1
             continue
+        if entry is not None:
+            # 按现在的校验规则重新判断：D7 放宽后以前 rejected 的可能已经合格；
+            # 以前算 ok 的可能有 DeepL 自己写的 Unicode 上标，能确定修好的就地修掉（不花额度）
+            tgt = entry.tgt_html
+            if not same_structure(seg.html, tgt):
+                tgt = repair_marks(seg.html, tgt)
+            if same_structure(seg.html, tgt):
+                if entry.quality != store.TM_OK or tgt != entry.tgt_html:
+                    store.tm_put(conn, h, backend, seg.html, tgt, version)
+                    stats.revalidated += 1
+                    stats.changed += 1
+                stats.tm_hits += 1
+                continue
         if not retry_rejected and entry is not None:
             # 以前就没通过校验（rejected，或合格译文按现在的校验规则不过）：
             # 不自动重翻，继续等人工复查
             rejected.add(h)
             continue
-        if len(seg.html) > max_batch_chars:
+        if sent_length(seg.html) > max_batch_chars:
             oversized.add(h)
             continue
         pending.append(pos)
@@ -205,6 +242,7 @@ def translate_article(
         store.tm_put(conn, seg.src_hash, backend, seg.html, tgt, versions[pos])
         rejected.discard(seg.src_hash)
         stats.translated += 1
+        stats.changed += 1
 
     def finish_lists() -> None:
         stats.rejected = [s.idx for s in segments if s.src_hash in rejected]
@@ -255,6 +293,18 @@ def translate_article(
 
     finish_lists()
     now = datetime.now(UTC).isoformat(timespec="seconds")
+    prior = None if before is None else Status(before["status"])
+    if before is not None and title_zh != before["title_zh"]:
+        stats.changed += 1
+    if not stats.changed and before is not None and before["translated_at"]:
+        # 什么都没变（recheck 时最常见）：不刷新翻译时间
+        now = str(before["translated_at"])
+    if (
+        not stats.needs_review
+        and not stats.changed
+        and prior in (Status.TRANSLATED, Status.PUBLISHED)
+    ):
+        return stats  # 保持原状态：已发布的不降级
     if stats.needs_review:
         parts = []
         if stats.rejected:
@@ -287,12 +337,21 @@ def translate_article(
     return stats
 
 
-def _unique_segments(conn: sqlite3.Connection, urls: Iterable[str]) -> list[Segment]:
+def _unique_segments(
+    conn: sqlite3.Connection, urls: Iterable[str], glossary: Glossary | None = None
+) -> list[Segment]:
+    """这些文章的段落（跨文章去重）。给了 glossary 时去掉不送翻译的（固定译文、说话人标签）。"""
     seen: set[str] = set()
     out: list[Segment] = []
     for url in urls:
-        for seg in store.get_segments(conn, url):
-            if seg.src_hash not in seen:
+        segments = store.get_segments(conn, url)
+        skip: dict[str, tuple[str, str]] = {}
+        if glossary is not None:
+            row = store.get_article(conn, url)
+            interview = row is not None and is_interview(row["tags"])
+            skip = untranslated_units(segments, glossary.fixed, interview=interview)
+        for seg in segments:
+            if seg.src_hash not in seen and seg.src_hash not in skip:
                 seen.add(seg.src_hash)
                 out.append(seg)
     return out
@@ -310,19 +369,31 @@ def _title_units(conn: sqlite3.Connection, urls: Iterable[str]) -> list[str]:
 
 
 def estimate_chars(
-    conn: sqlite3.Connection, urls: Iterable[str], backend: str, glossary: Glossary
+    conn: sqlite3.Connection,
+    urls: Iterable[str],
+    backend: str,
+    glossary: Glossary,
+    *,
+    retry_rejected: bool = True,
 ) -> int:
     """估算翻完这些文章还要多少字符（只算翻译记忆未命中的段落和标题，跨文章去重）。
 
     和 base.FREE_MONTHLY_CHARS 比较，就知道这个月的额度够不够。
+    retry_rejected=False 时不算同一术语版本下已有 rejected 译文的段落（translate 不会重翻它们）。
+    按送出去的 HTML 长度算，是上界。
     """
     urls = list(urls)
-    units = [seg.html for seg in _unique_segments(conn, urls)] + _title_units(conn, urls)
-    return sum(
-        len(unit)
-        for unit in dict.fromkeys(units)
-        if lookup_translation(conn, unit, backend, glossary) is None
-    )
+    units = [seg.html for seg in _unique_segments(conn, urls, glossary)] + _title_units(conn, urls)
+    total = 0
+    for unit in dict.fromkeys(units):
+        if lookup_translation(conn, unit, backend, glossary) is not None:
+            continue
+        if not retry_rejected:
+            entry = store.tm_lookup(conn, segment_hash(unit), backend, glossary.version_for(unit))
+            if entry is not None:
+                continue
+        total += len(unit)
+    return total
 
 
 def missing_titles(conn: sqlite3.Connection, site: str | None = None) -> list[str]:
@@ -372,12 +443,23 @@ def glossary_upgrade_cost(
     old: Glossary,
     new: Glossary,
 ) -> int:
-    """术语表从 old 换成 new，会让多少字符的已翻段落和标题重翻（换之前先看一眼）。"""
+    """术语表从 old 换成 new，会让多少字符的已翻段落和标题重翻（换之前先看一眼）。
+
+    匹配规则版本（SEGMENT_RULES）也升过级时，翻译记忆里存的是旧规则前缀的版本（"g1-…"），
+    所以按旧规则的前缀也查一遍：这部分同样要重翻。
+    """
     urls = list(urls)
-    units = [seg.html for seg in _unique_segments(conn, urls)] + _title_units(conn, urls)
+    units = [seg.html for seg in _unique_segments(conn, urls, new)] + _title_units(conn, urls)
     total = 0
     for unit in dict.fromkeys(units):
-        before, after = old.version_for(unit), new.version_for(unit)
-        if before != after and store.tm_get(conn, segment_hash(unit), backend, before) is not None:
+        after = new.version_for(unit)
+        h = segment_hash(unit)
+        if store.tm_get(conn, h, backend, after) is not None:
+            continue
+        before = old.version_for(unit)
+        candidates = {before} | {
+            before.replace(f"{SEGMENT_RULES}-", f"{r}-", 1) for r in PREVIOUS_SEGMENT_RULES
+        }
+        if any(store.tm_get(conn, h, backend, v) is not None for v in candidates):
             total += len(unit)
     return total

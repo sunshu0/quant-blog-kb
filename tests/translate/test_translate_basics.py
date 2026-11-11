@@ -17,8 +17,11 @@ from qbkb.translate.structure import plain_text
 
 def test_repo_glossary_loads() -> None:
     g = load_glossary()
-    assert g.version == "1"
+    assert g.version == "2"
     assert g["drawdown"] == "回撤"
+    # 2026-11-12 验收：有歧义的单词只收短语
+    assert "carry" not in g and "factor" not in g
+    assert g["carry trade"] == "套息交易" and g["value factor"] == "价值因子"
 
 
 def test_segment_version_depends_only_on_terms_used() -> None:
@@ -75,6 +78,9 @@ SRC = '<p>Hi <a href="u">x</a> <img src="i.png"></p>'
         '<p>你好 <a href="u">某</a> <img src="i.png"></p>',
         '<p><img src="i.png">你好 <a href="u">某</a></p>',  # 兄弟元素换了顺序：允许
         '<p>你好 <a href="u">某</a> <img src="i.png"/></p>',  # 自闭合写法
+        # D7：链接只比地址集合，图片跑进链接、多一个 </a> 都不算错
+        '<p>你好 <a href="u">某 <img src="i.png"></a></p>',
+        '<p>你好 <a href="u">某</a></a> <img src="i.png"></p>',
     ],
 )
 def test_structure_same(tgt: str) -> None:
@@ -87,9 +93,8 @@ def test_structure_same(tgt: str) -> None:
         '<p>你好 <a href="u">某</a></p>',  # 丢了图片
         '<p>你好 <a href="v">某</a> <img src="i.png"></p>',  # 链接变了
         '<p>你好 某 <img src="i.png"></p>',  # 丢了标签
-        '<p>你好 <a href="u">某 <img src="i.png"></a></p>',  # 图片跑进了链接里
         '<p>你好 <a href="u">某 <img src="i.png"></p>',  # 链接没闭合
-        '<p>你好 <a href="u">某</a></a> <img src="i.png"></p>',  # 多了结束标签
+        '<p>你好 <a href="u">某</a> <img src="i.png"></cite></p>',  # 多了严格标签的结束标签
     ],
 )
 def test_structure_different(tgt: str) -> None:
@@ -97,8 +102,12 @@ def test_structure_different(tgt: str) -> None:
 
 
 def test_structure_nesting_order() -> None:
-    assert not same_structure("<p><b><i>x</i></b></p>", "<p><i><b>x</b></i></p>")
-    assert not same_structure("<p><b>x</b></p>", "<p><b>x</p></b>")  # 交叉嵌套
+    # 严格标签的嵌套关系照比；放宽的 b / i 互相嵌套的先后不比
+    assert not same_structure(
+        "<p><cite><code>x</code></cite></p>", "<p><code><cite>x</cite></code></p>"
+    )
+    assert same_structure("<p><b><i>x</i></b></p>", "<p><i><b>x</b></i></p>")
+    assert not same_structure("<p><b>x</b></p>", "<p><b>x</p></b>")  # 交叉嵌套：b 没正确闭合
 
 
 def test_br_forms_are_equal() -> None:

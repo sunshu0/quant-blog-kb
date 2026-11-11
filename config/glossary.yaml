@@ -3,19 +3,101 @@
 # 翻译记忆按段落记录"这段用到的术语"的指纹：改一个词条，只有含这个词的段落会重翻。
 # 改之前可以用 translate.glossary_upgrade_cost() 看要重翻多少字符。
 # 句首大写（Drawdown）、标题大写（Trend Following）的变体会自动补上，不用手写。
+#
+# DeepL 的术语表不看上下文：单个常用词一定会误命中（2026-11-12 验收："carry over some capital"
+# 被译成"套息"、一般意义的 factors 被译成"因子"）。所以有歧义的词只收完整短语。
+# 原文和译文相同的词条（ROE: ROE）用来让 DeepL 保留原文，不乱译。
 
-version: 1
+version: 2
 terms:
   drawdown: 回撤
   trend following: 趋势跟踪
   momentum: 动量
-  carry: 套息
   Sharpe ratio: 夏普比率
-  factor: 因子
   alpha: alpha
   beta: beta
   volatility: 波动率
+  implied volatility: 隐含波动率
   backtest: 回测
   mean reversion: 均值回归
   risk parity: 风险平价
   CTA: CTA
+  # carry 只收短语（原来的单词条 carry 已删除）
+  carry trade: 套息交易
+  carry strategy: 套息策略
+  # factor 只收短语（原来的单词条 factor 已删除）
+  value factor: 价值因子
+  momentum factor: 动量因子
+  quality factor: 质量因子
+  factor investing: 因子投资
+  factor model: 因子模型
+  factor exposure: 因子暴露
+  # 2026-11-12 译文验收建议的词条
+  portable alpha: 可转移 alpha
+  crisis alpha: 危机 alpha
+  managed futures: 管理期货
+  EV/Sales: EV/Sales
+  EV/S: EV/S
+  return on equity: 净资产收益率
+  ROE: ROE
+  risk premium: 风险溢价
+  equity risk premium: 股权风险溢价
+  term premium: 期限溢价
+  skewness: 偏度
+  positive skewness: 正偏度
+  breakeven inflation: 盈亏平衡通胀率
+  tail risk: 尾部风险
+  put spread: 看跌期权价差
+  underperformance option: 跑输期权
+  illiquidity premium: 非流动性溢价
+  collateralized loan obligation: 贷款抵押债券
+  collateralised loan obligation: 贷款抵押债券
+  CLO: CLO
+  business development company: 商业发展公司
+  BDC: BDC
+  leveraged loan: 杠杆贷款
+  covenant-lite: 轻契约
+  mark to market: 按市价计价
+  mark-to-market: 按市价计价
+  disinflation: 通胀回落
+  reflation: 再通胀
+  forward P/E: 前瞻市盈率
+  nonfarm payrolls: 非农就业
+  non-farm payrolls: 非农就业
+  Gordon growth model: 戈登增长模型
+  gatekeepers: 把关机构
+  Dan Ariely: 丹·艾瑞里
+  # 2026-11-12 用户确认：multiples 只收复数；private equity（缩写 PE 不收，交给人工）；
+  # Exhibit 只在后面跟编号时译成"图表"（DeepL 术语表不支持模式，所以逐个列出 1–30）
+  multiples: 估值倍数
+  private equity: 私募股权
+  Exhibit 1: 图表1
+  Exhibit 2: 图表2
+  Exhibit 3: 图表3
+  Exhibit 4: 图表4
+  Exhibit 5: 图表5
+  Exhibit 6: 图表6
+  Exhibit 7: 图表7
+  Exhibit 8: 图表8
+  Exhibit 9: 图表9
+  Exhibit 10: 图表10
+  Exhibit 11: 图表11
+  Exhibit 12: 图表12
+  Exhibit 13: 图表13
+  Exhibit 14: 图表14
+  Exhibit 15: 图表15
+  Exhibit 16: 图表16
+  Exhibit 17: 图表17
+  Exhibit 18: 图表18
+  Exhibit 19: 图表19
+  Exhibit 20: 图表20
+  Exhibit 21: 图表21
+  Exhibit 22: 图表22
+  Exhibit 23: 图表23
+  Exhibit 24: 图表24
+  Exhibit 25: 图表25
+  Exhibit 26: 图表26
+  Exhibit 27: 图表27
+  Exhibit 28: 图表28
+  Exhibit 29: 图表29
+  Exhibit 30: 图表30

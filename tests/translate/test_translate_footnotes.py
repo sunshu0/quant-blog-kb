@@ -9,7 +9,7 @@ from qbkb.translate.footnotes import protect_sups, restore_sups
 from qbkb.translate.structure import same_structure
 
 SRC = "<p>A firm at a zero discount rate<sup>3</sup> has no upper limit on its value.</p>"
-PLACEHOLDER = '<a href="#qbkb-sup-3">3</a>'
+PLACEHOLDER = '<a href="#qbkb-sup-3">†</a>'
 
 
 def test_protect_and_restore_round_trip() -> None:
@@ -32,7 +32,7 @@ def test_protect_leaves_other_sups_alone() -> None:
 
 def test_protect_after_a_closed_link() -> None:
     html = '<p><a href="https://example.test/">link</a> then<sup>2</sup></p>'
-    assert '<a href="#qbkb-sup-2">2</a>' in protect_sups(html)
+    assert '<a href="#qbkb-sup-2">†</a>' in protect_sups(html)
     assert restore_sups(protect_sups(html)) == html
 
 
@@ -66,7 +66,7 @@ class EchoClient:
         out = []
         for t in text:
             if self.drift:
-                t = t.replace("rate" + PLACEHOLDER, '<a href="#qbkb-sup-3">率3</a>')
+                t = t.replace("rate" + PLACEHOLDER, '<a href="#qbkb-sup-3">率†</a>')
             out.append(deepl.TextResult(t, "EN", None))
         return out
 
