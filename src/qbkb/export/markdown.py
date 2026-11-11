@@ -220,7 +220,11 @@ class TermAnnotator:
         todo = {
             en: zh
             for en, zh in terms.items()
-            if zh != en and en not in self.done and zh not in self.done
+            # 带编号的词条（"Exhibit 3" → "图表3"）只是统一译名，不用附英文
+            if zh != en
+            and en not in self.done
+            and zh not in self.done
+            and not any(ch.isdigit() for ch in en)
         }
         if not todo:
             return zh_html

@@ -137,8 +137,9 @@ class DeepLTranslator:
     ) -> list[str]:
         if not segments:
             return []
-        # 先按原文切批：超长段落在发任何请求之前就报 SegmentTooLargeError
-        chunk_texts(segments, self.max_texts, self.max_chars)
+        # 先按送出去的长度（脚注换成占位链接以后）检查：超长段落在发任何请求之前就报
+        # SegmentTooLargeError。pipeline 用同一个长度（footnotes.sent_length）挑出 oversized
+        chunk_texts([protect_sups(s) for s in segments], self.max_texts, self.max_chars)
         glossary_id = self.sync_glossary(glossary)
         # 分行排版的段落一行一个单元（lines.py）；脚注上标换成占位链接（footnotes.py）
         units: list[str] = []

@@ -2,8 +2,10 @@
 
 人工验收发现：整段送给 DeepL 时它会按中文语序把字挪过 <br>，引号、书名号跑到下一行行首
 （"《……⏎》7."）。一行一行送就不会跨行。只在"确实是分行排版"的段落上拆：
-至少两个 <br>（三行以上），或者每行都以 "1. " 这样的编号开头（脚注列表）。
-一个 <br> 的普通段落（句中换行）不拆，免得把一句话拆成两半翻。
+- 脚注列表：每一行都以 "1. " 这样的编号开头（至少两行）；
+- 诗歌：至少三行，每行都短（不超过 POEM_LINE_CHARS 个字），或者每行都以引号开头。
+普通段落里的 <br>（句中换行、"Source: …<br>Note: …"）不拆，免得把一句话拆成两半翻。
+拼回去时检查行首编号：DeepL 把 "3. " 改成 "3。" 或丢掉时补回原文的编号。
 
 这一步只发生在 DeepL 后端里：翻译记忆、结构校验看到的仍然是整段。
 """
@@ -20,7 +22,15 @@ _PREFIX = re.compile(r"^(?:<([a-z][a-z0-9]*)>)+")
 _OPEN_TAG = re.compile(r"<([a-z][a-z0-9]*)>")
 _BR = re.compile(r"(<br\s*/?>\s*)", re.IGNORECASE)
 _TAG = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9]*)[^>]*?(/?)>")
-_NUMBERED = re.compile(r"^\d{1,3}\.\s")
+_NUMBERED = re.compile(r"^(\d{1,3})\.\s")
+_TEXT_TAG = re.compile(r"<[^>]+>")
+_QUOTES = "\"'“‘«「『"
+# 诗歌每行的字数上限（纯文字）
+POEM_LINE_CHARS = 80
+
+
+def _text(html: str) -> str:
+    return " ".join(_TEXT_TAG.sub("", html).split())
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,8 +55,18 @@ class LineSplit:
             t = next(it)
             if t.startswith(self.prefix) and t.endswith(self.suffix):
                 t = t[len(self.prefix) : len(t) - len(self.suffix)]
-            out.append(t)
+            out.append(_keep_number(part.strip(), t))
         return self.prefix + "".join(out) + self.suffix
+
+
+def _keep_number(src_line: str, tgt_line: str) -> str:
+    """原文这一行以 "N. " 开头时，保证译文这一行也是（DeepL 偶尔改成 "N。" 或丢掉）。"""
+    m = _NUMBERED.match(src_line)
+    if m is None or tgt_line.startswith(m.group()):
+        return tgt_line
+    n = m.group(1)
+    rest = re.sub(rf"^\s*{n}\s*[.。．、]?\s*", "", tgt_line, count=1)
+    return f"{n}. {rest}"
 
 
 def _br_at_top_level(middle: str) -> bool:
@@ -86,6 +106,11 @@ def split_lines(html: str) -> LineSplit | None:
     lines = [p.strip() for p in parts[::2] if p.strip()]
     if len(lines) < 2 or not _br_at_top_level(middle):
         return None
-    if len(parts) < 5 and not all(_NUMBERED.match(line) for line in lines):
+    texts = [_text(line) for line in lines]
+    numbered = all(_NUMBERED.match(t) for t in texts)
+    poem = len(lines) >= 3 and (
+        all(len(t) <= POEM_LINE_CHARS for t in texts) or all(t[:1] in _QUOTES for t in texts)
+    )
+    if not (numbered or poem):
         return None
     return LineSplit(prefix, suffix, parts)

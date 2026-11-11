@@ -15,8 +15,13 @@ from qbkb.translate.fixed import FIXED_FILE, FixedTranslations, load_fixed
 from qbkb.translate.structure import plain_text
 
 # 段落术语版本的规则版本。匹配规则或大小写变体规则改了就递增，让所有含术语的段落重翻。
-SEGMENT_RULES = "g1"
-NO_TERMS = f"{SEGMENT_RULES}-none"
+# g2（2026-11-12）：最长匹配、缩写区分大小写。
+SEGMENT_RULES = "g2"
+# 以前用过的规则版本（估算升级成本时用来认出旧译文）
+PREVIOUS_SEGMENT_RULES: tuple[str, ...] = ("g1",)
+# 不含术语的段落：和匹配规则无关（规则变了它们也不用重翻），所以固定写成 g1 时期的值，
+# 不跟着 SEGMENT_RULES 变，已有翻译记忆里的 "g1-none" 照样命中
+NO_TERMS = "g1-none"
 
 
 def terms_fingerprint(terms: Mapping[str, str]) -> str:

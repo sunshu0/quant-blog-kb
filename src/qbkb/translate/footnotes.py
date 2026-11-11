@@ -17,7 +17,12 @@ from __future__ import annotations
 
 import re
 
-from qbkb.translate.structure import SUPERSCRIPT_DIGITS, UNICODE_SUP_RUN
+from qbkb.translate.structure import (
+    SUPERSCRIPT_DIGITS,
+    UNICODE_SUP_RUN,
+    numeric_sups,
+    sup_pattern,
+)
 
 SUP_HREF_PREFIX = "#qbkb-sup-"
 # 占位链接的文字：不含数字、DeepL 不会翻译或改写的符号
@@ -68,14 +73,16 @@ def restore_sups(html: str, *, keep_marks: bool = False) -> str:
     def sub(m: re.Match[str]) -> str:
         n, inner = m.group(2), m.group(3)
         sup = f"<sup>{n}</sup>"
-        # 兼容 PR #8 的写法（链接文字是数字本身），也兼容 DeepL 留下的数字
-        if inner.endswith(n):
-            return inner[: -len(n)].replace(SUP_MARK, "") + sup
-        if inner.startswith(n):
-            return sup + inner[len(n) :].replace(SUP_MARK, "")
+        # 先认记号：上标放在记号的位置。链接文字里另有数字时，那是 DeepL 拉进来的正文，
+        # 不能当编号吃掉
         head, found, tail = inner.partition(SUP_MARK)
         if found:
             return head + sup + tail.replace(SUP_MARK, "")
+        # 没有记号：兼容 PR #8 的写法（链接文字是数字本身），也兼容 DeepL 留下的数字
+        if inner.endswith(n):
+            return inner[: -len(n)] + sup
+        if inner.startswith(n):
+            return sup + inner[len(n) :]
         head, found, tail = inner.partition(n)
         return head + sup + tail if found else inner + sup
 
@@ -83,12 +90,9 @@ def restore_sups(html: str, *, keep_marks: bool = False) -> str:
     return out if keep_marks else out.replace(SUP_MARK, "")
 
 
-_LOOSE_SUP = re.compile(r"<sup>\s*(\d{1,4})\s*</sup>")
-
-
-def _numeric_sups(html: str) -> list[str]:
-    """纯数字上标的编号（允许前后空白："<sup>24 </sup>" 也算 24）。"""
-    return _LOOSE_SUP.findall(html)
+def sent_length(html: str) -> int:
+    """这一段实际送给 DeepL 的长度（脚注换成占位链接以后），用来判断是否超过单次请求上限。"""
+    return len(protect_sups(html))
 
 
 def repair_marks(src_html: str, tgt_html: str) -> str:
@@ -106,12 +110,11 @@ def repair_marks(src_html: str, tgt_html: str) -> str:
     out = tgt_html
     for run in sorted(set(UNICODE_SUP_RUN.findall(out)), key=len, reverse=True):
         n = run.translate(_TO_ASCII)
-        sup = f"<sup>{n}</sup>"
         u = re.escape(run)
-        s = re.escape(sup)
-        out = re.sub(rf"(?<![{SUPERSCRIPT_DIGITS}]){u}({_GAP}){s}", rf"{sup}\1", out)
-        out = re.sub(rf"{s}({_GAP}){u}(?![{SUPERSCRIPT_DIGITS}])", rf"\1{sup}", out)
-    src_sups, out_sups = _numeric_sups(src_html), _numeric_sups(out)
+        s = sup_pattern(n)  # 和结构校验同一套识别规则（允许 <sup> 里有空白）
+        out = re.sub(rf"(?<![{SUPERSCRIPT_DIGITS}]){u}({_GAP})({s})", r"\2\1", out)
+        out = re.sub(rf"({s})({_GAP}){u}(?![{SUPERSCRIPT_DIGITS}])", r"\2\1", out)
+    src_sups, out_sups = numeric_sups(src_html), numeric_sups(out)
     for n in sorted(set(src_sups)):
         k = src_sups.count(n) - out_sups.count(n)
         if k <= 0:

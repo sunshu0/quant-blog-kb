@@ -77,6 +77,8 @@ class _TreeParser(HTMLParser):
         self.marked: list[str] = []  # 正文文字，<sup> 的内容用 _OPEN / _CLOSE 包起来
         self.sups: list[str] = []  # 每个 <sup> 里的文字（去掉空白）
         self.hrefs: set[str] = set()
+        self.outside: list[str] = []  # 不在 <sup> 里的文字
+        self.sups_balanced = True  # <sup> 没有嵌套、没有多余的结束标签、都闭合了
         self._open_sups: list[list[str]] = []
 
     def _add(self, tag: str, attrs: list[tuple[str, str | None]]) -> _Node:
@@ -94,6 +96,8 @@ class _TreeParser(HTMLParser):
         if tag not in VOID:
             self.stack.append(node)
         if tag == "sup":
+            if self._open_sups:
+                self.sups_balanced = False  # 上标里套上标
             self._open_sups.append([])
             self.marked.append(_OPEN)
 
@@ -104,9 +108,12 @@ class _TreeParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag in VOID:
             return
-        if tag == "sup" and self._open_sups:
-            self.sups.append(_WS.sub("", "".join(self._open_sups.pop())))
-            self.marked.append(_CLOSE)
+        if tag == "sup":
+            if self._open_sups:
+                self.sups.append(_WS.sub("", "".join(self._open_sups.pop())))
+                self.marked.append(_CLOSE)
+            else:
+                self.sups_balanced = False  # 多出来的 </sup>
         if not any(n.tag == tag for n in self.stack[1:]):
             # 多出来的结束标签。放宽的和按地址的标签多一个结束标签不影响显示，不算
             if tag not in TRANSPARENT:
@@ -121,6 +128,8 @@ class _TreeParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         self.text.append(data)
         self.marked.append(data)
+        if not self._open_sups:
+            self.outside.append(data)
         for buf in self._open_sups:
             buf.append(data)
 
@@ -129,6 +138,7 @@ class _TreeParser(HTMLParser):
         for node in self.stack[1:]:
             node.closed = False
         while self._open_sups:  # 没闭合的上标也算
+            self.sups_balanced = False
             self.sups.append(_WS.sub("", "".join(self._open_sups.pop())))
 
 
@@ -158,30 +168,51 @@ def footnote_marks(html: str) -> list[str]:
 
     重复的编号出现几次就列几次，所以 "¹<sup>1</sup>" 是 ["1", "1"]。
     """
-    p = _parse(html)
-    plain = "".join(
-        part for i, part in enumerate(re.split(f"{_OPEN}|{_CLOSE}", "".join(p.marked))) if not i % 2
-    )
+    return _marks(_parse(html))
+
+
+def _marks(p: _TreeParser) -> list[str]:
+    plain = "".join(p.outside)  # 解析器记下的 <sup> 外文字，嵌套 / 没闭合也不会错位
     uni = [m.group().translate(_TO_ASCII) for m in UNICODE_SUP_RUN.finditer(plain)]
     return sorted([s for s in p.sups if s.isdigit()] + uni)
 
 
-def _stray_numbers(html: str) -> Counter[str]:
-    """紧挨着脚注、或者在段末的裸数字，而且和某个脚注编号相同（"估值<sup>5</sup>5"、"……估值5"）。
+def numeric_sups(html: str) -> list[str]:
+    """纯数字 <sup> 的编号（去掉空白："<sup>24 </sup>" 是 24），按出现顺序。
 
-    DeepL 把脚注编号当成正文数字复制一份时就是这两种形状。
+    结构校验和 footnotes.repair_marks 用同一套识别规则（另见 sup_pattern）。
     """
-    p = _parse(html)
-    marked = "".join(p.marked)
-    marks = {s for s in p.sups if s.isdigit()}
-    out: Counter[str] = Counter()
-    for n in marks:
+    return [s for s in _parse(html).sups if s.isdigit()]
+
+
+def sup_pattern(n: str) -> str:
+    """匹配编号 n 的 <sup> 的正则（允许前后空白），和 numeric_sups 的识别一致。没有捕获组。"""
+    return rf"<sup>\s*{re.escape(n)}\s*</sup>"
+
+
+def _bare_numbers(text: str) -> Counter[str]:
+    """文字里独立的数字串（不是更长数字的一部分）。"""
+    return Counter(re.findall(r"(?<![\d.,])\d+(?![\d.,]*\d)", text))
+
+
+def _stray_numbers(src: _TreeParser, tgt: _TreeParser) -> set[str]:
+    """译文里紧挨着脚注、或者在段末的裸数字，和某个脚注编号相同（"估值<sup>5</sup>5"、"……估值5"）。
+
+    DeepL 把脚注编号当成正文数字复制一份时就是这两种形状。只检查原文正文里**没有**这个数字的
+    编号（原文里它只作为脚注出现），原文本来就有的数字（"grew by 3<sup>3</sup>"）不算，免得误报。
+    """
+    body = _bare_numbers("".join(src.outside))
+    marked = "".join(tgt.marked)
+    tail = marked.rstrip(_TRAILING)
+    out: set[str] = set()
+    for n in {s for s in src.sups if s.isdigit()}:
+        if body[n]:
+            continue
         sup = re.escape(f"{_OPEN}{n}{_CLOSE}")
         bare = re.escape(n)
-        out[n] += len(re.findall(rf"(?<![\d.,]){bare}\s*{sup}|{sup}\s*{bare}(?![\d.,])", marked))
-        tail = marked.rstrip(_TRAILING)
-        if re.search(rf"(?<![\d.,{_OPEN}]){bare}$", tail):
-            out[n] += 1
+        adjacent = rf"(?<![\d.,]){bare}\s*{sup}|{sup}\s*{bare}(?![\d.,])"
+        if re.search(adjacent, marked) or re.search(rf"(?<![\d.,{_OPEN}]){bare}$", tail):
+            out.add(n)
     return out
 
 
@@ -190,15 +221,18 @@ def same_structure(src_html: str, tgt_html: str) -> bool:
 
     脚注编号单独再比一次（footnote_marks）：结构指纹不看文字，上标还在但数字变了、
     数字跑到了上标外面、或者 DeepL 另外写了一个 Unicode 上标，指纹是看不出来的。
+    译文里 <sup> 嵌套、没闭合或多一个结束标签时，脚注无法可靠比较，直接判为不一致。
     """
-    if structure_signature(src_html) != structure_signature(tgt_html):
+    src, tgt = _parse(src_html), _parse(tgt_html)
+    if ",".join(sorted(src.root.tokens())) != ",".join(sorted(tgt.root.tokens())):
         return False
-    if link_targets(src_html) != link_targets(tgt_html):
+    if src.hrefs != tgt.hrefs:
         return False
-    if footnote_marks(src_html) != footnote_marks(tgt_html):
+    if src.sups_balanced and not tgt.sups_balanced:
         return False
-    src_stray, tgt_stray = _stray_numbers(src_html), _stray_numbers(tgt_html)
-    return all(tgt_stray[n] <= src_stray[n] for n in tgt_stray)
+    if _marks(src) != _marks(tgt):
+        return False
+    return not _stray_numbers(src, tgt)
 
 
 def plain_text(html: str) -> str:

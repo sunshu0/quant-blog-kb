@@ -125,7 +125,9 @@ def _translate_opts(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "已翻译 / 已发布 / 需复查的文章也按现在的校验规则、术语表和固定译文重新过一遍："
-            "合格的译文直接复用（不花额度），不合格的进 needs_review（配合 --retry-rejected 重翻）"
+            "术语没变、校验合格的段落直接复用（不花额度）；含改过的术语的段落会重翻（花额度，"
+            "开始前打印预计字符数）；校验不合格的进 needs_review（配合 --retry-rejected 重翻）。"
+            "没有段落变化的文章保持原状态"
         ),
     )
     p.add_argument("--fake-quota", type=int, help="假翻译后端的字符额度（测试断点续跑用）")
@@ -470,11 +472,20 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             return EXIT_OK
         translator = _make_translator(args, deps)
         glossary = tr.load_glossary(_cfg(args) / "glossary.yaml")
-        need = tr.estimate_chars(conn, urls, translator.name, glossary)
+        need = tr.estimate_chars(
+            conn, urls, translator.name, glossary, retry_rejected=args.retry_rejected
+        )
         print(
             f"[translate] {site.name}: 待翻译 {len(urls)} 篇，"
             f"预计约 {need} 字符（不含命中翻译记忆的）"
         )
+        if getattr(args, "recheck", False):
+            print(
+                f"[translate] --recheck：上面的 {need} 字符是要重新送 DeepL 的部分"
+                "（术语表或匹配规则变了的段落、没有译文的段落；"
+                + ("含以前没通过校验的段落" if args.retry_rejected else "不含没通过校验的段落")
+                + "），其余按新规则复用，不花额度"
+            )
         _print_quota(translator, "翻译前")
         done = review = failed = chars = free = 0
         for url in urls:

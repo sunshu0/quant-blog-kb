@@ -23,7 +23,7 @@ from qbkb.translate import (
     same_structure,
     translate_article,
 )
-from qbkb.translate.fixed import is_label_shape, load_fixed, speaker_labels
+from qbkb.translate.fixed import is_interview, is_label_shape, load_fixed, speaker_labels
 from qbkb.translate.footnotes import SUP_MARK, protect_sups, repair_marks, restore_sups
 from qbkb.translate.lines import split_lines
 from qbkb.translate.structure import footnote_marks
@@ -200,7 +200,10 @@ def test_split_numbered_footnote_list() -> None:
         "<p><cite>3. Third.</cite></p>",
     ]
     zh = ["<p><cite>1. 第一条，2019。</cite></p>", "<p><cite>2. 第二条：《标题？》</cite></p>", "x"]
-    assert plan.join(zh) == "<p><cite>1. 第一条，2019。<br> 2. 第二条：《标题？》<br> x</cite></p>"
+    # 第三行 DeepL 丢了编号：按原文补回
+    assert (
+        plan.join(zh) == "<p><cite>1. 第一条，2019。<br> 2. 第二条：《标题？》<br> 3. x</cite></p>"
+    )
 
 
 def test_split_rules() -> None:
@@ -214,6 +217,21 @@ def test_split_rules() -> None:
     plan = split_lines(nested)
     assert plan is not None and plan.prefix == "<p><cite>"
     assert split_lines("<p>no breaks</p>") is None
+    # 普通段落里的两个 <br>（行很长、没有编号）不拆
+    long_line = "This is an ordinary sentence that runs on for quite a while before it stops"
+    assert split_lines(f"<p>{long_line} here.<br> {long_line} there.<br> End.</p>") is None
+    caption = "<p><cite>Source: Example data; as of 2020.<br> Note: Built for a test.</cite></p>"
+    assert split_lines(caption) is None
+    # 每行以引号开头的诗句，行再长也拆
+    quoted = f"<p>“{long_line},<br> “{long_line},<br> “{long_line}.</p>"
+    assert split_lines(quoted) is not None
+
+
+def test_numbered_line_keeps_its_number() -> None:
+    plan = split_lines("<p><cite>1. One.<br> 2. Two.</cite></p>")
+    assert plan is not None
+    got = plan.join(["<p><cite>1。一。</cite></p>", "<p><cite>二。</cite></p>"])
+    assert got == "<p><cite>1. 一。<br> 2. 二。</cite></p>"
 
 
 def test_deepl_backend_sends_lines_separately() -> None:
@@ -327,26 +345,52 @@ def test_speaker_labels() -> None:
     assert not is_label_shape("<p><b>Ann Smith</b></p>")  # 没有冒号
     assert not is_label_shape("<p><b>the summary:</b></p>")
     assert not is_label_shape("<p><b>Ann Smith:</b> hello</p>")
+    # 常见小标题词不是人名；超过 3 个词也不是
+    for heading in ("Pros", "Cons", "Example", "Key Points", "Note", "Summary"):
+        assert not is_label_shape(f"<p><b>{heading}:</b></p>")
+    assert not is_label_shape("<p><b>Ann Bea Cole Dee:</b></p>")
     segs = [
         Segment(0, "<p><b>Ann Smith:</b></p>"),
         Segment(1, "<p>Hello there.</p>"),
-        Segment(2, "<p><b>Key Points:</b></p>"),  # 只出现一次，照常翻译
-        Segment(3, "<p><b>Ann Smith:</b></p>"),
+        Segment(2, "<p><b>Pros:</b></p>"),
+        Segment(3, "<p><b>Ann Smith :</b></p>"),  # 同一个名字、写法略不同：处理一致
+        Segment(4, "<p><b>Pros:</b></p>"),  # 重复出现的小标题照常翻译
+        Segment(5, "<p><b>Bob Lee:</b></p>"),  # 只出现一次
     ]
-    assert speaker_labels(segs) == {segs[0].src_hash}
+    assert speaker_labels(segs) == {segs[0].src_hash, segs[3].src_hash}
+    assert speaker_labels(segs, interview=False) == set()
 
 
-def test_speaker_labels_are_kept_in_english(conn: sqlite3.Connection) -> None:
+def test_is_interview() -> None:
+    assert is_interview('["PODCAST"]') and is_interview('["video"]')
+    assert not is_interview('["ARTICLE"]') and not is_interview(None)
+    assert not is_interview("not json")
+
+
+def _labelled(conn: sqlite3.Connection, tags: str) -> str:
     label = "<p><b>Ann Smith:</b></p>"
     store.replace_segments(
         conn,
         URL,
         [Segment(0, label), Segment(1, "<p>Hello.</p>"), Segment(2, label), Segment(3, BODY)],
     )
+    store.set_status(conn, URL, Status.FILTERED, tags=tags)
+    return label
+
+
+def test_speaker_labels_are_kept_in_english(conn: sqlite3.Connection) -> None:
+    label = _labelled(conn, '["PODCAST"]')
     t = FakeTranslator()
     stats = translate_article(conn, URL, t, Glossary("1", {}))
     assert t.calls == [["<p>Hello.</p>", BODY]] and stats.speaker_labels == 1
     assert lookup_translation(conn, label, "fake", Glossary("1", {})) == label
+
+
+def test_speaker_labels_only_in_interviews(conn: sqlite3.Connection) -> None:
+    label = _labelled(conn, '["ARTICLE"]')
+    t = FakeTranslator()
+    stats = translate_article(conn, URL, t, Glossary("1", {}))
+    assert t.calls == [[label, "<p>Hello.</p>", BODY]] and stats.speaker_labels == 0
 
 
 # ---------------------------------------------------------------- 翻译记忆按新规则重新判断
