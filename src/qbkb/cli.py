@@ -615,7 +615,13 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 + "），其余按新规则复用，不花额度"
             )
         _print_quota(translator, "翻译前")
-        done = review = failed = chars = free = 0
+        problems = tr.fixed_translation_errors(conn, urls, glossary)
+        if problems:
+            for p in problems:
+                print(f"  ! {p}", file=sys.stderr)
+            print(f"错误：固定译文和原文结构不一致，请检查 config/{tr.FIXED_FILE}", file=sys.stderr)
+            return EXIT_ERROR
+        done = review = chars = free = 0
         for url in urls:
             try:
                 st = tr.translate_article(
@@ -636,9 +642,13 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 store.set_status(conn, url, Status.NEEDS_REVIEW, error=f"translate: {e}")
                 review += 1
                 continue
+            except tr.FixedTranslationError as e:
+                # 理论上预检已经拦下；这里再兜一次底，同样整体报错而不是逐篇标 failed
+                raise Stopped(EXIT_ERROR, f"[translate] 配置错误：{e}") from e
             except ValueError as e:
-                store.record_failure(conn, url, f"translate: {e}")
-                failed += 1
+                # 没有段落、单段超长等这一篇的问题：标 needs_review，继续下一篇
+                store.set_status(conn, url, Status.NEEDS_REVIEW, error=f"translate: {e}")
+                review += 1
                 continue
             chars += st.chars
             free += st.fixed + st.speaker_labels + st.revalidated
@@ -647,11 +657,11 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             else:
                 done += 1
         print(
-            f"[translate] {site.name}: 完成 {done} 篇、需复查 {review} 篇、失败 {failed} 篇，"
+            f"[translate] {site.name}: 完成 {done} 篇、需复查 {review} 篇，"
             f"送出 {chars} 字符；固定译文 / 说话人标签 / 按新规则复用 {free} 段（不计费）"
         )
         _print_quota(translator, "翻译后")
-        return EXIT_ATTENTION if review or failed else EXIT_OK
+        return EXIT_ATTENTION if review else EXIT_OK
     finally:
         conn.close()
 

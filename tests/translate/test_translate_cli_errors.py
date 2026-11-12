@@ -6,8 +6,16 @@ from pathlib import Path
 import pytest
 
 from qbkb import cli, store
-from qbkb.models import DiscoveredUrl, Segment, Status
-from qbkb.translate import ArticleTranslationError, BackendAuthError, FakeTranslator
+from qbkb.models import DiscoveredUrl, Segment, Status, segment_hash
+from qbkb.translate import (
+    ArticleTranslationError,
+    BackendAuthError,
+    FakeTranslator,
+    FixedTranslationError,
+    Glossary,
+    fixed_translation_errors,
+    translate_article,
+)
 
 SITE = "man"
 
@@ -73,3 +81,54 @@ def test_backend_auth_error_stops_whole_run(
     # a 已经翻完；b 的鉴权失败是后端整体问题，停下，c 不再处理
     assert states["a"][0] == Status.TRANSLATED
     assert states["b"][0] == Status.EXTRACTED and states["c"][0] == Status.EXTRACTED
+
+
+@pytest.mark.usefixtures("man_without_sections")
+def test_article_without_segments_marks_needs_review_and_continues(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    for slug in ("a", "b"):
+        url = f"https://www.man.com/insights/{slug}"
+        store.upsert_discovered(conn, DiscoveredUrl(url, SITE, slug))
+        if slug == "b":
+            store.replace_segments(conn, url, [Segment(0, "<p>ok text</p>")])
+        store.set_status(conn, url, Status.EXTRACTED)
+    conn.close()
+    code = cli.main(
+        ["translate", "--site", SITE, "--db", str(db)], deps=cli.Deps(translator=FakeTranslator())
+    )
+    assert code == cli.EXIT_ATTENTION
+    states = _states(db)
+    assert states["a"][0] == Status.NEEDS_REVIEW and "没有段落" in (states["a"][1] or "")
+    assert states["b"][0] == Status.TRANSLATED
+
+
+def test_fixed_translation_mismatch_is_a_config_error(tmp_path: Path) -> None:
+    src = "<p>Important disclaimer.</p>"
+    bad = "<p>重要声明。"  # 缺闭合 </p>，结构不一致
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    url = "https://www.man.com/insights/x"
+    store.upsert_discovered(conn, DiscoveredUrl(url, SITE, "x"))
+    store.replace_segments(conn, url, [Segment(0, src)])
+    conn.close()
+    g = Glossary("1", {}, fixed={segment_hash(src): bad})
+    conn = store.connect(db)
+    with pytest.raises(FixedTranslationError):
+        translate_article(conn, url, FakeTranslator(), g)
+    conn.close()
+
+
+def test_fixed_translation_errors_only_reports_mismatch(tmp_path: Path) -> None:
+    good, good_zh = "<p>Good.</p>", "<p>好。</p>"
+    bad, bad_zh = "<p>Bad.</p>", "<p>坏。"  # 结构不一致
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    url = "https://www.man.com/insights/x"
+    store.upsert_discovered(conn, DiscoveredUrl(url, SITE, "x"))
+    store.replace_segments(conn, url, [Segment(0, good), Segment(1, bad)])
+    g = Glossary("1", {}, fixed={segment_hash(good): good_zh, segment_hash(bad): bad_zh})
+    problems = fixed_translation_errors(conn, [url], g)
+    assert len(problems) == 1 and "和原文结构不一致" in problems[0]  # 只报不一致的那条
+    assert fixed_translation_errors(conn, [], g) == []
+    conn.close()

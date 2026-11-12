@@ -64,9 +64,38 @@ class BackendStopped(TranslationStopped):
     """后端暂时不可用（限流 / 网络 / 5xx 重试用尽）。上层应停止本轮，稍后再跑。"""
 
 
+class FixedTranslationError(ValueError):
+    """固定译文和原文结构不一致：这是配置错误（fixed_translations.yaml 写错了）。
+
+    应该在循环开始前整体报错（退出码 1），而不是逐篇把文章标 failed。
+    """
+
+
 def needs_review(row: sqlite3.Row) -> bool:
     """文章是否在等人工复查（区别于真正的失败）。"""
     return row["status"] == Status.NEEDS_REVIEW
+
+
+def fixed_translation_errors(
+    conn: sqlite3.Connection, urls: Iterable[str], glossary: Glossary
+) -> list[str]:
+    """待翻译文章里命中固定译文、但译文和原文结构不一致的段落。空列表 = 全部一致。
+
+    固定译文按原文段落的 hash 对应，所以必须先知道要翻哪些段落才能核对结构；这里在
+    循环开始前扫一遍，有错就整体退出 1，而不是翻译到一半才撞上。
+    """
+    problems: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        for seg in store.get_segments(conn, url):
+            h = seg.src_hash
+            if h in seen:
+                continue
+            seen.add(h)
+            tgt = glossary.fixed.get(h)
+            if tgt is not None and not same_structure(seg.html, tgt):
+                problems.append(f"固定译文 {h[:12]}…（{url}）和原文结构不一致")
+    return problems
 
 
 def title_unit(title: str) -> str:
@@ -208,7 +237,9 @@ def translate_article(
             # 固定译文 / 说话人标签：不送翻译、不计费，写进翻译记忆给 export 用
             tgt, kind = fixed_units[h]
             if not same_structure(seg.html, tgt):
-                raise ValueError(f"固定译文 {h[:12]}… 和原文结构不一致，请检查 {FIXED_FILE}")
+                raise FixedTranslationError(
+                    f"固定译文 {h[:12]}… 和原文结构不一致，请检查 {FIXED_FILE}"
+                )
             if entry is None or entry.quality != store.TM_OK or entry.tgt_html != tgt:
                 store.tm_put(conn, h, backend, seg.html, tgt, version)
                 stats.changed += 1
