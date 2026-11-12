@@ -417,7 +417,10 @@ def test_batches_by_unit_count_not_paragraph_count(
     add_article(paras + [footnote])
 
     class UnitAware(_IdentityTranslator):
-        def request_units(self, html: str) -> tuple[int, int]:
+        def request_units(
+            self, html: str, glossary: Mapping[str, str] | None = None
+        ) -> tuple[int, int]:
+            del glossary
             plan = split_lines(html)
             pieces = plan.lines if plan is not None else [html]
             return len(pieces), sum(len(p) for p in pieces)

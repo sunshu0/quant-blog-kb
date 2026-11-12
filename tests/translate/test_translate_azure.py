@@ -14,7 +14,9 @@ import pytest
 from qbkb import store
 from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment
 from qbkb.translate import (
+    ArticleTranslationError,
     AzureTranslator,
+    BackendAuthError,
     Glossary,
     SegmentTooLargeError,
     TranslatorUnavailableError,
@@ -258,8 +260,9 @@ def test_rate_limiter_sliding_window() -> None:
     assert sleeps == []
     lim.acquire(30)  # 要等第一笔（t=0）滑出窗口
     assert sleeps == [50.0] and lim.waited_s == 50.0  # 等到 t=60
-    lim.acquire(500)  # 单次超过上限：等窗口空了整批送
-    assert now[0] >= 120.0
+    with pytest.raises(ValueError, match="单次字符数"):
+        lim.acquire(500)  # 超过窗口上限必须先分批，不能空窗时绕过
+    assert now[0] == 60.0
 
 
 def test_translator_paces_requests() -> None:
@@ -422,3 +425,128 @@ def test_cli_translator_choice(monkeypatch: pytest.MonkeyPatch) -> None:
     # 默认仍是 DeepL（真实冒烟通过之前不切换）
     parsed = cli.build_parser().parse_args(["translate", "--site", "man"])
     assert parsed.translator == "deepl"
+
+
+def test_rate_limiter_rejects_single_oversized_acquisition() -> None:
+    limiter = CharRateLimiter(10)
+    with pytest.raises(ValueError, match="单次字符数"):
+        limiter.acquire(11)
+
+
+def test_batching_respects_custom_rate_window() -> None:
+    now = [0.0]
+    waits: list[float] = []
+
+    def sleep(n: float) -> None:
+        waits.append(n)
+        now[0] += n
+
+    fake = FakeAzure()
+    limiter = CharRateLimiter(20, clock=lambda: now[0], sleep=sleep)
+    translator = _translator(fake, limiter=limiter)
+    assert len(translator.translate(["<p>aaaaa</p>", "<p>bbbbb</p>"], {})) == 2
+    assert len(fake.requests) == 2
+    assert waits == [60.0]
+    assert all(sum(map(len, fake.texts(i))) <= 20 for i in range(2))
+
+
+def test_pipeline_marks_expanded_term_segment_oversized_but_translates_rest(tmp_path: Path) -> None:
+    from qbkb.models import Status
+
+    conn = store.connect(tmp_path / "state.db")
+    url = "https://example.test/expanded"
+    store.upsert_discovered(conn, DiscoveredUrl(url=url, site="example", slug="expanded"))
+    big = "<p>" + "drawdown " * 600 + "</p>"
+    store.replace_segments(conn, url, [Segment(0, big), Segment(1, "<p>Hello.</p>")])
+    store.set_status(conn, url, Status.EXTRACTED)
+    fake = FakeAzure()
+    translator = _translator(fake)
+    stats = translate_article(conn, url, translator, GLOSSARY_OBJ)
+    assert stats.oversized == [0] and stats.translated == 1
+    row = store.get_article(conn, url)
+    assert row is not None and row["status"] == Status.NEEDS_REVIEW
+    assert all(big not in text for i in range(len(fake.requests)) for text in fake.texts(i))
+    conn.close()
+
+
+def test_pipeline_marks_large_multiline_segment_oversized(tmp_path: Path) -> None:
+    from qbkb.models import Status
+
+    conn = store.connect(tmp_path / "state.db")
+    url = "https://example.test/multiline"
+    store.upsert_discovered(conn, DiscoveredUrl(url=url, site="example", slug="multiline"))
+    big = "<p>1. " + "a" * 16000 + "<br>2. " + "b" * 16000 + "</p>"
+    store.replace_segments(conn, url, [Segment(0, big), Segment(1, "<p>Hello.</p>")])
+    store.set_status(conn, url, Status.EXTRACTED)
+    fake = FakeAzure()
+    translator = _translator(fake)
+    assert len(big) > 30000
+    n_units, total = translator.request_units(big, {})
+    assert n_units == 2 and total > 30000  # 分行后总长超上限，按展开后的总长预检
+    stats = translate_article(conn, url, translator, GLOSSARY_OBJ)
+    assert stats.oversized == [0] and stats.translated == 1
+    row = store.get_article(conn, url)
+    assert row is not None and row["status"] == Status.NEEDS_REVIEW
+    assert len(fake.requests) == 1 and fake.texts() == ["<p>Hello.</p>"]
+    conn.close()
+
+
+def test_pipeline_marks_expanded_line_split_segment_oversized(tmp_path: Path) -> None:
+    """N3：分行段落原文长度 ≤ 上限，但分行展开后总长 > 上限：只标这一段 oversized，
+    其余照常翻，不能整篇抛 SegmentTooLargeError（旧预检用最大一行长度会漏掉它）。"""
+    from qbkb.models import Status
+
+    conn = store.connect(tmp_path / "state.db")
+    url = "https://example.test/line-split-over"
+    store.upsert_discovered(conn, DiscoveredUrl(url=url, site="example", slug="line-split-over"))
+    # 10 行编号列表：原文总长不大，但每行拆开后都要带上 <p> 外层标签，展开后总长超上限
+    big = "<p>" + "<br>".join(f"{i}. " + "x" * 30 for i in range(1, 11)) + "</p>"
+    store.replace_segments(conn, url, [Segment(0, big), Segment(1, "<p>Hello.</p>")])
+    store.set_status(conn, url, Status.EXTRACTED)
+    fake = FakeAzure()
+    translator = _translator(fake)
+    n_units, total = translator.request_units(big, {})
+    assert n_units <= 50  # 单元数不超限，只看「展开后总长」这一维
+    assert len(big) < total  # 分行展开让总长变大
+    limit = len(big)  # 原文长度正好是上限：旧预检按 len(seg) 会放它过去
+    assert total > limit
+    stats = translate_article(conn, url, translator, GLOSSARY_OBJ, max_batch_chars=limit)
+    assert stats.oversized == [0] and stats.translated == 1
+    row = store.get_article(conn, url)
+    assert row is not None and row["status"] == Status.NEEDS_REVIEW
+    assert len(fake.requests) == 1 and fake.texts() == ["<p>Hello.</p>"]
+    conn.close()
+
+
+# ---- 异常映射 + B3 分批 ----
+
+
+def test_azure_exceptions_are_generic_subclasses() -> None:
+    """AzureAuthError → BackendAuthError（整轮停下、退出码 1）；AzureRequestError →
+    ArticleTranslationError（这一篇 needs_review、继续下一篇）。上层只认通用类型。"""
+    assert issubclass(AzureAuthError, BackendAuthError)
+    assert issubclass(AzureRequestError, ArticleTranslationError)
+
+
+def test_pipeline_batches_by_azure_request_units(tmp_path: Path) -> None:
+    """B3：pipeline 按术语标记展开后的总长度分批（request_units），保证一批只对应一个请求。"""
+    from qbkb.models import Status
+
+    conn = store.connect(tmp_path / "state.db")
+    url = "https://example.test/batch"
+    store.upsert_discovered(conn, DiscoveredUrl(url=url, site="example", slug="batch"))
+    seg1 = "<p>" + "drawdown " * 200 + "</p>"
+    seg2 = "<p>" + "momentum " * 200 + "</p>"
+    store.replace_segments(conn, url, [Segment(0, seg1), Segment(1, seg2)])
+    store.set_status(conn, url, Status.EXTRACTED)
+    fake = FakeAzure()
+    translator = _translator(fake)
+    _, s1 = translator.request_units(seg1, GLOSSARY_OBJ)
+    _, s2 = translator.request_units(seg2, GLOSSARY_OBJ)
+    assert len(seg1) + len(seg2) < s1 + s2  # 词典标记让长度变长
+    limit = s1 + 100  # 一段放得下、两段放不下；原文长度下旧逻辑会合成一批
+    assert len(seg1) + len(seg2) < limit < s1 + s2
+    stats = translate_article(conn, url, translator, GLOSSARY_OBJ, max_batch_chars=limit)
+    assert stats.translated == 2 and not stats.oversized
+    assert len(fake.requests) == 2  # 每段一个请求，而不是合成一个再被后端切开
+    conn.close()

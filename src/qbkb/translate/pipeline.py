@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import json
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -32,15 +32,16 @@ from qbkb.translate.structure import plain_text, same_structure
 CONTEXT_CHARS = 1_200
 
 
-def _unit_info(translator: Translator, html: str) -> tuple[int, int]:
+def _unit_info(translator: Translator, html: str, glossary: Mapping[str, str]) -> tuple[int, int]:
     """这一段会展开成几个翻译单元、总长多少。
 
-    后端能报就用后端的（DeepL 把分行段落拆成一行一个单元，50 条上限按单元数算）；
-    没有这个方法的后端（假后端等）退回「一段一个单元、长度用脚注占位展开后的」。
+    后端能报就用后端的（DeepL 把分行段落拆成一行一个单元、50 条上限按单元数算；
+    Azure 把术语标记 / 分行展开后的总长一起报）；没有这个方法的后端（假后端等）退回
+    「一段一个单元、长度用脚注占位展开后的」。
     """
     fn = getattr(translator, "request_units", None)
     if callable(fn):
-        return cast("Callable[[str], tuple[int, int]]", fn)(html)
+        return cast("Callable[[str, Mapping[str, str]], tuple[int, int]]", fn)(html, glossary)
     return 1, sent_length(html)
 
 
@@ -199,6 +200,18 @@ def _context(segments: Sequence[Segment], batch: list[int], limit: int) -> str:
     return "\n".join(t for t in pieces if t)[:limit]
 
 
+def _batch_length(translator: Translator, segment: str, glossary: Glossary) -> int:
+    """pipeline 分批用：这一段实际送出去的总长度（后端加词典标记/脚注占位/行拆分后求和）。
+
+    Azure 用 sent_total（含动态词典标记展开后的长度），DeepL 用 footnotes.sent_length
+    （只含脚注占位展开）。pipeline 按它累加才能保证一批只对应一个请求。
+    """
+    fn = getattr(translator, "sent_total", None)
+    if callable(fn):
+        return cast(int, fn(segment, glossary))
+    return sent_length(segment)
+
+
 def translate_article(
     conn: sqlite3.Connection,
     url: str,
@@ -242,6 +255,8 @@ def translate_article(
     seen: set[str] = set()
     interview = before is not None and is_interview(before["tags"])
     fixed_units = untranslated_units(segments, glossary.fixed, interview=interview)
+    # 单次请求的字符上限：后端可能比 pipeline 更保守（Azure 的限速窗口），取较小的
+    request_limit = min(max_batch_chars, getattr(translator, "request_limit", max_batch_chars))
     for pos, seg in enumerate(segments):
         h = seg.src_hash
         if h in seen:
@@ -283,8 +298,8 @@ def translate_article(
             # 不自动重翻，继续等人工复查
             rejected.add(h)
             continue
-        n_units, unit_chars = _unit_info(translator, seg.html)
-        if n_units > MAX_TEXTS_PER_REQUEST or unit_chars > max_batch_chars:
+        n_units, unit_chars = _unit_info(translator, seg.html, glossary)
+        if n_units > MAX_TEXTS_PER_REQUEST or unit_chars > request_limit:
             oversized.add(h)
             continue
         pending.append(pos)
@@ -301,13 +316,13 @@ def translate_article(
         stats.oversized = [s.idx for s in segments if s.src_hash in oversized]
 
     texts = [segments[p].html for p in pending]
-    # 按"实际送出去的单元数和长度"（分行 + 脚注占位展开后）分批，而不是原文段落数/长度：
+    # 按"实际送出去的单元数和长度"（分行 + 脚注占位 / 术语标记展开后）分批，而不是原文段落数/长度：
     # 保证一批只对应后端的一个请求，后一块失败时前面已计费的译文已经逐批落进翻译记忆、不会整个丢掉
-    info = [_unit_info(translator, t) for t in texts]
+    info = [_unit_info(translator, t, glossary) for t in texts]
     counts = [n for n, _ in info]
     lengths = [n for _, n in info]
     try:
-        for chunk in chunk_units(counts, lengths, MAX_TEXTS_PER_REQUEST, max_batch_chars):
+        for chunk in chunk_units(counts, lengths, MAX_TEXTS_PER_REQUEST, request_limit):
             batch = [pending[i] for i in chunk]
             batch_texts = [texts[i] for i in chunk]
             out = _call(translator, batch_texts, glossary, _context(segments, batch, context_chars))

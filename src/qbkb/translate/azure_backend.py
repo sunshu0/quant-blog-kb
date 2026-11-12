@@ -39,6 +39,8 @@ from dotenv import load_dotenv
 from qbkb.models import QuotaExceededError
 from qbkb.translate.base import (
     MAX_REQUEST_CHARS,
+    ArticleTranslationError,
+    BackendAuthError,
     TranslatorUnavailableError,
     chunk_texts,
 )
@@ -72,12 +74,18 @@ _DICT_STRAY = re.compile(r"</?mstrans:dictionary\b[^>]*>", re.IGNORECASE)
 _ACRONYM = re.compile(r"^[A-Z][A-Z0-9/&]{1,5}$")
 
 
-class AzureAuthError(RuntimeError):
-    """key 无效、region 不对或没有权限（401 / 403000）。重试没用，要改 .env。"""
+class AzureAuthError(BackendAuthError):
+    """key 无效、region 不对或没有权限（401 / 403000）。重试没用，要改 .env。
+
+    是 BackendAuthError 的子类：上层据此停下整轮并给退出码 1。
+    """
 
 
-class AzureRequestError(RuntimeError):
-    """请求本身有问题（400 之类），重试没用。"""
+class AzureRequestError(ArticleTranslationError):
+    """请求本身有问题（400、返回格式看不懂、条数不符）。重试没用。
+
+    是 ArticleTranslationError 的子类：上层据此把这一篇标 needs_review 后继续下一篇。
+    """
 
 
 @dataclass(frozen=True)
@@ -107,8 +115,8 @@ class CharRateLimiter:
     """滑动窗口限速：任意 window_s 秒内送出的字符不超过 limit。
 
     Azure F0 要求每小时 200 万字符均匀使用（文档按"每分钟约 33,300"解释），
-    所以默认窗口 60 秒、上限 DEFAULT_CHARS_PER_MINUTE。单次请求超过 limit 时不拆，
-    等窗口空了再整批送出（窗口里只剩它自己）。
+    所以默认窗口 60 秒、上限 DEFAULT_CHARS_PER_MINUTE。单次请求也不能超过 limit；
+    后端发送前按这个上限分批，单个超大翻译单元交给 pipeline 标记复查。
     """
 
     def __init__(
@@ -134,11 +142,13 @@ class CharRateLimiter:
 
     def acquire(self, n: int) -> None:
         """送出 n 个字符之前调用：必要时等到窗口里放得下。"""
+        if n > self.limit:
+            raise ValueError("单次字符数不能超过限速窗口上限；请先分批")
         while True:
             now = self._clock()
             self._expire(now)
             used = sum(c for _, c in self._sent)
-            if not self._sent or used + n <= self.limit:
+            if used + n <= self.limit:
                 self._sent.append((now, n))
                 return
             # 等最早的一笔滑出窗口
@@ -338,6 +348,24 @@ class AzureTranslator:
         sent = add_notranslate(protect_sups(unit), self.notranslate_tags)
         return self._marker(glossary).mark(sent)
 
+    @property
+    def request_limit(self) -> int:
+        """单次请求同时遵守服务上限与本地限速窗口。"""
+        return min(self.max_chars, self.limiter.limit)
+
+    def request_units(
+        self, html: str, glossary: Mapping[str, str] | None = None
+    ) -> tuple[int, int]:
+        """这一段会展开成几个翻译单元、总长多少（分行 + 术语标记 + 脚注占位之后）。
+
+        和 translate() 里拼进 units 的单元一一对应：pipeline 用单元数和总长两个维度分批，
+        保证一批正好对应后端的一个请求，不会因为术语标记 / 分行展开超限被后端再切成多个请求。
+        """
+        g = glossary or {}
+        plan = split_lines(html)
+        pieces = plan.lines if plan is not None else [html]
+        return len(pieces), sum(len(self.prepare(p, g)[0]) for p in pieces)
+
     def translate(
         self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
     ) -> list[str]:
@@ -356,7 +384,7 @@ class AzureTranslator:
                 units.append(sent)
                 hits.append(found)
         # 先切批：超长段落在发任何请求之前就报 SegmentTooLargeError
-        chunks = chunk_texts(units, self.max_elements, self.max_chars)
+        chunks = chunk_texts(units, self.max_elements, self.request_limit)
         translated: list[str] = []
         for chunk in chunks:
             translated.extend(self._request([units[i] for i in chunk]))
@@ -469,7 +497,7 @@ class AzureTranslator:
         except (ValueError, KeyError, IndexError, TypeError) as e:
             raise AzureRequestError("Azure 的返回看不懂（不是 translate 的格式）") from e
         if len(results) != len(texts):
-            raise RuntimeError(f"Azure 返回 {len(results)} 条译文，送出 {len(texts)} 条")
+            raise AzureRequestError(f"Azure 返回 {len(results)} 条译文，送出 {len(texts)} 条")
         metered = r.headers.get("X-metered-usage", "").strip()
         self.metered_chars += int(metered) if metered.isdigit() else size
         self.requests += 1
