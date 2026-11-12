@@ -13,6 +13,7 @@
   <div class="brand">qbkb <span>量化博客中文知识库</span></div>
   <nav class="tabs" role="tablist">
     <button type="button" data-tab="browse" class="active">浏览文章</button>
+    <button type="button" data-tab="sections">栏目抽样</button>
     <button type="button" data-tab="run">运行</button>
     <button type="button" data-tab="review">待复查 <span id="review-count" class="count"></span></button>
     <button type="button" data-tab="settings">设置</button>
@@ -46,6 +47,22 @@
       <p class="empty">从左边选一篇文章。</p>
     </div>
   </article>
+</section>
+
+<section id="tab-sections" class="tab" hidden>
+  <div class="card">
+    <h2>栏目抽样</h2>
+    <p class="hint">抽样表就是 <code>output\sections\&lt;站点&gt;.csv</code>，在这里标和用 Excel 标是同一份。
+      每个栏目抽约 20 篇（不超过 30 篇的栏目列全部）。标「要 / 不要」后实时算占比：高于 80% 整栏采集、
+      60%–80% 补抽或问老板、低于 60% 不够。「翻译这一栏」只翻抽中文章的标题和摘要，翻过的会缓存、不重复计费。</p>
+    <div class="row">
+      <label>站点 <select id="sections-site"></select></label>
+      <button type="button" id="sections-generate" class="primary">生成抽样表</button>
+      <span id="sections-msg" class="hint"></span>
+    </div>
+    <div id="sections-summary" class="sections-summary"></div>
+    <div id="sections-list"></div>
+  </div>
 </section>
 
 <section id="tab-run" class="tab" hidden>

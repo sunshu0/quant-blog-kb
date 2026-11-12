@@ -37,7 +37,7 @@ import yaml
 
 from qbkb import config, store
 from qbkb.config import CONFIG_DIR
-from qbkb.console import demo, jobs
+from qbkb.console import demo, jobs, sections_ui
 from qbkb.console.net import LocalServer
 from qbkb.console.render import render_markdown
 from qbkb.console.schedule import ScheduleError, Scheduler, TaskState
@@ -62,7 +62,12 @@ from qbkb.console.workspace import (
     workspace,
     write_json,
 )
-from qbkb.models import Status
+from qbkb.models import QuotaExceededError, Status, Translator
+from qbkb.sections import SectionRules, load_section_rules, survey
+from qbkb.translate import DeepLTranslator
+from qbkb.translate.base import TranslatorUnavailableError
+from qbkb.translate.glossary import Glossary, load_glossary
+from qbkb.translate.pipeline import title_unit, translated_title
 
 DEFAULT_PORT = 8790
 STATIC_DIR = Path(__file__).parent / "static"
@@ -110,9 +115,13 @@ class App:
         environ: Mapping[str, str] | None = None,
         is_windows: bool | None = None,
         kill: Callable[[jobs.Proc], None] | None = None,
+        translator_factory: Callable[[Workspace], Translator] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.token = token or secrets.token_urlsafe(32)
+        self._translator_factory = translator_factory
+        self._translator_obj: Translator | None = None
+        self._translator_mode: str | None = None
         kwargs: dict[str, Any] = {}
         if popen is not None:
             kwargs["popen"] = popen
@@ -349,6 +358,287 @@ class App:
         if path.suffix.lower() not in IMAGE_TYPES or not path.is_file():
             raise ApiError(HTTPStatus.NOT_FOUND, "没有这个文件")
         return path
+
+    # ---- 栏目抽样 ----
+
+    def _section_cfg(self, ws: Workspace) -> Path:
+        return ws.config_dir or CONFIG_DIR
+
+    def _section_sites(self, ws: Workspace) -> list[str]:
+        """可以抽样的站点：演示模式就是 demo；真实模式是所有配了 sections 的站点。"""
+        if ws.demo:
+            return ["demo"]
+        cfg = self._section_cfg(ws)
+        names: list[str] = []
+        for name in config.list_sites(cfg):
+            try:
+                if load_section_rules(config.load_site(name, cfg)).enabled:
+                    names.append(name)
+            except (OSError, ValueError, yaml.YAMLError):
+                continue
+        return names
+
+    def _resolve_section_site(self, ws: Workspace, site: object) -> str:
+        if not isinstance(site, str) or not site:
+            raise _bad("要指定站点")
+        if site not in self._section_sites(ws):
+            raise _bad(f"没有这个站点：{site}")
+        return site
+
+    def _section_rules(self, ws: Workspace, site: str) -> SectionRules:
+        cfg = self._section_cfg(ws)
+        return load_section_rules(config.load_site(site, cfg))
+
+    def _csv_path(self, ws: Workspace, site: str) -> Path:
+        return ws.out / "sections" / f"{site}.csv"
+
+    def _translator(self, ws: Workspace) -> Translator:
+        if self._translator_obj is None or self._translator_mode != ws.mode:
+            if self._translator_factory is not None:
+                self._translator_obj = self._translator_factory(ws)
+            elif ws.demo:
+                self._translator_obj = demo.DemoTranslator(ws.base)
+            else:
+                self._translator_obj = DeepLTranslator.from_env(env_file=str(self.root / ".env"))
+            self._translator_mode = ws.mode
+        return self._translator_obj
+
+    def _translator_name(self, ws: Workspace) -> str | None:
+        """只读翻译记忆时用的后端名；后端建不出来（如真实模式没配 key）就返回 None。"""
+        try:
+            return self._translator(ws).name
+        except Exception:
+            return None
+
+    def _glossary(self, ws: Workspace) -> Glossary:
+        path = (ws.config_dir or CONFIG_DIR) / "glossary.yaml"
+        try:
+            return load_glossary(path)
+        except (OSError, ValueError, yaml.YAMLError):
+            return Glossary("", {}, {})
+
+    def sections_view(self, site: str) -> dict[str, object]:
+        ws = self.ws()
+        if not site:
+            sites = self._section_sites(ws)
+            if not sites:
+                return {
+                    "mode": ws.mode,
+                    "sites": [],
+                    "site": None,
+                    "has_csv": False,
+                    "summary": [],
+                    "sections": [],
+                }
+            site = sites[0]
+        site = self._resolve_section_site(ws, site)
+        try:
+            rules = self._section_rules(ws, site)
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            raise ApiError(HTTPStatus.NOT_FOUND, f"读不到站点 {site} 的配置：{e}") from e
+        path = self._csv_path(ws, site)
+        rows = survey.read_csv(path) if path.is_file() else []
+        conn = self._conn(ws)
+        tallies = []
+        try:
+            if conn is not None:
+                tallies = survey.tally(conn, site, rules)
+        finally:
+            if conn is not None:
+                conn.close()
+        vs, _bad = survey.verdicts(rows)
+        sampled: dict[str, int] = {}
+        for r in rows:
+            sid = r.get("栏目id", "")
+            sampled[sid] = sampled.get(sid, 0) + 1
+        summary = [
+            dict(zip(survey.SUMMARY_COLUMNS, row, strict=True))
+            for row in survey.summary_rows(tallies, vs, sampled)
+        ]
+        return {
+            "mode": ws.mode,
+            "sites": self._section_sites(ws),
+            "site": site,
+            "has_csv": path.is_file(),
+            "summary": summary,
+            "sections": self._section_articles(ws, rows),
+        }
+
+    def _section_articles(
+        self, ws: Workspace, rows: list[dict[str, str]]
+    ) -> list[dict[str, object]]:
+        """按抽样表的栏目分组，逐篇补上标题 / 日期 / 摘要和缓存的中文。"""
+        groups: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for r in rows:
+            sid = r.get("栏目id", "")
+            if sid not in groups:
+                groups[sid] = {
+                    "id": sid,
+                    "name": r.get("栏目", sid),
+                    "collect": r.get("是否采集", "—"),
+                    "rows": [],
+                }
+                order.append(sid)
+            groups[sid]["rows"].append(r)
+        conn = self._conn(ws)
+        backend = self._translator_name(ws)
+        glossary = self._glossary(ws) if backend else None
+        out: list[dict[str, object]] = []
+        try:
+            for sid in order:
+                g = groups[sid]
+                arts: list[dict[str, object]] = []
+                units: list[str] = []
+                for r in g["rows"]:
+                    a = self._article_info(conn, r, backend, glossary)
+                    if a["title_en"]:
+                        units.append(title_unit(str(a["title_en"])))
+                    if a["summary"]:
+                        units.append(sections_ui.summary_unit(str(a["summary"])))
+                    arts.append(a)
+                est = 0
+                if conn is not None and backend is not None and glossary is not None:
+                    est = sections_ui.estimate_units(conn, units, backend, glossary)
+                out.append(
+                    {
+                        "id": sid,
+                        "name": g["name"],
+                        "collect": g["collect"],
+                        "estimate_chars": est,
+                        "articles": arts,
+                    }
+                )
+        finally:
+            if conn is not None:
+                conn.close()
+        return out
+
+    def _article_info(
+        self,
+        conn: Any,
+        r: dict[str, str],
+        backend: str | None,
+        glossary: Glossary | None,
+    ) -> dict[str, object]:
+        url = r.get("网址", "")
+        a: dict[str, object] = {
+            "url": url,
+            "title_en": r.get("英文标题", ""),
+            "title_zh": "",
+            "date": r.get("发布日期", ""),
+            "summary": "",
+            "summary_zh": "",
+            "mark": r.get("要不要", ""),
+            "note": r.get("备注", ""),
+        }
+        if conn is None:
+            return a
+        row = store.get_article(conn, url)
+        if row is not None:
+            a["title_en"] = str(row["title"] or a["title_en"])
+            a["date"] = (str(row["published"] or "")[:10]) or a["date"]
+            a["title_zh"] = str(row["title_zh"] or "")
+            a["summary"] = sections_ui.summary_text(conn, url)
+        if backend is not None and glossary is not None:
+            if not a["title_zh"] and a["title_en"]:
+                a["title_zh"] = translated_title(conn, str(a["title_en"]), backend, glossary) or ""
+            if a["summary"]:
+                a["summary_zh"] = (
+                    sections_ui.translated_summary(conn, str(a["summary"]), backend, glossary) or ""
+                )
+        return a
+
+    def generate_sections(self, body: Mapping[str, Any]) -> dict[str, object]:
+        ws = self.ws()
+        site = self._resolve_section_site(ws, body.get("site"))
+        try:
+            rules = self._section_rules(ws, site)
+        except (OSError, ValueError, yaml.YAMLError) as e:
+            raise ApiError(HTTPStatus.NOT_FOUND, f"读不到站点 {site} 的配置：{e}") from e
+        conn = self._conn(ws)
+        tallies = []
+        try:
+            if conn is not None:
+                tallies = survey.tally(conn, site, rules)
+        finally:
+            if conn is not None:
+                conn.close()
+        path = self._csv_path(ws, site)
+        old = survey.read_csv(path) if path.is_file() else []
+        survey.write_samples(path, tallies, survey.DEFAULT_SAMPLE, survey.DEFAULT_SEED, old)
+        return self.sections_view(site)
+
+    def mark_section(self, body: Mapping[str, Any]) -> dict[str, object]:
+        ws = self.ws()
+        site = self._resolve_section_site(ws, body.get("site"))
+        url = body.get("url")
+        if not isinstance(url, str) or not url:
+            raise _bad("要给出网址")
+        mark = body.get("mark")  # None = 不改；"" = 清除；要 / 不要 = 设置
+        if mark is not None and mark not in ("要", "不要", ""):
+            raise _bad("标记只能是「要」「不要」或空（清除）")
+        note = body.get("note")
+        if note is not None and not isinstance(note, str):
+            raise _bad("备注要是文字")
+        path = self._csv_path(ws, site)
+        if not path.is_file():
+            raise _bad("还没有抽样表，先生成一张")
+        try:
+            sections_ui.update_marks(path, {url: (mark, note)})
+        except KeyError:
+            raise _bad("这个网址不在抽样表里") from None
+        except sections_ui.SamplingCsvError as e:
+            raise ApiError(HTTPStatus.CONFLICT, str(e)) from e
+        return self.sections_view(site)
+
+    def translate_section(self, body: Mapping[str, Any]) -> dict[str, object]:
+        ws = self.ws()
+        site = self._resolve_section_site(ws, body.get("site"))
+        section = body.get("section")
+        if not isinstance(section, str) or not section:
+            raise _bad("要指定栏目")
+        path = self._csv_path(ws, site)
+        rows = survey.read_csv(path) if path.is_file() else []
+        sec_rows = [r for r in rows if r.get("栏目id") == section]
+        if not sec_rows:
+            raise _bad("这个栏目没有抽样的文章")
+        try:
+            translator = self._translator(ws)
+        except Exception as e:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"翻译后端起不来：{e}") from e
+        glossary = self._glossary(ws)
+        conn = self._conn(ws)
+        if conn is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "还没有文章")
+        try:
+            units: list[str] = []
+            title_rows: list[tuple[str, str]] = []
+            for r in sec_rows:
+                url = r.get("网址", "")
+                row = store.get_article(conn, url)
+                if row is None:
+                    continue
+                title = str(row["title"] or "")
+                if title and not row["title_zh"]:
+                    units.append(title_unit(title))
+                    title_rows.append((url, title))
+                summary = sections_ui.summary_text(conn, url)
+                if summary:
+                    units.append(sections_ui.summary_unit(summary))
+            try:
+                sections_ui.translate_units(conn, units, translator, glossary)
+            except QuotaExceededError as e:
+                raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, f"翻译额度用完，没翻完：{e}") from e
+            except TranslatorUnavailableError as e:
+                raise ApiError(HTTPStatus.BAD_GATEWAY, f"翻译后端暂时不可用：{e}") from e
+            for url, title in title_rows:
+                zh = translated_title(conn, title, translator.name, glossary)
+                if zh:
+                    store.set_fields(conn, url, title_zh=zh)
+        finally:
+            conn.close()
+        return self.sections_view(site)
 
     # ---- 写 ----
 
@@ -632,6 +922,8 @@ def make_handler(app: App, port_box: list[int]) -> type[BaseHTTPRequestHandler]:
                 self._json(HTTPStatus.OK, app.article(q.get("url", ""), q.get("view", "zh")))
             elif path == "/api/review":
                 self._json(HTTPStatus.OK, app.review())
+            elif path == "/api/sections":
+                self._json(HTTPStatus.OK, app.sections_view(q.get("site", "")))
             elif path == "/api/job":
                 try:
                     since = max(int(q.get("since", "0")), 0)
@@ -684,6 +976,9 @@ def make_handler(app: App, port_box: list[int]) -> type[BaseHTTPRequestHandler]:
                 "/api/schedule": app.set_schedule,
                 "/api/demo/reset": lambda b: app.reset_demo(),
                 "/api/shutdown": lambda b: self._shutdown(),
+                "/api/sections/generate": app.generate_sections,
+                "/api/sections/mark": app.mark_section,
+                "/api/sections/translate": app.translate_section,
             }
             fn = routes.get(urlsplit(self.path).path)
             if fn is None:

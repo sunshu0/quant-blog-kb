@@ -53,6 +53,7 @@ function showTab(name) {
   }
   for (const s of document.querySelectorAll(".tab")) s.hidden = s.id !== `tab-${name}`;
   if (name === "browse") loadToc();
+  if (name === "sections") loadSections();
   if (name === "review") loadReview();
   if (name === "settings" || name === "run") loadState();
 }
@@ -249,6 +250,130 @@ async function loadReview() {
   }
 }
 
+// ---- 栏目抽样 ----
+
+let sectionsSite = null;
+const expandedSections = new Set();
+
+async function loadSections() {
+  try {
+    const d = await api(`/api/sections${sectionsSite ? `?site=${encodeURIComponent(sectionsSite)}` : ""}`);
+    renderSections(d);
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderSections(d) {
+  sectionsSite = d.site;
+  const select = $("sections-site");
+  select.replaceChildren();
+  for (const s of d.sites) select.append(el("option", { value: s, textContent: s }));
+  if (d.site) select.value = d.site;
+  $("sections-generate").hidden = d.has_csv;
+  $("sections-msg").textContent = "";
+  if (!d.sites.length) {
+    $("sections-msg").textContent = "没有配了栏目的站点（站点配置里要有 sections 节）。";
+    $("sections-generate").hidden = true;
+  }
+
+  const sum = $("sections-summary");
+  sum.replaceChildren();
+  if (d.summary.length) for (const row of d.summary) sum.append(summaryCard(row));
+  else if (d.has_csv) sum.append(el("p", { className: "empty", textContent: "抽样表是空的。" }));
+
+  const list = $("sections-list");
+  list.replaceChildren();
+  if (d.sections.length) {
+    for (const sec of d.sections) list.append(sectionCard(sec, d.site));
+  } else {
+    list.append(el("p", { className: "empty", textContent: "还没有抽样的文章：先到「运行」页抓取并抽取，再生成抽样表。" }));
+  }
+}
+
+function summaryCard(row) {
+  const conclusion = row["结论"] || "";
+  const cls = conclusion.includes("超过七成") ? "ok"
+    : conclusion.includes("不够") ? "bad"
+    : conclusion.includes("七成上下") ? "attention" : "";
+  const collect = row["是否采集"] === "是" ? "已选采集" : row["是否采集"] === "否" ? "未选" : "—";
+  return el("div", { className: "sec-summary" },
+    el("div", { className: "sec-summary-name", textContent: `${row["栏目"]}（${collect}）` }),
+    el("div", { className: "sec-summary-nums", textContent: `已判定 ${row["已判定篇数"]} 篇 · 抽样 ${row["抽样"]} · 已标 ${row["已标"]}（要 ${row["要"]} / 不要 ${row["不要"]}）` }),
+    el("div", { className: `sec-summary-ratio ${cls}`, textContent: `占比 ${row["占比"] || "—"}${conclusion ? ` — ${conclusion}` : ""}` })
+  );
+}
+
+function sectionCard(sec, site) {
+  const toggle = el("button", { type: "button", className: "ghost sec-toggle", textContent: "展开" });
+  const head = el("div", { className: "sec-head" },
+    el("div", { className: "sec-title", textContent: `${sec.name}（${sec.collect === "是" ? "已选采集" : "未选"}）` }),
+    el("span", { className: "hint", textContent: `${sec.articles.length} 篇` }),
+    el("button", { type: "button", className: "primary sec-translate", textContent: sec.estimate_chars ? `翻译这一栏（约 ${sec.estimate_chars.toLocaleString()} 字符）` : "翻译这一栏" }),
+    toggle
+  );
+  const body = el("div", { className: "sec-body", hidden: true });
+  for (const a of sec.articles) body.append(articleRow(a, site));
+  toggle.addEventListener("click", () => {
+    const hide = !body.hidden;
+    body.hidden = hide;
+    toggle.textContent = hide ? "展开" : "收起";
+    if (hide) expandedSections.delete(sec.id); else expandedSections.add(sec.id);
+  });
+  head.querySelector(".sec-translate").addEventListener("click", async () => {
+    try {
+      const d = await api("/api/sections/translate", { site, section: sec.id });
+      renderSections(d);
+      toast("已翻译这一栏的标题和摘要（命中的不重复计费）。");
+    } catch (e) { toast(e.message, true); }
+  });
+  if (expandedSections.has(sec.id)) { body.hidden = false; toggle.textContent = "收起"; }
+  return el("div", { className: "card sec-card" }, head, body);
+}
+
+function articleRow(a, site) {
+  const link = /^https?:\/\//.test(a.url)
+    ? el("a", { href: a.url, target: "_blank", rel: "noopener noreferrer", textContent: "原文链接" })
+    : el("span", { className: "hint", textContent: "—" });
+  const makeBtn = (label, value) => {
+    const b = el("button", { type: "button", textContent: label });
+    if (a.mark === value) b.classList.add("active");
+    b.addEventListener("click", () => markArticle(site, a.url, value, undefined));
+    return b;
+  };
+  const note = el("input", { type: "text", value: a.note || "", placeholder: "备注（可选）" });
+  note.addEventListener("change", () => markArticle(site, a.url, undefined, note.value));
+  const bits = [el("strong", { textContent: a.title_en || "（无标题）" })];
+  if (a.title_zh) bits.push(el("div", { className: "sec-art-zh", textContent: `中文标题：${a.title_zh}` }));
+  const head = el("div", { className: "sec-art-head" },
+    el("div", { className: "sec-art-title" }, bits),
+    el("div", { className: "hint sec-art-meta" }, `${a.date || "无日期"} · `, link)
+  );
+  const body = [];
+  if (a.summary) body.push(el("div", { className: "sec-art-summary", textContent: a.summary }));
+  if (a.summary_zh) body.push(el("div", { className: "sec-art-summary-zh", textContent: a.summary_zh }));
+  return el("div", { className: "sec-art" }, head, ...body,
+    el("div", { className: "sec-art-actions" }, makeBtn("要", "要"), makeBtn("不要", "不要"), makeBtn("清除", ""), note));
+}
+
+async function markArticle(site, url, mark, note) {
+  const body = { site, url };
+  if (mark !== undefined) body.mark = mark;
+  if (note !== undefined) body.note = note;
+  try {
+    const d = await api("/api/sections/mark", body);
+    renderSections(d);
+    toast(note !== undefined ? "备注已保存。" : (mark ? `已标「${mark}」。` : "已清除标记。"));
+  } catch (e) { toast(e.message, true); }
+}
+
+async function generateSections() {
+  if (!sectionsSite) { toast("先选一个站点。", true); return; }
+  try {
+    const d = await api("/api/sections/generate", { site: sectionsSite });
+    renderSections(d);
+    toast("抽样表已生成，可以开始标注了。");
+  } catch (e) { toast(e.message, true); }
+}
+
 // ---- 设置 ----
 
 async function saveKeys() {
@@ -324,6 +449,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   $("run-start").addEventListener("click", startRun);
   $("run-stop").addEventListener("click", stopRun);
+  $("sections-site").addEventListener("change", () => { sectionsSite = $("sections-site").value; loadSections(); });
+  $("sections-generate").addEventListener("click", generateSections);
   $("keys-save").addEventListener("click", saveKeys);
   for (const b of document.querySelectorAll("[data-test]")) b.addEventListener("click", () => testKey(b.dataset.test));
   for (const r of document.querySelectorAll('input[name="mode"]')) r.addEventListener("change", () => setMode(r.value));
