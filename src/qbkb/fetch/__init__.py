@@ -107,6 +107,7 @@ def run_fetch(
             urls=targets,
             raw_dir=raw,
             allowed_host=urlsplit(base_url).hostname or "",
+            allowed_scheme=urlsplit(base_url).scheme or "https",
             counts=counts,
         )
         process.start()

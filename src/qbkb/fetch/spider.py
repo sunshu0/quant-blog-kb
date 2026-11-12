@@ -11,11 +11,12 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import urlsplit
 
 import scrapy
 from scrapy.crawler import Crawler
 from scrapy.downloadermiddlewares.retry import RetryMiddleware
-from scrapy.exceptions import CloseSpider
+from scrapy.exceptions import CloseSpider, IgnoreRequest
 from scrapy.http import Request, Response
 from twisted.python.failure import Failure
 
@@ -139,6 +140,42 @@ class BackoffRetryMiddleware:
         return result
 
 
+class HostAllowlistMiddleware:
+    """显式 scheme + host 白名单检查：约束初始 URL 和每一次重定向目标。
+
+    Scrapy 自带的 OffsiteMiddleware 会被请求上的 dont_filter 直接放行（文章请求都带
+    dont_filter=True），RedirectMiddleware 又把该标记继承给重定向请求，所以 allowed_domains
+    实际拦不住跨站重定向。这里不理会 dont_filter，对进入下载器的每个请求（初始请求、HTTP 3xx
+    和 meta refresh 生成的重定向请求）再做一次 scheme + host 检查：不匹配就把文章记成失败
+    （写清原因），不保存任何内容。
+    """
+
+    def __init__(self, allowed_scheme: str, allowed_host: str) -> None:
+        self.allowed_scheme = (allowed_scheme or "https").lower()
+        self.allowed_host = (allowed_host or "").lower().rstrip(".")
+
+    @classmethod
+    def from_crawler(cls, crawler: Crawler) -> Self:
+        spider = crawler.spider
+        scheme = getattr(spider, "allowed_scheme", "https")
+        host = getattr(spider, "allowed_domains", [""])[0]
+        return cls(scheme, host)
+
+    def is_allowed(self, url: str) -> bool:
+        parts = urlsplit(url)
+        if (parts.scheme or "").lower() != self.allowed_scheme:
+            return False
+        host = (parts.hostname or "").lower().rstrip(".")
+        return host == self.allowed_host or host.endswith("." + self.allowed_host)
+
+    def process_request(self, request: Request, spider: scrapy.Spider) -> None:
+        if self.is_allowed(request.url):
+            return
+        article_url = str(request.cb_kwargs.get("article_url", request.url))
+        spider.fail_cross_host(article_url, request.url)  # type: ignore[attr-defined]
+        raise IgnoreRequest(f"请求目标 {request.url} 不在许可站点 {self.allowed_host} 内")
+
+
 class ArticleSpider(scrapy.Spider):
     """抓给定的文章 URL，每个响应交给 process_response 落库。"""
 
@@ -151,6 +188,8 @@ class ArticleSpider(scrapy.Spider):
         raw_dir: Path,
         allowed_host: str,
         counts: Counter[Kind],
+        *,
+        allowed_scheme: str = "https",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -158,7 +197,15 @@ class ArticleSpider(scrapy.Spider):
         self.urls = list(urls)
         self.raw_dir = raw_dir
         self.allowed_domains = [allowed_host]
+        self.allowed_scheme = allowed_scheme.lower()
         self.counts = counts
+
+    def fail_cross_host(self, article_url: str, target_url: str) -> None:
+        """跨站（或换 scheme）请求：把文章记成失败，不保存目标内容。"""
+        outcome = Outcome(Kind.FAILED, None, f"重定向到未许可站点 {target_url}，不保存内容")
+        apply_outcome(self.conn, article_url, outcome, b"", self.raw_dir)
+        self.counts[Kind.FAILED] += 1
+        self.logger.warning("blocked cross-host request: %s -> %s", article_url, target_url)
 
     async def start(self) -> AsyncIterator[Request]:
         for url in self.urls:

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 import scrapy
-from scrapy.exceptions import CloseSpider
+from scrapy.downloadermiddlewares.redirect import RedirectMiddleware
+from scrapy.exceptions import CloseSpider, IgnoreRequest
 from scrapy.http import HtmlResponse, Request, Response
 from scrapy.utils.test import get_crawler
 
@@ -19,6 +20,7 @@ from qbkb.fetch.process import META_RETRY_AFTER_REFUSED, classify_response
 from qbkb.fetch.spider import (
     ArticleSpider,
     BackoffRetryMiddleware,
+    HostAllowlistMiddleware,
     backoff_delay,
     parse_retry_after,
 )
@@ -314,6 +316,85 @@ def test_spider_counts_store_errors_as_failed(
     resp = HtmlResponse(request.url, status=200, body=b"<html>ok</html>", request=request)
     _spider(conn, blocker, counts).parse_article(resp, article_url=BASE + "alpha")
     assert counts == Counter({Kind.FAILED: 1})
+
+
+def _cross_host_spider(
+    conn: sqlite3.Connection, raw_dir: Path, url: str
+) -> tuple[ArticleSpider, Request, scrapy.crawler.Crawler]:
+    """从 start() 取真实请求，再挂到真实中间件链（RedirectMiddleware + 我们的白名单）上。"""
+    counts: Counter[Kind] = Counter()
+    spider = ArticleSpider(
+        conn=conn, urls=[url], raw_dir=raw_dir, allowed_host="www.example.test", counts=counts
+    )
+
+    async def first() -> list[Request]:
+        return [r async for r in spider.start()]
+
+    (request,) = asyncio.run(first())
+    crawler = get_crawler(ArticleSpider, build_settings())
+    crawler.spider = spider
+    return spider, request, crawler
+
+
+def test_cross_host_redirect_is_blocked_and_recorded(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    _, conn = db
+    url = BASE + "alpha"
+    spider, request, crawler = _cross_host_spider(conn, tmp_path / "raw", url)
+    redirect = RedirectMiddleware.from_crawler(crawler)
+    result = redirect.process_response(
+        request,
+        Response(
+            url,
+            status=302,
+            headers={"Location": "https://unapproved.test/private"},
+            request=request,
+        ),
+    )
+    assert isinstance(result, Request) and result.url == "https://unapproved.test/private"
+    assert result.dont_filter  # RedirectMiddleware 继承了 dont_filter，Offsite 拦不住
+    mw = HostAllowlistMiddleware.from_crawler(crawler)
+    with pytest.raises(IgnoreRequest):
+        mw.process_request(result, spider)
+    row = store.get_article(conn, url)
+    assert row is not None and row["status"] == Status.FAILED
+    assert "unapproved.test" in str(row["error"])
+
+
+def test_scheme_downgrade_redirect_is_blocked(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    _, conn = db
+    url = BASE + "alpha"
+    spider, request, crawler = _cross_host_spider(conn, tmp_path / "raw", url)
+    result = RedirectMiddleware.from_crawler(crawler).process_response(
+        request,
+        Response(
+            url,
+            status=302,
+            headers={"Location": "http://www.example.test/private"},
+            request=request,
+        ),
+    )
+    assert isinstance(result, Request) and result.url.startswith("http://")
+    with pytest.raises(IgnoreRequest):
+        HostAllowlistMiddleware.from_crawler(crawler).process_request(result, spider)
+    assert store.get_article(conn, url)["status"] == Status.FAILED  # type: ignore[index]
+
+
+def test_same_host_redirect_is_allowed(db: tuple[Path, sqlite3.Connection], tmp_path: Path) -> None:
+    _, conn = db
+    url = BASE + "alpha"
+    spider, request, crawler = _cross_host_spider(conn, tmp_path / "raw", url)
+    result = RedirectMiddleware.from_crawler(crawler).process_response(
+        request,
+        Response(url, status=302, headers={"Location": BASE + "moved"}, request=request),
+    )
+    assert isinstance(result, Request) and result.url == BASE + "moved"
+    # 同站（含子域）与同 scheme 的请求放行，不写状态库
+    assert HostAllowlistMiddleware.from_crawler(crawler).process_request(result, spider) is None
+    assert store.get_article(conn, url)["status"] == Status.DISCOVERED  # type: ignore[index]
 
 
 def test_run_fetch_removes_stale_tmp_before_crawling(

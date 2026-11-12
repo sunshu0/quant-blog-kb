@@ -48,6 +48,8 @@ def build_settings(
         "RETRY_HTTP_CODES": list(RETRY_HTTP_CODES),
         "DOWNLOADER_MIDDLEWARES": {
             "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
+            # 在 Offsite（500）之后、Retry（550）之前：拦下 dont_filter 绕过的跨站重定向
+            "qbkb.fetch.spider.HostAllowlistMiddleware": 505,
             "qbkb.fetch.spider.BackoffRetryMiddleware": 550,
         },
         # 非 2xx 也交给回调，由 process_response 统一写状态库
