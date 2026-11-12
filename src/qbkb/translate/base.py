@@ -90,3 +90,39 @@ def chunk_texts_by_length(
     if start < len(lengths):
         chunks.append(range(start, len(lengths)))
     return chunks
+
+
+def chunk_units(
+    counts: Sequence[int],
+    lengths: Sequence[int],
+    max_units: int = MAX_TEXTS_PER_REQUEST,
+    max_chars: int = MAX_REQUEST_CHARS,
+) -> list[range]:
+    """按每条展开后的（单元数, 总长）切批：一批不超过 max_units 个单元、max_chars 个字符。
+
+    DeepL 后端会把分行段落（脚注列表、诗歌）展开成「一行一个单元」，50 条上限按单元数算，
+    不是按段落数。counts[i] 是第 i 段展开成几个单元，lengths[i] 是展开后的总长；两者等长，
+    返回的 range 是下标，调用方自己索引原文。这样一批正好对应后端的一个请求，后端不会因为
+    单元数超限再把它切成多个请求（后一块失败时前面已计费的译文才不会丢）。
+    """
+    if max_units < 1 or max_chars < 1:
+        raise ValueError("max_units 和 max_chars 必须是正数")
+    if len(counts) != len(lengths):
+        raise ValueError("counts 和 lengths 必须等长")
+    chunks: list[range] = []
+    start, units, size = 0, 0, 0
+    for i, (n, length) in enumerate(zip(counts, lengths, strict=True)):
+        if n > max_units:
+            raise SegmentTooLargeError(f"第 {i} 条展开成 {n} 个单元，超过单次请求上限 {max_units}")
+        if length > max_chars:
+            raise SegmentTooLargeError(
+                f"第 {i} 条展开后有 {length} 个字符，超过单次请求上限 {max_chars}"
+            )
+        if i > start and (units + n > max_units or size + length > max_chars):
+            chunks.append(range(start, i))
+            start, units, size = i, 0, 0
+        units += n
+        size += length
+    if start < len(counts):
+        chunks.append(range(start, len(counts)))
+    return chunks

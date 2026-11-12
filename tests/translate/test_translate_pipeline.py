@@ -406,6 +406,30 @@ def test_batches_by_sent_length_not_raw_length(
     assert t.calls == [[segs[0]], [segs[1]]]  # 每批一段，一段对应一个请求
 
 
+def test_batches_by_unit_count_not_paragraph_count(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    from qbkb.translate.lines import split_lines
+
+    paras = [f"<p>para {i} text.</p>" for i in range(40)]
+    lines = "<br>".join(f"{i}. line {i}" for i in range(1, 16))
+    footnote = f"<p>{lines}</p>"
+    add_article(paras + [footnote])
+
+    class UnitAware(_IdentityTranslator):
+        def request_units(self, html: str) -> tuple[int, int]:
+            plan = split_lines(html)
+            pieces = plan.lines if plan is not None else [html]
+            return len(pieces), sum(len(p) for p in pieces)
+
+    t = UnitAware()
+    stats = translate_article(conn, URL, t, glossary)
+    # 40 段（各 1 单元）+ 1 个 15 行脚注列表（15 单元）= 55 单元 > 50：必须拆成两批，
+    # 每个请求的单元数都不超过 50，不能按段落数（41 段 ≤ 50）合成一批让后端再切
+    assert stats.translated == 41
+    assert [len(c) for c in t.calls] == [40, 1]
+
+
 def test_later_batch_failure_preserves_earlier_batch(
     conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
 ) -> None:

@@ -134,6 +134,16 @@ def test_oversized_segment_fails_before_any_request() -> None:
     assert client.translate_calls == [] and client.created == []
 
 
+def test_request_units_counts_split_lines() -> None:
+    t, _ = _translator(FakeClient())
+    assert t.request_units("<p>a</p>") == (1, len("<p>a</p>"))
+    # 15 行编号列表：split_lines 拆成 15 个单元，每行重复外层标签后总长比整段长
+    lines = "<br>".join(f"{i}. line {i}" for i in range(1, 16))
+    footnote = f"<p>{lines}</p>"
+    n, total = t.request_units(footnote)
+    assert n == 15 and total > len(footnote)
+
+
 def test_glossary_uploads_case_variants() -> None:
     client = FakeClient()
     t, _ = _translator(client)

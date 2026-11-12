@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import html
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import cast
 
 from qbkb import store
 from qbkb.models import QuotaExceededError, Segment, Status, Translator, segment_hash
@@ -15,7 +16,7 @@ from qbkb.translate.base import (
     MAX_TEXTS_PER_REQUEST,
     ArticleTranslationError,
     TranslatorUnavailableError,
-    chunk_texts_by_length,
+    chunk_units,
     count_chars,
 )
 from qbkb.translate.fixed import FIXED_FILE, is_interview, untranslated_units
@@ -25,6 +26,18 @@ from qbkb.translate.structure import plain_text, same_structure
 
 # 一批请求的 context 总长上限（字符）。DeepL 不对 context 计费，但它占请求体。
 CONTEXT_CHARS = 1_200
+
+
+def _unit_info(translator: Translator, html: str) -> tuple[int, int]:
+    """这一段会展开成几个翻译单元、总长多少。
+
+    后端能报就用后端的（DeepL 把分行段落拆成一行一个单元，50 条上限按单元数算）；
+    没有这个方法的后端（假后端等）退回「一段一个单元、长度用脚注占位展开后的」。
+    """
+    fn = getattr(translator, "request_units", None)
+    if callable(fn):
+        return cast("Callable[[str], tuple[int, int]]", fn)(html)
+    return 1, sent_length(html)
 
 
 @dataclass(slots=True)
@@ -195,12 +208,12 @@ def translate_article(
     """翻译一篇文章的全部段落。
 
     - 查翻译记忆（按段落的术语版本），只翻未命中的；文章内重复的段落只翻一次。
-      未命中的段落不管是否相邻都合进同一批（每批不超过 max_batch_chars 和 50 条）。
+      未命中的段落不管是否相邻都合进同一批（每批不超过 max_batch_chars 和 50 个翻译单元）。
     - 每批翻完，通过结构校验的段落立刻写进翻译记忆。没通过的单独再翻一次，
       而且不带 context（同样的输入大概率得到同样的结果）。
     - 还是没通过：译文以 quality = rejected 存进翻译记忆，tm_get 不会返回它；
       以后的运行也不再自动重翻它（不会每次都花额度），除非 retry_rejected=True。
-    - 单段超过 max_batch_chars 的不送出，记为 oversized，其余段落照常翻。
+    - 单段展开后超过单次请求上限（字符或单元数）的不送出，记为 oversized，其余段落照常翻。
     - 结果：全部通过 → translated；有 rejected / oversized → needs_review，
       error 列写明是哪些段落，等人工复查。
     - 已经 translated / published 的文章（translate --recheck）：没有任何段落变化时保持原状态和
@@ -266,7 +279,8 @@ def translate_article(
             # 不自动重翻，继续等人工复查
             rejected.add(h)
             continue
-        if sent_length(seg.html) > max_batch_chars:
+        n_units, unit_chars = _unit_info(translator, seg.html)
+        if n_units > MAX_TEXTS_PER_REQUEST or unit_chars > max_batch_chars:
             oversized.add(h)
             continue
         pending.append(pos)
@@ -283,11 +297,13 @@ def translate_article(
         stats.oversized = [s.idx for s in segments if s.src_hash in oversized]
 
     texts = [segments[p].html for p in pending]
-    # 按"实际送出去的长度"（脚注占位展开后）分批，而不是原文长度：保证一批只对应后端的一个请求，
-    # 后一块失败时前面已计费的译文已经逐批落进翻译记忆、不会整个丢掉
-    sent_lens = [sent_length(t) for t in texts]
+    # 按"实际送出去的单元数和长度"（分行 + 脚注占位展开后）分批，而不是原文段落数/长度：
+    # 保证一批只对应后端的一个请求，后一块失败时前面已计费的译文已经逐批落进翻译记忆、不会整个丢掉
+    info = [_unit_info(translator, t) for t in texts]
+    counts = [n for n, _ in info]
+    lengths = [n for _, n in info]
     try:
-        for chunk in chunk_texts_by_length(sent_lens, MAX_TEXTS_PER_REQUEST, max_batch_chars):
+        for chunk in chunk_units(counts, lengths, MAX_TEXTS_PER_REQUEST, max_batch_chars):
             batch = [pending[i] for i in chunk]
             batch_texts = [texts[i] for i in chunk]
             out = _call(translator, batch_texts, glossary, _context(segments, batch, context_chars))
@@ -347,10 +363,7 @@ def translate_article(
         if stats.rejected:
             parts.append("结构校验未通过的段落 " + ", ".join(map(str, stats.rejected)))
         if stats.oversized:
-            parts.append(
-                f"超过单次请求上限（{max_batch_chars} 字符）的段落 "
-                + ", ".join(map(str, stats.oversized))
-            )
+            parts.append("超过单次请求上限的段落 " + ", ".join(map(str, stats.oversized)))
         error = "；".join(parts)
         store.set_status(
             conn,
