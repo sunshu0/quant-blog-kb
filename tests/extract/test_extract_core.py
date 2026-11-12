@@ -5,8 +5,10 @@ from __future__ import annotations
 import codecs
 from typing import Any
 
+from qbkb import config
 from qbkb.config import SiteConfig
 from qbkb.extract import extract_full, load_rules
+from qbkb.extract.clean import block_text
 from qbkb.extract.core import decode_html
 from qbkb.extract.rules import ExtractRules
 
@@ -86,3 +88,26 @@ def test_keep_rule_with_own_remove_list() -> None:
     )
     out = _segments(page, keep=[{"selector": "#t", "remove": [".mobile"]}])
     assert out == ["<p>Body</p>", "<h2>Notes</h2>"]
+
+
+def test_cfm_body_excludes_pdf_file_list() -> None:
+    """CFM 侧栏的 "Download PDF" 链接列表不进正文（PDF 全文由 v2-pdf 处理）。"""
+    rules = load_rules(config.load_site("cfm"))
+    page = (
+        '<section class="content-blocks-container"><div class="row">'
+        '<div class="col-80">'
+        '<div class="content-block"><h1 class="appear">Sample Paper</h1></div>'
+        '<div class="content-block text-content appear">'
+        "<p><strong>Abstract</strong></p>"
+        "<p>This invented abstract stands in for the paper text.</p>"
+        "</div></div>"
+        '<div class="col-20 sidebar">'
+        '<ul class="file-list">'
+        '<li class="appear"><a href="/wp-content/uploads/2020/09/sample.pdf">Download PDF</a></li>'
+        "</ul>"
+        "</div></div></section>"
+    )
+    article = extract_full(page, "https://www.cfm.com/sample-paper/", rules).article
+    segments = [block_text(s.html) for s in article.segments]
+    assert segments == ["Abstract", "This invented abstract stands in for the paper text."]
+    assert "Download PDF" not in "\n".join(segments)

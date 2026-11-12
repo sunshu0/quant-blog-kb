@@ -11,12 +11,11 @@
       "Macro"
     ]
   },
-  "n_body": 2,
+  "n_body": 1,
   "issues": [
-    "正文太短：89 字符（下限 1000）"
+    "正文太短：77 字符（下限 1000）"
   ],
   "segments": [
-    "<p>An invented summary of a whitepaper whose page has no structured data at all.</p>",
-    "<ul><li><a href=\"https://www.cfm.com/wp-content/uploads/2018/02/old-style.pdf\">Download PDF</a></li></ul>"
+    "<p>An invented summary of a whitepaper whose page has no structured data at all.</p>"
   ]
 }

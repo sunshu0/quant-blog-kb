@@ -10,13 +10,12 @@
       "Liquidity"
     ]
   },
-  "n_body": 3,
+  "n_body": 2,
   "issues": [
-    "正文太短：235 字符（下限 1000）"
+    "正文太短：223 字符（下限 1000）"
   ],
   "segments": [
     "<p><strong>Abstract</strong></p>",
-    "<p>We build an invented model of funds that buy what they already hold. In the toy model, flows push prices, prices attract flows, and the loop ends when it stops. The abstract is short because the full paper is a PDF.</p>",
-    "<ul><li><a href=\"https://www.cfm.com/wp-content/uploads/2020/09/Toy_Funds.pdf\">Download PDF</a></li></ul>"
+    "<p>We build an invented model of funds that buy what they already hold. In the toy model, flows push prices, prices attract flows, and the loop ends when it stops. The abstract is short because the full paper is a PDF.</p>"
   ]
 }

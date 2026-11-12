@@ -41,7 +41,7 @@ CFM 是 WordPress 站，全站一个文章模板（`.content-blocks-container .c
 | 文件 | 覆盖的情况 |
 |---|---|
 | `edge-blog` | The Edge 博客：JSON-LD headline 带 HTML 实体（`&#8220;`）被解码；JSON-LD / meta 作者是机构名 "CFM"、另一个 meta author 是网址，都跳过，作者取侧栏 `li` 里 `<br>` 前的姓名（空 `li` 跳过）；栏目来自 JSON-LD articleSection；h1、朗读音频、分享按钮、页底相关文章、cookie 提示、页脚被删；`&nbsp;` 空段被清掉；图注（纯文字 div）成段；`<sup>` 脚注；免责声明随正文保留 |
-| `paper-pdf` | 论文摘要页：作者带单位、空白 `li`；栏目 + JSON-LD keywords 作标签；侧栏 "Download PDF" 相对链接转绝对、附在正文后；质检"正文太短" |
+| `paper-pdf` | 论文摘要页：作者带单位、空白 `li`；栏目 + JSON-LD keywords 作标签；侧栏 "Download PDF" 链接不进正文（PDF 全文见 v2-pdf）；质检"正文太短" |
 | `video-commentary` | 视频页：播放按钮和 YouTube iframe 被删、封面图保留；articleSection 里的 `&amp;` 被解码；没有作者；质检"正文太短" |
 | `missing-jsonld` | 没有 JSON-LD：标题来自页面 h1（不是带后缀的 `<title>`）、日期来自 article:published_time、标签来自页面上的栏目名和 `.tags`；作者 `li` 全空 |
 
