@@ -147,7 +147,7 @@ compliance:
 - 被筛掉的文章标记为 `skipped`，不删除，以后放宽标准时不用重新爬取。
 
 ### 4.5 translate：翻译
-- 后端可插拔，接口为 `translate(segments, glossary) -> translations`。MVP 用 DeepL API Free，Azure 作为备选。
+- 后端可插拔，接口为 `translate(segments, glossary) -> translations`。MVP 用 DeepL API Free；Azure AI Translator 后端已实现（见下面"Azure 后端"），默认仍是 DeepL。
 - 使用 DeepL 的 **HTML 模式**（`tag_handling=html`），标签原样保留；`glossary.yaml` 同步成 DeepL 的术语表。
 - **段落级翻译记忆**：key 是段落 HTML 规范化后的 hash。命中就复用，不命中才翻译。重复的段落（比如版权声明）只翻译一次。
 - **脚注上标**：真实冒烟发现 DeepL 在 HTML 模式下会丢掉 `<sup>2</sup>`，或者只丢标签、把数字并进正文；加 `ignore_tags=["sup"]` 后第二种情况仍然出现。所以送出去之前把纯数字的 `<sup>N</sup>` 换成占位链接 `<a href="#qbkb-sup-N">†</a>`（DeepL 对带 href 的链接保留得好；链接文字不放编号，原因见下面"脚注重复 / 错位"），译文回来后还原；DeepL 把旁边的字一起包进链接时，以 href 里的数字为准把字放回外面（`translate/footnotes.py`）。`ignore_tags=["sup"]` 仍然带着，管不是纯数字的上标。占位链接也被丢掉时脚注不会悄悄消失：结构校验除了比标签指纹，还单独比较**脚注编号**（纯数字 `<sup>` 和 Unicode 上标数字的个数和数字，`structure.footnote_marks`），不一致就重翻一次，还不一致标 rejected、文章进 `needs_review`。
@@ -163,6 +163,15 @@ compliance:
 - **术语表的匹配**：DeepL 的术语表不看上下文，单个常用词一定误命中（"carry over some capital" 被译成"套息"、一般意义的 factors 被译成"因子"），所以有歧义的词只收完整短语（carry trade、value factor、factor investing……）。`terms_in`（决定段落的术语版本和首现注释）改成最长匹配：被更长的术语覆盖的出现不算（"implied volatility" 里的 volatility 不单独算，首现注释不再出现"隐含波动率（volatility）"）；缩写（全大写、≤6 个字符：CLO、ROE、EV/S）区分大小写、要求右边界，否则 "CLO" 会匹配 "close"。匹配规则变了，规则版本 `SEGMENT_RULES` 从 g1 升到 g2：所有含术语的段落都会重翻；不含术语的段落版本固定是 `g1-none`，不受影响。`Exhibit N` 逐个列出 1–30（DeepL 术语表不支持模式），带编号的词条导出时不附英文注释。2026-11-12 用户确认的决定：multiples→估值倍数（只收复数）；只收 breakeven inflation；private equity→私募股权（缩写 PE 不收，交给人工）；Exhibit N→图表N；collar、Introduction、Cambridge Associates、Summer Haven 不收（后两个保留英文）。
 - **术语表升级的成本**（2026-11-12，v1 → v2 + 规则 g1 → g2，在两个库的副本上模拟，按送出的 HTML 长度计，是上界）：正式库（10 篇已翻译）`glossary_upgrade_cost` 101,551 字符；`translate --recheck --retry-rejected` 全部重跑约 121,605 字符（不加 `--retry-rejected` 约 119,316，剩 5 段进 needs_review）。冒烟库（3 篇）20,739 字符。其中规则版本 g1 → g2 本身约占 4.6 万（正式库）/ 4 千（冒烟库）：不升规则版本时分别约 76,014 / 16,589。免责声明 12 段走固定译文，不再计入。
 - **术语表只保留一份**：DeepL Free 账户同时只能保留 1 份术语表（2026-11-12 实测撞到）。换术语表版本时，`sync_glossary` 先删掉我们自己的旧版本术语表（名字精确匹配 `qbkb-v<版本>-<十六进制指纹>`、且不是当前名字的），再建新的；别的名字的术语表不动；删除时遇到 404（已经被删了）跳过，不中止翻译。DeepL 对"术语表太多"也返回 456，SDK 报成"额度用完"：这种情况抛 `GlossaryLimitError`（退出码 1），提示"术语表数量到上限，不是额度用完"和处理建议，不再说"下个月再跑"。
+- **Azure 后端**（`translate/azure_backend.py`，PR E，2026-11-12）：老板要求先用微软或谷歌的免费服务，选了 Azure AI Translator F0（每月 200 万字符，谷歌只有 50 万）。`--translator azure` 启用；**默认仍是 deepl**，真实冒烟通过之后再切。要点（官方文档 2026-11-12 查看）：
+  - 接口：Translator Text v3 `POST {endpoint}/translate?api-version=3.0&from=en&to=zh-Hans&textType=html`。`.env`：`AZURE_TRANSLATOR_KEY`（必填）、`AZURE_TRANSLATOR_REGION`、`AZURE_TRANSLATOR_ENDPOINT`（默认全局终结点 `https://api.cognitive.microsofttranslator.com`；自定义域名写到 `.../translator/text/v3.0`）。认证文档：`Ocp-Apim-Subscription-Region` 对区域资源和多服务资源必须，对全局资源可选，所以 region 填了才发；401 时提示检查 region。
+  - 分批：每个请求最多 1000 个元素、5 万字符（service limits），用同一个 `chunk_texts`，按加了术语标记以后的长度算；默认每批仍不超过 3 万字符（`MAX_REQUEST_CHARS`），和 pipeline 的超长判断一致。
+  - 限速：F0 每小时 200 万字符，文档要求均匀使用（约每分钟 3.33 万，滑动窗口），太快也会收到额度错误。每次请求前过一个 60 秒滑动窗口的限速器，默认每分钟 3 万字符（`AZURE_TRANSLATOR_CHARS_PER_MINUTE` 可调）。一篇约 2.3 万字符，所以连续翻译时每篇大约要 1 分钟。
+  - 错误：429（429000/001/002）、408、5xx、网络错误退避重试（有 `Retry-After` 就按它等），用尽是"后端暂时不可用"（退出码 4）。403001（免费额度用完）：文档说短时间送太多也可能收到额度错误，所以先等 60 秒再试一次，还是 403001 才转成 `QuotaExceededError`（退出码 3，进度保留），提示"过一小时再跑，还不行就是本月额度用完"。401 / 403000 是 key 或 region 不对，其他 4xx 是请求错误，都不重试。
+  - 用量：Azure 没有 DeepL `/v2/usage` 那样的用量接口（只有 Azure Monitor 指标，要另外的管理凭据），所以 `qbkb translate` 不显示"本月已用 / 上限"。每次请求读响应头 `X-metered-usage`（本次计费字符），在 `metered_chars` 里累计；本月总量要到 Azure 门户看。
+  - **术语表：动态词典**。Azure 没有服务端术语表。送出去之前在本地匹配术语，把原文里的写法包成 `<mstrans:dictionary translation="回撤">drawdowns</mstrans:dictionary>`。文档的限制和我们的处理：区分大小写 → 我们自己匹配（大小写不敏感、缩写区分大小写、要求左右词边界），按原文的写法包，所以不受影响；必须写 `from` → 固定 `from=en`；HTML 模式下照样能用。文档说它"只对专有名词安全"：英文目标语言会有词形问题，中文没有词形变化，强制译名的风险小；复数词尾（drawdowns、CLOs）一起包进去，避免"回撤s"。原文 = 译文的词条（alpha、CTA）按原文的大小写保留（"Alpha Architect" 不变成小写）。代码、上标、属性里的文字不包。最长匹配和 `terms_in` 一致。译后检查每个包进去的术语的译名是否出现在译文里，没出现的记在 `glossary_misses`。不用占位符的原因：把术语换成不翻译的占位，机器翻译看不到这个词，句子结构更容易出错；动态词典是 Azure 自己提供的方式，引擎知道这是一个有指定译名的短语。真实冒烟时重点看术语附近的语序，不行再换占位方案。
+  - 脚注占位、按行翻译、`repair_marks` 和 DeepL 后端共用。不是纯数字的 `<sup>`（DeepL 的 `ignore_tags`）改成加 `class="notranslate"`（Azure 文档里的不翻译写法），译后去掉，往返无损。结构校验、翻译记忆在 pipeline 里，和后端无关；翻译记忆的 backend 是 `azure:zh-Hans`，不和 `deepl:ZH-HANS` 的译文混用（切换后端后第一次要全部重翻）。Azure 没有 context 参数，忽略。
+  - 测试连接（`azure_backend.check_connection`，还没接进控制台）：不给 key 时 GET `/languages`（不需要 key、不计费），只能证明网络通；给了 key 时翻译 "OK"（约 2 个计费字符）——Azure 没有不计费又要 key 的接口，这是代价最小的验证方式。
 - 额度用完就停下，记录进度，下个月接着翻。`qbkb translate` 在翻译前后各调一次 DeepL 的 usage 接口（不消耗额度），显示真实的"已用 / 上限"。查额度只问一次、不走退避重试，最多等 5 秒，取不到就跳过、不影响翻译；这时上限退回保守的常量 `FREE_MONTHLY_CHARS`（50 万）。真实上限各账户不一样（我们的账户实测 100 万），以 usage 接口为准。
 - 校验：翻译前后按 D7 分级比较结构（见上面"结构校验分级"），不一致就重新翻译一次。
 - 术语第一次出现时附上英文（在导出阶段处理）。
@@ -192,7 +201,7 @@ compliance:
 ### 4.8 CLI 串联
 - 子命令：`discover`、`fetch`、`extract`、`filter`、`translate`、`export`，`run`（按这个顺序跑完全部阶段，`--skip` 跳过某些阶段），`status`（每个状态的文章数，列出 needs_review 和 failed 的文章及原因），`eval`（见 4.4），`console`（本地网页控制台，见第 10 节），以及 `init-db`、`sites`。`translate --url` 只翻这几篇（控制台的「重翻」用）；`--translator demo` 是演示模式的翻译后端。
 - **v2**：`run` 跑 discover → fetch → extract → translate → export（`--skip` 只能选这五个），没有打分，也没有 `--scorer` / `--refilter`；`filter` 仍可单独运行。新增 `sections`（栏目调研，见 4.9）；`status` 另外列出每个栏目的篇数、是否采集和新栏目提醒；`fetch --url-file` 只抓文件里列出的网址（`sections --fetch` 用）。发现新栏目时 extract 的退出码是 5（需要人确认）。
-- 通用参数：`--site`（默认全部站点）、`--db`、`--limit`（每个阶段最多处理多少篇）、`--config-dir`、`-v`。后端开关：`--scorer deepseek|fake`、`--translator deepl|fake`；其他：`--no-images`、`--refilter`、`--retry-rejected`、`--recheck`（见 4.5）、`--rebuild`、`--fetch-delay`（只对本机测试服务调小）。
+- 通用参数：`--site`（默认全部站点）、`--db`、`--limit`（每个阶段最多处理多少篇）、`--config-dir`、`-v`。后端开关：`--scorer deepseek|fake`、`--translator deepl|azure|fake`；其他：`--no-images`、`--refilter`、`--retry-rejected`、`--recheck`（见 4.5）、`--rebuild`、`--fetch-delay`（只对本机测试服务调小）。
 - 退出码（`--help` 里也有）：0 正常；1 出错；2 参数错误；**3 额度用完**（打分或翻译），进度已保存，下次运行同一条命令从中断处接着跑；4 后端暂时不可用（限流、网络）；**5 跑完了但有文章需要人工处理**（抓取 / 抽取 / 翻译 / 导出失败、翻译需复查、打分输出不合格、缺译文退回重翻、sitemap 部分失败；extract 的质检提示和图片下载失败不算）。同时出现时按 4、3、5 的顺序取。`run` 里某个阶段因为额度停下，后面的阶段照样处理已就绪的文章（打分额度用完，已经 filtered 的文章照样翻译、导出）。
 - 抓取间隔：`--fetch-delay` 只有本机测试站点（localhost、127.0.0.1、`*.localhost`、`*.test`）可以调到默认的 2 秒以下；真实站点只能调大，调小会提示并用默认值。
 - Twisted reactor 一个进程只能启动一次：单独的 `qbkb fetch` 在本进程里跑 Scrapy；`run` 把 fetch 放进子进程（`python -m qbkb.cli fetch …`），所以一个进程里可以跑多个站点、反复调用。

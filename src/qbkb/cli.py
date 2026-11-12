@@ -141,9 +141,12 @@ def _filter_opts(p: argparse.ArgumentParser) -> None:
 def _translate_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--translator",
-        choices=("deepl", "fake", "demo"),
+        choices=("deepl", "azure", "fake", "demo"),
         default="deepl",
-        help="翻译后端（demo：控制台演示模式用，示例文章自带中文，不联网）",
+        help=(
+            "翻译后端（azure：微软 Azure AI Translator，读 .env 的 AZURE_TRANSLATOR_*；"
+            "demo：控制台演示模式用，示例文章自带中文，不联网）"
+        ),
     )
     p.add_argument(
         "--url",
@@ -512,6 +515,10 @@ def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
         from qbkb.console.demo import DemoTranslator
 
         return DemoTranslator.from_env()
+    if args.translator == "azure":
+        from qbkb.translate import AzureTranslator
+
+        return AzureTranslator.from_env()
     return DeepLTranslator.from_env()
 
 

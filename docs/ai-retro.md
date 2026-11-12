@@ -39,3 +39,4 @@
 | PR B 控制台 | 本地网页控制台、演示模式、每天自动更新；顺带修术语表删旧表 / 术语表上限 / 注释挂到短词 / 外站图片 | 2026-11-12 13:01 | — | 开 PR 约 40 min | 1（审查 8 项：3 项会让用户卡住）；自测返工 2 次（演示数据被定时任务清掉、Windows 端口复用） | — | 不调 DeepL / DeepSeek、不访问 man.com；手动实测时真的创建、运行、删除过一次任务计划 `qbkb-daily-update` |
 | PR C 按栏目采集 | v2：默认流程去掉 LLM 打分、L1 只标记、状态机（unselected）、站点配置的栏目、新栏目提醒、`qbkb sections` 栏目调研、老数据迁移、控制台按栏目分组 | 2026-11-12 19:33 | — | 开 PR 约 40 min | 1（Codex 独立审查：迁移标记、翻译迁移门槛、抽样标记保留、索引去重） | — | 不调 DeepL / DeepSeek / Azure，不访问网站；在正式库的副本上试跑了迁移（40 篇重新抽取、10 篇补记栏目）和 `qbkb sections` |
 | PR D #15 | CSV/JSONL表格、独立中文摘要、可靠抓取时间 | 未单独计时 | — | — | 2轮独立审查修复（历史行保留、摘要失败缓存） | — | 完整840 passed；真实库只读副本表格10篇；未调用翻译或LLM，原文不提交 |
+| PR E Azure 翻译后端 | Azure AI Translator（F0）后端：HTML 模式、动态词典术语、滑动窗口限速、403001 / 429 区分、X-metered-usage 累计、测试连接；`--translator azure`，默认不变 | 2026-11-12 19:32 | — | 开 PR 约 25 min | 0 | — | 不调 Azure / DeepL / DeepSeek（还没有 key）、不访问 man.com；真实冒烟待 key |
