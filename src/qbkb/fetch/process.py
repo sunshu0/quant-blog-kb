@@ -237,6 +237,7 @@ def apply_outcome(
                 Status.FETCHED,
                 http_status=outcome.http_status,
                 raw_path=path.as_posix(),
+                pdf_path=None,  # 新 HTML 内容：旧 PDF 缓存失效，补抓时重新判定
                 fetched_at=datetime.now(UTC).isoformat(timespec="seconds"),
                 etag=outcome.etag,
                 last_modified=outcome.last_modified,

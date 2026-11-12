@@ -1,8 +1,9 @@
 """PDF 正文抽取：pypdf 取文字 → 段落。
 
 只用 pypdf（BSD-3-Clause，见 design.md 4.3）按页取纯文本，不去解析排版结构：
-- 页眉 / 页脚 / 页码：跨页重复出现的行、以及纯页码行去掉；
-- 连字符断行合并（"incre-\nmental" → "incremental"）；
+- 页眉 / 页脚 / 页码：跨页重复出现在页边的行、以及纯页码行去掉；
+- 连字符断行合并：软连字符（U+00AD）删除，普通连字符（- / ‐）保守保留
+  （避免把 trend-following 这类复合词改坏成 trendfollowing）；
 - 空行切段、翻页也算一段，过长的段落按句号切分；
 - 公式 / 表格没有可靠的结构化提取，保留 pypdf 给的原文字，由调用方在 qc_issues 里记提示；
 - 扫描版（没有文字层）抛 NoTextLayerError，不做 OCR。
@@ -45,8 +46,10 @@ _PAGE_NUMBER_TAIL = re.compile(
     re.IGNORECASE,
 )
 
-# 连字符断行：上一行以这些字符结尾、下一行以小写字母开头，才合并
+# 连字符断行：上一行以这些字符结尾、下一行以小写字母开头，才合并。
+# 软连字符（U+00AD）只是排版断行点，合并时删除；普通连字符（- / ‐）是词的一部分，保守保留。
 _BREAK_HYPHENS = ("-", "‐", "­")
+_SOFT_HYPHEN = "­"
 
 
 class PdfExtractError(Exception):
@@ -70,11 +73,15 @@ def _strip_page_number(line: str) -> str:
     return _PAGE_NUMBER_TAIL.sub("", line).strip()
 
 
-def _header_footer_lines(pages: list[list[str]]) -> set[str]:
-    """要删掉的页眉 / 页脚（跨页重复出现的行，忽略行尾页码）。少于两页无法判断，返回空集。"""
+def _header_footer_lines(pages: list[list[str]]) -> tuple[set[str], set[str]]:
+    """要删掉的页眉 / 页脚行（跨页重复出现，忽略行尾页码），返回 (header, footer) 两个集合。
+
+    少于两页无法判断，返回两个空集。页眉从每页前 _EDGE_LINES 行统计，页脚从后 _EDGE_LINES 行统计，
+    删除时也只在对应的页边范围内做，避免误删正文里和页眉同文的独立标题。
+    """
     n = len(pages)
     if n < 2:
-        return set()
+        return set(), set()
     header: Counter[str] = Counter()
     footer: Counter[str] = Counter()
     for lines in pages:
@@ -84,9 +91,10 @@ def _header_footer_lines(pages: list[list[str]]) -> set[str]:
             for line in lines[-_EDGE_LINES:]:
                 footer[_norm(_strip_page_number(line))] += 1
     threshold = max(2, int(n * _REPEAT_RATIO))
-    return {line for line, count in header.items() if count >= threshold} | {
-        line for line, count in footer.items() if count >= threshold
-    }
+    return (
+        {line for line, count in header.items() if count >= threshold},
+        {line for line, count in footer.items() if count >= threshold},
+    )
 
 
 def _is_hyphen_break(line: str) -> bool:
@@ -105,7 +113,13 @@ def _merge_hyphens(lines: list[str]) -> list[str]:
     while i < len(lines):
         line = lines[i]
         while _is_hyphen_break(line) and i + 1 < len(lines) and _word_continuation(lines[i + 1]):
-            line = line[:-1].rstrip() + lines[i + 1].strip()
+            tail = line.rstrip()
+            if tail[-1] == _SOFT_HYPHEN:
+                # 软连字符只是断行点，合并时去掉
+                line = tail[:-1].rstrip() + lines[i + 1].strip()
+            else:
+                # 普通连字符是词的一部分（trend-following 等复合词），保留
+                line = tail + lines[i + 1].strip()
             i += 1
         out.append(line)
         i += 1
@@ -142,7 +156,7 @@ def extract_pdf_text(pdf_bytes: bytes) -> list[str]:
 
     pages = [p.splitlines() for p in raw_pages]
     nonblank = [[ln for ln in page if ln.strip()] for page in pages]
-    drop = _header_footer_lines(nonblank)
+    header_drop, footer_drop = _header_footer_lines(nonblank)
 
     paragraphs: list[str] = []
     current: list[str] = []
@@ -155,12 +169,18 @@ def extract_pdf_text(pdf_bytes: bytes) -> list[str]:
             current.clear()
 
     for page in pages:
-        for raw_line in page:
+        n_lines = len(page)
+        for idx, raw_line in enumerate(page):
             if not raw_line.strip():
                 flush()
                 continue
             line = raw_line.strip()
-            if _norm(_strip_page_number(line)) in drop or _is_page_number(line):
+            norm = _norm(_strip_page_number(line))
+            is_header = idx < _EDGE_LINES
+            is_footer = n_lines > _EDGE_LINES and idx >= n_lines - _EDGE_LINES
+            if (is_header and norm in header_drop) or (is_footer and norm in footer_drop):
+                continue  # 只在页边删页眉 / 页脚，正文里同样的标题保留
+            if _is_page_number(line):
                 continue
             current.append(line)
         flush()  # 翻页也算一段，避免把相邻页拼成一段

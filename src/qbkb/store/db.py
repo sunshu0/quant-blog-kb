@@ -210,6 +210,7 @@ def upsert_discovered(conn: sqlite3.Connection, d: DiscoveredUrl) -> bool:
             return False
         cur = conn.execute(
             "UPDATE articles SET lastmod = ?, status = ?, etag = NULL, last_modified = NULL,"
+            " pdf_path = NULL,"
             " error = NULL,"
             " retries = 0, updated_at = ? WHERE url = ? AND lastmod IS NOT ?",
             (d.lastmod, Status.DISCOVERED.value, now, d.url, d.lastmod),

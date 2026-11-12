@@ -11,7 +11,12 @@ import pytest
 from pdf_helpers import make_pdf
 
 from qbkb import store
-from qbkb.extract.pdf import NoTextLayerError, PdfExtractError, extract_pdf_text
+from qbkb.extract.pdf import (
+    NoTextLayerError,
+    PdfExtractError,
+    _merge_hyphens,
+    extract_pdf_text,
+)
 from qbkb.extract.pipeline import extract_one
 from qbkb.extract.rules import ExtractRules
 from qbkb.models import DiscoveredUrl, Status
@@ -20,9 +25,20 @@ from qbkb.pdf import PdfRules
 # ---- extract_pdf_text：纯函数 ----
 
 
-def test_paragraphs_join_lines_and_merge_hyphens() -> None:
+def test_paragraphs_join_lines_and_keep_hyphen() -> None:
+    # 普通连字符（-）是词的一部分，断行合并时保守保留，避免误删复合词连字符
     pdf = make_pdf(["The model is incre-\nmental and robust."])
-    assert extract_pdf_text(pdf) == ["The model is incremental and robust."]
+    assert extract_pdf_text(pdf) == ["The model is incre-mental and robust."]
+
+
+def test_merge_hyphens_keeps_compound_word() -> None:
+    # trend-following 在连字符处断行，不能被合并成 trendfollowing
+    assert _merge_hyphens(["trend-", "following"]) == ["trend-following"]
+
+
+def test_merge_hyphens_drops_soft_hyphen() -> None:
+    # 软连字符（U+00AD）只是排版断行点，合并时删除
+    assert _merge_hyphens(["incre­", "mental"]) == ["incremental"]
 
 
 def test_header_and_page_number_removed() -> None:
@@ -52,6 +68,21 @@ def test_page_numbered_footer_removed() -> None:
     assert "www.site.com" not in joined
     assert "First body paragraph" in joined
     assert "Conclusion of the report" in joined
+
+
+def test_running_header_removed_but_body_heading_kept() -> None:
+    """页眉（每页顶部重复）要删，但正文里与页眉同文的独立标题要保留。"""
+    pages = [
+        "2. Methodology\n\n"
+        "line a\n\nline b\n\nline c\n\n"
+        "2. Methodology\n\n"
+        "line d\n\nline e\n\nline f",
+        "2. Methodology\n\nline g\n\nline h\n\nline i\n\nline j\n\nline k",
+    ]
+    out = extract_pdf_text(make_pdf(pages))
+    joined = " ".join(out)
+    assert joined.count("2. Methodology") == 1
+    assert "line d" in joined
 
 
 def test_page_boundary_is_paragraph_boundary() -> None:
@@ -176,3 +207,25 @@ def test_scanned_pdf_fails_extract(conn: sqlite3.Connection, tmp_path: Path) -> 
     rules = ExtractRules(site="example")
     with pytest.raises(NoTextLayerError):
         extract_one(conn, URL, rules, root=tmp_path, pdf_rules=PdfRules(".pdf a", min_chars=100))
+
+
+def test_updated_article_does_not_reuse_stale_pdf(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    """源版本变了（lastmod 更新）后 pdf_path 失效，新文章不再混入旧 PDF 正文。"""
+    stale = make_pdf(["STALE ORIGINAL PDF BODY should not be reused."])
+    _article(conn, tmp_path, URL, SHORT_HTML, stale)
+    store.upsert_discovered(
+        conn, DiscoveredUrl(url=URL, site="example", slug="alpha", lastmod="2026-02-01")
+    )
+    row = store.get_article(conn, URL)
+    assert row is not None and row["pdf_path"] is None
+    # 重新抓取后仍是短正文、但已没有 PDF，抽取只用网页摘要
+    store.set_status(conn, URL, Status.FETCHED)
+    extract_one(
+        conn,
+        URL,
+        ExtractRules(site="example"),
+        root=tmp_path,
+        pdf_rules=PdfRules(".pdf a", min_chars=100),
+    )
+    segments = store.get_segments(conn, URL)
+    assert all("STALE ORIGINAL PDF BODY" not in s.html for s in segments)

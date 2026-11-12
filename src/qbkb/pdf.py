@@ -64,18 +64,24 @@ def load_pdf_rules(site: SiteConfig) -> PdfRules | None:
     )
 
 
-def _same_site(article_url: str, pdf_url: str) -> bool:
-    """PDF 只下载同一站点（scheme + host 与文章一致）的。"""
+def same_site(article_url: str, target_url: str) -> bool:
+    """两个 URL 是否同一站点（scheme + host 一致）。"""
     a = urlsplit(article_url)
-    p = urlsplit(pdf_url)
-    return (a.scheme, a.hostname) == (p.scheme, p.hostname)
+    t = urlsplit(target_url)
+    return (a.scheme, a.hostname) == (t.scheme, t.hostname)
 
 
-def find_pdf_url(html: bytes, article_url: str, rules: PdfRules) -> str | None:
+def find_pdf_url(
+    html: bytes, base_url: str, rules: PdfRules, *, allowed_url: str | None = None
+) -> str | None:
     """在文章 HTML 里找 PDF 链接，返回同一站点的绝对地址；没有、解析失败或跨站返回 None。
 
+    相对地址按 `base_url`（通常是最终 response.url）解析；是否跨站按 `allowed_url`（缺省就是
+    `base_url`，也就是最初已许可的文章 URL）判定。两者可以不同：页面被同站重定向到别的目录时，
+    相对 PDF 地址要按最终目录解析，但站点边界仍按最初许可的文章判断。
     只认 selector 命中的元素（通常是 `<a>`）；元素本身没有 href 时，在其后代里找一个 `<a>`。
     """
+    reference = allowed_url if allowed_url is not None else base_url
     try:
         doc = document_fromstring(html.decode("utf-8", "replace"))
     except Exception:
@@ -89,8 +95,8 @@ def find_pdf_url(html: bytes, article_url: str, rules: PdfRules) -> str | None:
                     break
         if not href:
             continue
-        absolute = urljoin(article_url, href.strip())
-        if _same_site(article_url, absolute):
+        absolute = urljoin(base_url, href.strip())
+        if same_site(reference, absolute):
             return absolute
     return None
 

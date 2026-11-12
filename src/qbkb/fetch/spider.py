@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import time
 from collections import Counter
@@ -22,6 +23,7 @@ from scrapy.utils.defer import deferred_from_coro
 from twisted.python.failure import Failure
 
 from qbkb import store
+from qbkb.extract.rules import ExtractRules
 from qbkb.fetch.outcome import Kind, Outcome
 from qbkb.fetch.process import (
     META_RETRY_AFTER_REFUSED,
@@ -39,7 +41,7 @@ from qbkb.fetch.settings import (
     RETRY_BACKOFF_MAX_SECONDS,
 )
 from qbkb.models import Status
-from qbkb.pdf import PdfRules, find_pdf_url, pdf_raw_path
+from qbkb.pdf import PdfRules, find_pdf_url, pdf_raw_path, same_site
 
 
 def backoff_delay(
@@ -250,6 +252,7 @@ class ArticleSpider(scrapy.Spider):
         pdf_rules: PdfRules | None = None,
         pdf_urls: Sequence[str] = (),
         pdf_counts: Counter[str] | None = None,
+        extract_rules: ExtractRules | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -264,6 +267,7 @@ class ArticleSpider(scrapy.Spider):
         self.pdf_rules = pdf_rules
         self.pdf_urls = list(pdf_urls)
         self.pdf_counts = pdf_counts if pdf_counts is not None else Counter()
+        self.extract_rules = extract_rules
 
     def request_stop(self, reason: str) -> None:
         """请求停止整站抓取：记下原因，并 fast 关闭引擎（fire-and-forget）。
@@ -317,8 +321,11 @@ class ArticleSpider(scrapy.Spider):
             raw = Path(row["raw_path"])
             if not raw.is_file():
                 continue
-            pdf_url = find_pdf_url(raw.read_bytes(), url, self.pdf_rules)
+            raw_bytes = raw.read_bytes()
+            pdf_url = find_pdf_url(raw_bytes, url, self.pdf_rules)
             if pdf_url is None:
+                continue
+            if not self._needs_pdf(raw_bytes, url):
                 continue
             yield Request(
                 pdf_url,
@@ -355,8 +362,10 @@ class ArticleSpider(scrapy.Spider):
         else:
             self.logger.info("%s %s %s", outcome.kind.value, outcome.http_status, article_url)
         if outcome.kind == Kind.FETCHED and self.pdf_rules is not None:
-            pdf_url = find_pdf_url(response.body, article_url, self.pdf_rules)
-            if pdf_url is not None:
+            pdf_url = find_pdf_url(
+                response.body, response.url, self.pdf_rules, allowed_url=article_url
+            )
+            if pdf_url is not None and self._needs_pdf(response.body, article_url):
                 return Request(
                     pdf_url,
                     callback=self.parse_pdf,
@@ -366,9 +375,32 @@ class ArticleSpider(scrapy.Spider):
                 )
         return None
 
+    def _needs_pdf(self, body: bytes, article_url: str) -> bool:
+        """网页正文（按抽取口径）短于 min_chars 才下载 PDF；没有抽取规则就保守地下。"""
+        rules = self.extract_rules
+        if rules is None or self.pdf_rules is None:
+            return True
+        from qbkb.extract.core import body_chars
+
+        try:
+            return body_chars(body, article_url, rules) < self.pdf_rules.min_chars
+        except Exception:  # 抽不出正文或抽取本身出错：网页必然太短，交给 PDF 补
+            return True
+
     def parse_pdf(self, response: Response, article_url: str) -> None:
         row = store.get_article(self.conn, article_url)
         if row is None or self.pdf_rules is None:
+            return
+        refused = response.meta.get(META_RETRY_AFTER_REFUSED)
+        if refused is not None:
+            # 服务器要求等很久：和 HTML 回调一样，不只是这篇不重试，整个站点这次都不再请求
+            self._pdf_fail(
+                article_url,
+                f"服务器要求 Retry-After {refused:.0f} 秒，超过上限，不重试并停止本次抓取",
+            )
+            raise CloseSpider("retry_after_too_long")
+        if not same_site(article_url, response.url):
+            self._pdf_fail(article_url, f"PDF 跨站（最终响应 {response.url}）")
             return
         if response.status != 200:
             self._pdf_fail(article_url, f"HTTP {response.status}")
@@ -382,22 +414,32 @@ class ArticleSpider(scrapy.Spider):
         if len(body) > self.pdf_rules.max_size_bytes:
             self._pdf_fail(article_url, f"PDF 超过大小上限 {self.pdf_rules.max_size_bytes} 字节")
             return
-        path = pdf_raw_path(self.raw_dir.resolve(), str(row["site"]), str(row["slug"]))
-        _write_atomic(path, body)
-        # 成功就回到 fetched（断点续跑时可能是 failed），清掉之前的 pdf 错误，让 extract 接着处理
-        store.set_status(
-            self.conn, article_url, Status.FETCHED, pdf_path=path.as_posix(), error=None
-        )
+        try:
+            path = pdf_raw_path(self.raw_dir.resolve(), str(row["site"]), str(row["slug"]))
+            _write_atomic(path, body)
+            # 成功回到 fetched（断点续跑时可能是 failed），清掉 pdf 错误，让 extract 接着处理
+            store.set_status(
+                self.conn, article_url, Status.FETCHED, pdf_path=path.as_posix(), error=None
+            )
+        except (OSError, sqlite3.Error, ValueError) as e:
+            # 写盘/落库失败不能当成成功：记 pdf 失败，让 CLI 返回需处理
+            self._pdf_fail(article_url, f"落库失败（{type(e).__name__}: {e}）")
+            return
         self.pdf_counts["ok"] += 1
         self.logger.info("pdf %s %s", response.status, article_url)
 
     def _pdf_fail(self, article_url: str, reason: str) -> None:
-        store.record_failure(self.conn, article_url, f"pdf: {reason}")
         self.pdf_counts["failed"] += 1
         self.logger.warning("pdf failed %s: %s", article_url, reason)
+        with contextlib.suppress(sqlite3.Error):
+            store.record_failure(self.conn, article_url, f"pdf: {reason}")
+            # 下载失败不再让旧 pdf_path 冒充"已下载"，保证下次还能被补抓选中
+            store.set_fields(self.conn, article_url, pdf_path=None)
 
     def on_pdf_error(self, failure: Failure) -> None:
         request: Request = failure.request  # type: ignore[attr-defined]
+        if request.meta.get(_CROSS_HOST_BLOCKED):
+            return  # 白名单中间件已经记过失败，别重复计数 / 累加 retries
         url = str(request.cb_kwargs["article_url"])
         exc = failure.value
         if not isinstance(exc, BaseException):

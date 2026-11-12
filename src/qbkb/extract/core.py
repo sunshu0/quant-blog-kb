@@ -186,3 +186,13 @@ def extract_full(raw: str | bytes, url: str, rules: ExtractRules) -> Extraction:
 def extract(raw: str | bytes, url: str, rules: ExtractRules) -> ExtractedArticle:
     """原始 HTML + URL + 站点规则 → ExtractedArticle。抽不到正文时抛 ExtractError。"""
     return extract_full(raw, url, rules).article
+
+
+def body_chars(raw: str | bytes, url: str, rules: ExtractRules) -> int:
+    """正文段落（不含 keep 附录）的纯文字字符数。
+
+    fetch 用它判断"网页正文是否够长，不需要再下载 PDF"，和 extract_one 里
+    "正文太短就用 PDF"用的是同一套抽取逻辑、同一段口径（前 n_body 段）。
+    """
+    result = extract_full(raw, url, rules)
+    return sum(len(block_text(s.html)) for s in result.article.segments[: result.n_body])

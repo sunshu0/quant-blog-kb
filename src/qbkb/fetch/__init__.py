@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from qbkb import store
 from qbkb.config import SiteConfig, ensure_allowed
+from qbkb.extract.rules import ExtractRules
 from qbkb.fetch.outcome import Kind, Outcome
 from qbkb.fetch.settings import USER_AGENT, build_settings
 from qbkb.models import Status
@@ -84,20 +85,33 @@ def select_targets(
     return targets if limit is None else targets[:limit]
 
 
-def select_pdf_targets(conn: sqlite3.Connection, site: str) -> list[str]:
+def select_pdf_targets(
+    conn: sqlite3.Connection,
+    site: str,
+    urls: Sequence[str] | None = None,
+    limit: int | None = None,
+) -> list[str]:
     """需要（重新）下载站内 PDF 正文的文章：HTML 已抓、但 PDF 还没下载或文件丢了。
 
-    只挑 fetched / failed 的文章（还在 fetch → extract 窗口里的），不碰已翻译 / 已发布的。
+    只挑 fetched、或失败原因以 ``pdf:`` 开头的 failed 文章（后者是 PDF 下载失败、可续跑）；
+    不碰 HTML 抓取失败（403/人机验证等）和已翻译 / 已发布的文章。给了 urls 就只考虑其中
+    属于该站点的文章，limit 与主 targets 共享预算。
     """
+    wanted = set(urls) if urls is not None else None
     out: list[str] = []
     for row in store.list_rows(conn, (Status.FETCHED, Status.FAILED), site):
         if not row["raw_path"]:
             continue
+        if row["status"] == Status.FAILED.value and not (row["error"] or "").startswith("pdf:"):
+            continue  # HTML 抓取失败，不是 PDF 待续，不能借补 PDF 掩盖
+        url = str(row["url"])
+        if wanted is not None and url not in wanted:
+            continue
         pdf_path = row["pdf_path"]
         if pdf_path and Path(pdf_path).is_file():
             continue  # 已下载，不重下
-        out.append(str(row["url"]))
-    return out
+        out.append(url)
+    return out if limit is None else out[:limit]
 
 
 def run_fetch(
@@ -118,6 +132,11 @@ def run_fetch(
         raise ValueError(f"站点 {site.name}: 缺少 base_url")
     targets = select_targets(db_path, site.name, urls, limit)
     pdf_rules = load_pdf_rules(site)  # 配置写错在这里尽早报错；没配置返回 None
+    extract_rules: ExtractRules | None = None
+    if pdf_rules is not None:
+        from qbkb.extract.rules import load_rules
+
+        extract_rules = load_rules(site)  # 补 PDF 前要用抽取口径判断正文够不够长
     if not targets and pdf_rules is None:
         return FetchStats()
     # 延迟导入：discover、状态统计等只用常量的地方不必加载 Scrapy
@@ -133,7 +152,13 @@ def run_fetch(
     conn = store.connect(db_path)
     stop_reason: str | None = None
     try:
-        pdf_urls = select_pdf_targets(conn, site.name) if pdf_rules is not None else []
+        if pdf_rules is not None:
+            pdf_urls = select_pdf_targets(conn, site.name, urls=urls, limit=limit)
+            # 已在主 targets 里的文章由 parse_article 重新调度 PDF，避免同一份文件被请求两次
+            target_set = set(targets)
+            pdf_urls = [u for u in pdf_urls if u not in target_set]
+        else:
+            pdf_urls = []
         if not targets and not pdf_urls:
             return FetchStats()
         settings = build_settings(
@@ -153,6 +178,7 @@ def run_fetch(
             pdf_rules=pdf_rules,
             pdf_urls=pdf_urls,
             pdf_counts=pdf_counts,
+            extract_rules=extract_rules,
         )
         process.start()
         stop_reason = getattr(crawler.spider, "stop_reason", None)
