@@ -153,7 +153,9 @@ def run_fetch(
     stop_reason: str | None = None
     try:
         if pdf_rules is not None:
-            pdf_urls = select_pdf_targets(conn, site.name, urls=urls, limit=limit)
+            # 主队列与 PDF 补抓共享 --limit 预算：主 targets 先占，补抓只拿剩余额度
+            pdf_limit = None if limit is None else max(0, limit - len(targets))
+            pdf_urls = select_pdf_targets(conn, site.name, urls=urls, limit=pdf_limit)
             # 已在主 targets 里的文章由 parse_article 重新调度 PDF，避免同一份文件被请求两次
             target_set = set(targets)
             pdf_urls = [u for u in pdf_urls if u not in target_set]

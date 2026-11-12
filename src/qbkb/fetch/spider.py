@@ -177,6 +177,8 @@ class BackoffRetryMiddleware:
 _CROSS_HOST_BLOCKED = "qbkb_cross_host_blocked"
 # 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败；parse_article 看到它就跳过。
 _RETRY_AFTER_RECORDED = "qbkb_retry_after_recorded"
+# PDF 请求在 meta 里带的标记：要求与文章严格同 scheme+host（子域也不行），由白名单在发出前校验
+META_STRICT_HOST = "qbkb_strict_host"
 
 
 class HostAllowlistMiddleware:
@@ -210,13 +212,24 @@ class HostAllowlistMiddleware:
         host = (urlsplit(url).hostname or "").lower().rstrip(".")
         return host == self.allowed_host or host.endswith("." + self.allowed_host)
 
+    def _request_allowed(self, request: Request) -> bool:
+        """PDF 请求（带 META_STRICT_HOST）要求与文章严格同 scheme+host，子域也不行。
+
+        重定向中间件把 meta 原样继承给重定向请求，所以链上每一跳在发出前都走这里校验。
+        HTML 请求走原来的 is_allowed（允许同 host 子域）。
+        """
+        if request.meta.get(META_STRICT_HOST):
+            article_url = request.cb_kwargs.get("article_url")
+            return article_url is not None and same_site(str(article_url), request.url)
+        return self.is_allowed(request.url)
+
     def process_request(self, request: Request, spider: scrapy.Spider) -> None:
         stop_reason = getattr(spider, "stop_reason", None)
         if stop_reason is not None:
             # 整站已经被叫停（robots 跨站 / Retry-After 太久）：所有后续请求一律 IgnoreRequest，
             # 由 errback 处理但不记文章失败——这是站点级停止，不是这一篇的问题。
             raise IgnoreRequest(f"站点已停止抓取：{stop_reason}")
-        if self.is_allowed(request.url):
+        if self._request_allowed(request):
             return
         article_url = request.cb_kwargs.get("article_url")
         if article_url is None:
@@ -332,6 +345,7 @@ class ArticleSpider(scrapy.Spider):
                 callback=self.parse_pdf,
                 errback=self.on_pdf_error,
                 cb_kwargs={"article_url": url},
+                meta={META_STRICT_HOST: True},
                 dont_filter=True,
             )
 
@@ -371,6 +385,7 @@ class ArticleSpider(scrapy.Spider):
                     callback=self.parse_pdf,
                     errback=self.on_pdf_error,
                     cb_kwargs={"article_url": article_url},
+                    meta={META_STRICT_HOST: True},
                     dont_filter=True,
                 )
         return None

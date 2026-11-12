@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import subprocess
+import sys
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from scrapy.exceptions import CloseSpider
+from scrapy.exceptions import CloseSpider, IgnoreRequest
 from scrapy.http import HtmlResponse, Request, TextResponse
 
 from qbkb import store
@@ -17,7 +20,11 @@ from qbkb.extract.rules import ExtractRules
 from qbkb.fetch import run_fetch, select_pdf_targets
 from qbkb.fetch.outcome import Kind
 from qbkb.fetch.process import META_RETRY_AFTER_REFUSED, process_response
-from qbkb.fetch.spider import ArticleSpider
+from qbkb.fetch.spider import (
+    META_STRICT_HOST,
+    ArticleSpider,
+    HostAllowlistMiddleware,
+)
 from qbkb.models import DiscoveredUrl, Status
 from qbkb.pdf import PdfRules, find_pdf_url, load_pdf_rules, pdf_raw_path
 
@@ -502,3 +509,95 @@ def test_relative_pdf_resolved_against_response_url(
     scheduled = spider.parse_article(resp, article_url=BASE)
     assert isinstance(scheduled, Request)
     assert scheduled.url == "https://www.example.test/moved/report.pdf"
+
+
+# ---- 第二轮：P1 严格同 host（子域也不行）+ P5 共享 --limit 预算 ----
+
+
+def _strict_request(url: str, article_url: str = "http://example.test/a") -> Request:
+    return Request(url, cb_kwargs={"article_url": article_url}, meta={META_STRICT_HOST: True})
+
+
+class _StubSpider:
+    def fail_cross_host(self, article_url: str, target_url: str) -> None:
+        pass
+
+
+def test_strict_host_middleware_rejects_subdomain() -> None:
+    mw = HostAllowlistMiddleware("http", "example.test")
+    req = _strict_request("http://child.example.test/outside.pdf")
+    with pytest.raises(IgnoreRequest):
+        mw.process_request(req, _StubSpider())  # type: ignore[arg-type]
+
+
+def test_strict_host_middleware_allows_same_host() -> None:
+    mw = HostAllowlistMiddleware("http", "example.test")
+    mw.process_request(_strict_request("http://example.test/x.pdf"), _StubSpider())  # type: ignore[arg-type]
+
+
+def test_default_middleware_still_allows_subdomain() -> None:
+    # 不带严格标记的请求（HTML）保留原有允许子域策略
+    mw = HostAllowlistMiddleware("http", "example.test")
+    req = Request(
+        "http://child.example.test/x.html", cb_kwargs={"article_url": "http://example.test/a"}
+    )
+    mw.process_request(req, _StubSpider())  # type: ignore[arg-type]
+
+
+def test_pdf_subdomain_redirect_not_requested(tmp_path: Path) -> None:
+    """真实通道：/a.pdf 302 到 child.example.test，子域的 PDF 正文必须没有被请求。"""
+    helper = Path(__file__).with_name("crawl_pdf_local_helper.py")
+    proc = subprocess.run(
+        [sys.executable, str(helper), "subdomain", str(tmp_path)],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-3000:]
+    result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    paths = [h["path"] for h in result["hits"]]
+    assert "/a.pdf" in paths  # 初始 PDF 请求确实发出
+    assert "/outside.pdf" not in paths  # 子域的 PDF 正文没有被请求
+    # 子域最多只被 robots 中间件探一次 robots.txt；非 robots 请求一个都不能落在子域
+    non_robots = [h for h in result["hits"] if h["path"] != "/robots.txt"]
+    assert all(not h["host"].startswith("child.example.test") for h in non_robots)
+    row = result["rows"][0]
+    assert row["status"] == "failed"
+    assert row["pdf_path"] is None
+
+
+def test_run_fetch_shares_limit_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import scrapy.crawler
+
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    try:
+        discovered = "https://www.example.test/papers/new"
+        store.upsert_discovered(conn, DiscoveredUrl(url=discovered, site="example", slug="new"))
+        fetched = "https://www.example.test/papers/old"
+        raw = tmp_path / "old.html"
+        raw.write_text('<a href="/a.pdf">PDF</a>')
+        store.upsert_discovered(conn, DiscoveredUrl(url=fetched, site="example", slug="old"))
+        store.set_status(conn, fetched, Status.FETCHED, raw_path=str(raw))
+    finally:
+        conn.close()
+
+    seen: dict[str, object] = {}
+
+    class Crawler:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def crawl(self, spider: object, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(scrapy.crawler, "CrawlerProcess", Crawler)
+    site = SiteConfig(
+        "example", "allowed", {"base_url": "https://www.example.test", "pdf": {"selector": "a"}}
+    )
+    run_fetch(site, db, tmp_path / "raw", limit=1)
+    assert seen["urls"] == [discovered]
+    assert seen["pdf_urls"] == []
