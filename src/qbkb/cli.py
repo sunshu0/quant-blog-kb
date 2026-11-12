@@ -661,7 +661,13 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                     missing.append(u)
                     continue
                 if row["site"] != site.name:
-                    continue  # 别的站点的网址：在那个站点的循环里处理
+                    if args.site:
+                        # 单站点调用：网址属于别的站点，这个循环里不会被处理，提示并计入需处理
+                        print(
+                            f"[translate] 网址属于站点 {row['site']}，不在 --site {site.name}：{u}"
+                        )
+                        notice = True
+                    continue  # 多站点调用：在那个站点的循环里处理
                 st = Status(row["status"])
                 if st not in _URL_ELIGIBLE or not store.get_segments(conn, u):
                     skipped.append((u, st.value))
@@ -696,8 +702,20 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             if args.retry_rejected or getattr(args, "recheck", False):
                 urls = sorted(urls + store.list_by_status(conn, Status.NEEDS_REVIEW, site.name))
             if getattr(args, "recheck", False):
-                for st in (Status.TRANSLATED, Status.PUBLISHED):
-                    urls = sorted(urls + store.list_by_status(conn, st, site.name))
+                # --recheck 只重过「翻过全文」的文章（translator 非空），不扫标题-only 积压
+                # （那些只有标题、没有译文，整篇送去翻会烧光额度；补翻走 --full-translate 或清单）
+                urls = sorted(
+                    set(
+                        urls
+                        + [
+                            str(r["url"])
+                            for r in store.list_rows(
+                                conn, [Status.TRANSLATED, Status.PUBLISHED], site.name
+                            )
+                            if r["translator"]
+                        ]
+                    )
+                )
         if args.limit is not None:
             urls = urls[: args.limit]
         if not urls:

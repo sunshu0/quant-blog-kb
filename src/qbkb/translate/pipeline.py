@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -463,6 +464,7 @@ def missing_titles(
     v2 分层翻译：入库时只翻标题，所以 extracted / filtered（还没翻全文的）也在这里；
     已 translated / published 的是 PR #7 之前翻的、当时没翻标题。
     给了 rules 就只返回采集栏目里的文章（titles 阶段不翻未选栏目的标题，避免浪费额度）。
+    标题翻译已失败过的（qc_issues 里有 TITLE_FAILED_MARK）不返回：不再重送。
     """
     rows = store.list_rows(
         conn, [Status.EXTRACTED, Status.FILTERED, Status.TRANSLATED, Status.PUBLISHED], site
@@ -471,11 +473,36 @@ def missing_titles(
     for r in rows:
         if not r["title"] or not str(r["title"]).strip() or r["title_zh"]:
             continue
+        if TITLE_FAILED_MARK in _qc_items(r["qc_issues"]):
+            continue
         url = str(r["url"])
         if rules is not None and not rules.collects(url, r["section_key"]):
             continue
         out.append(url)
     return out
+
+
+TITLE_FAILED_MARK = "标题翻译失败（结构校验未通过）"
+
+
+def _qc_items(value: str | None) -> list[str]:
+    """qc_issues 是 JSON 字符串数组；解析成列表（异常/非列表时兜底成单元素）。"""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return [value]
+    if isinstance(parsed, list):
+        return [str(x) for x in parsed]
+    return [str(parsed)]
+
+
+def _append_qc_issue(value: str | None, issue: str) -> str:
+    items = _qc_items(value)
+    if issue not in items:
+        items.append(issue)
+    return json.dumps(items, ensure_ascii=False)
 
 
 def backfill_titles(
@@ -486,8 +513,9 @@ def backfill_titles(
     已发布的文章补上后退回 translated，下次 export 用中文标题重新生成；但只翻过标题、还没翻
     全文（translator 为空）的文章保持 published 不动，避免造出「translated 却 translator 为空」
     的坏状态（translated 只表示全文翻过）。
-    标题翻译/结构校验失败（_translate_title 返回 None）记一次失败：文章标 needs_review，下次
-    不会再被选中重送，也不会让每次默认 run 永远退出码 5。
+    标题翻译/结构校验失败（_translate_title 返回 None）只记一次失败：在 qc_issues 里打标记、
+    不改文章状态（needs_review 会让文章从导出里消失），title_zh 留空、导出用英文标题回填；
+    missing_titles 会跳过带这个标记的文章，不再重送。
     额度用完抛 QuotaStopped、后端不可用抛 BackendStopped，已补的都已落库。
     """
     done = 0
@@ -508,8 +536,10 @@ def backfill_titles(
             # 这一篇标题的请求有问题：跳过这一篇（下一轮再试），别拖垮整轮补标题
             continue
         if title_zh is None:
-            # 翻译/结构校验失败：记一次失败（needs_review），别每次 run 都重送、永远退出码 5
-            store.set_status(conn, url, Status.NEEDS_REVIEW, error="标题翻译失败（结构校验未通过）")
+            # 翻译/结构校验失败：只打标记、不改状态，title_zh 留空（导出用英文标题回填）
+            store.set_fields(
+                conn, url, qc_issues=_append_qc_issue(row["qc_issues"], TITLE_FAILED_MARK)
+            )
             continue
         status = Status(row["status"])
         if status is Status.PUBLISHED and row["translator"]:

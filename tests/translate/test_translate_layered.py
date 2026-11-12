@@ -109,6 +109,43 @@ def test_full_translate_run_picks_up_title_only_backlog(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("man_without_sections")
+def test_recheck_skips_title_only_published(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N2：translate --recheck 不把标题-only published（translator 空）选进去。"""
+    db, urls = _db(tmp_path, ["a", "b"])
+    conn = store.connect(db)
+    for u in urls:
+        store.set_status(conn, u, Status.PUBLISHED, title_zh="【译】", translator=None)
+    conn.close()
+    assert (
+        cli.main(
+            ["translate", "--site", SITE, "--db", str(db), "--recheck"],
+            deps=cli.Deps(translator=FakeTranslator()),
+        )
+        == 0
+    )
+    assert "没有待翻译的文章" in capsys.readouterr().out  # 积压没被扫进去
+
+
+@pytest.mark.usefixtures("man_without_sections")
+def test_recheck_selects_translated_but_not_title_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """N2：translate --recheck 只收 translator 非空的，跳过 translator 空的 published。"""
+    db, urls = _db(tmp_path, ["a", "b"])
+    conn = store.connect(db)
+    store.set_status(conn, urls[0], Status.TRANSLATED, title_zh="【译】", translator="fake")
+    store.set_status(conn, urls[1], Status.PUBLISHED, title_zh="【译】", translator=None)
+    conn.close()
+    cli.main(
+        ["translate", "--site", SITE, "--db", str(db), "--recheck"],
+        deps=cli.Deps(translator=FakeTranslator()),
+    )
+    assert "待翻译 1 篇" in capsys.readouterr().out  # 只有 translator 非空的 a
+
+
+@pytest.mark.usefixtures("man_without_sections")
 def test_url_translate_all_tm_hit_still_writes_translator(tmp_path: Path) -> None:
     """H3：全部命中翻译记忆也要写 translator，否则永远被重新选中。"""
     db, (url,) = _db(tmp_path, ["x"])
@@ -180,8 +217,10 @@ def test_url_file_bom_and_missing_and_skip(
 
 
 @pytest.mark.usefixtures("man_without_sections")
-def test_url_other_site_is_skipped_not_failed(tmp_path: Path) -> None:
-    """ds-2：--url 点名的网址属于别的站点时，本站点循环跳过、不打 failed。"""
+def test_url_other_site_is_skipped_not_failed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ds-2/N3：--url 点名的网址属于别的站点，单站点调用提示并退出 5，不打 failed。"""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     other = "https://www.other.test/insights/x"
@@ -194,8 +233,9 @@ def test_url_other_site_is_skipped_not_failed(tmp_path: Path) -> None:
             ["translate", "--site", SITE, "--db", str(db), "--url", other],
             deps=cli.Deps(translator=FakeTranslator()),
         )
-        == 0
+        == cli.EXIT_ATTENTION
     )
+    assert "不在 --site man" in capsys.readouterr().out
     conn = store.connect(db)
     assert store.get_article(conn, other)["status"] == Status.EXTRACTED  # type: ignore[index]
     conn.close()

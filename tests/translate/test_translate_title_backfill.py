@@ -147,7 +147,7 @@ def test_missing_titles_filters_by_collect(conn: sqlite3.Connection) -> None:
 
 
 def test_backfill_title_validation_failure_recorded_once(conn: sqlite3.Connection) -> None:
-    """M1：标题结构校验失败记一次（needs_review），不再每次重送、永远退出码 5。"""
+    """N1：标题结构校验失败不改状态，只打 qc 标记，title_zh 留空，不再重送。"""
     url = "https://example.test/insights/bad"
     store.upsert_discovered(conn, DiscoveredUrl(url, "example", "bad"))
     store.replace_segments(conn, url, [Segment(0, BODY)])
@@ -160,8 +160,9 @@ def test_backfill_title_validation_failure_recorded_once(conn: sqlite3.Connectio
 
     assert backfill_titles(conn, [url], BadTitle(), GLOSSARY) == 0
     row = store.get_article(conn, url)
-    assert row is not None and row["status"] == Status.NEEDS_REVIEW
-    assert "标题翻译失败" in str(row["error"])
+    assert row is not None and row["status"] == Status.EXTRACTED  # 状态不变，还能导出
+    assert row["title_zh"] is None  # title_zh 留空
+    assert "标题翻译失败" in str(row["qc_issues"])  # 只记标记
     assert missing_titles(conn) == []  # 不再被选中重送
 
 
