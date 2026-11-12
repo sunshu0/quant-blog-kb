@@ -30,6 +30,7 @@ from qbkb.fetch.process import (
     is_pdf_url,
     process_error,
     process_response,
+    retry_after_refused_reason,
 )
 from qbkb.fetch.settings import (
     RETRY_AFTER_MAX_SECONDS,
@@ -111,9 +112,19 @@ class BackoffRetryMiddleware:
     def pause(self, seconds: float) -> None:
         self.resume_at = max(self.resume_at, self._clock() + seconds)
 
-    def _stop_site(self, reason: str) -> None:
-        """让整站停止：Retry-After 太久时，继续抓其他文章同样违背服务器要求。"""
+    def _stop_site(self, reason: str, request: Request, retry_after: float, status: int) -> None:
+        """让整站停止：Retry-After 太久时，继续抓其他文章同样违背服务器要求。
+
+        文章请求先把它自己记成失败，再 fast 停掉整站（fast 会取消下载器里还没发出去的请求，
+        这一篇的响应可能到不了 parse_article）；robots 之类的内部请求没有文章可记，直接停。
+        """
         spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
+        article_url = request.cb_kwargs.get("article_url")
+        if article_url is not None and spider is not None:
+            record = getattr(spider, "record_retry_after_failure", None)
+            if record is not None:
+                record(str(article_url), status, retry_after)
+                request.meta[_RETRY_AFTER_RECORDED] = True
         stop = getattr(spider, "request_stop", None) if spider is not None else None
         if stop is not None:
             stop(reason)
@@ -130,7 +141,12 @@ class BackoffRetryMiddleware:
             retry_after = parse_retry_after(header.decode("latin-1") if header else None)
             if retry_after is not None and retry_after > self.retry_after_max:
                 request.meta[META_RETRY_AFTER_REFUSED] = retry_after
-                self._stop_site(f"服务器要求 Retry-After {retry_after:.0f} 秒，超过上限")
+                self._stop_site(
+                    f"服务器要求 Retry-After {retry_after:.0f} 秒，超过上限",
+                    request,
+                    retry_after,
+                    response.status,
+                )
                 return response
         result = self._retry.process_response(request, response)
         if isinstance(result, Request):
@@ -154,6 +170,8 @@ class BackoffRetryMiddleware:
 
 # 白名单中间件已经记过一次失败后，放在 request.meta 里的标记；errback 看到它就跳过，不再记第二次。
 _CROSS_HOST_BLOCKED = "qbkb_cross_host_blocked"
+# 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败；parse_article 看到它就跳过。
+_RETRY_AFTER_RECORDED = "qbkb_retry_after_recorded"
 
 
 class HostAllowlistMiddleware:
@@ -203,8 +221,7 @@ class HostAllowlistMiddleware:
             if self._host_allowed(request.url):
                 return
             spider.request_stop(  # type: ignore[attr-defined]
-                f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则",
-                mode="fast",
+                f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则"
             )
             raise IgnoreRequest(f"robots.txt 被重定向到未许可站点 {request.url}")
         spider.fail_cross_host(str(article_url), request.url)  # type: ignore[attr-defined]
@@ -239,17 +256,14 @@ class ArticleSpider(scrapy.Spider):
         # 整站停止的原因（robots 跨站、Retry-After 太久……）；设了之后不再发任何请求
         self.stop_reason: str | None = None
 
-    def request_stop(self, reason: str, mode: str = "graceful") -> None:
-        """请求停止整站抓取：记下原因，并通知引擎关闭（fire-and-forget）。
+    def request_stop(self, reason: str) -> None:
+        """请求停止整站抓取：记下原因，并 fast 关闭引擎（fire-and-forget）。
 
         robots 跨站被拦、服务器要求过长的 Retry-After 等"继续抓其他文章也违背服务器要求"的
         情况都会走这里。stop_reason 一记下，后续请求在 HostAllowlistMiddleware 里会被直接
-        IgnoreRequest（不计文章失败）；引擎的 close_spider_async 让还没发出去的请求不再发出。
-        只调用一次（幂等）：第一次调用生效，之后再调用直接返回。
-
-        mode 和 close_spider_async 一样：robots 跨站要用 "fast"（当前这篇还卡在 robots 检查、
-        还没下载，直接丢掉别让它发出去）；Retry-After 太久用默认 "graceful"（当前这篇的响应
-        已经拿到，让它记完失败再停）。
+        IgnoreRequest（不计文章失败）；引擎的 close_spider_async(fast) 会取消下载器里还没
+        发出去的请求、并拒绝之后新进入下载器的请求。只调用一次（幂等）：第一次调用生效，
+        之后再调用直接返回。
         """
         if self.stop_reason is not None:
             return
@@ -257,7 +271,7 @@ class ArticleSpider(scrapy.Spider):
         engine = getattr(getattr(self, "crawler", None), "engine", None)
         if engine is not None:
             # Scrapy 2.20：close_spider_async 是 async，deferred_from_coro 把它调度到运行中的 loop。
-            deferred_from_coro(engine.close_spider_async(reason=reason, mode=mode))
+            deferred_from_coro(engine.close_spider_async(reason=reason, mode="fast"))
 
     def fail_cross_host(self, article_url: str, target_url: str) -> None:
         """跨站（或换 scheme）请求：把文章记成失败，不保存目标内容。"""
@@ -285,7 +299,22 @@ class ArticleSpider(scrapy.Spider):
                 dont_filter=True,
             )
 
+    def record_retry_after_failure(self, article_url: str, status: int, retry_after: float) -> None:
+        """长 Retry-After：先把当前文章记成失败，再让整站 fast 停止。
+
+        fast 会取消下载器里还没发出去的请求，这一篇的响应可能到不了 parse_article；所以
+        BackoffRetryMiddleware 先在这里把失败记好（不经过 classify_response——那时
+        response.request 还没被引擎补上），并在 request.meta 里标 _RETRY_AFTER_RECORDED，
+        parse_article 看到就跳过，避免重复记。
+        """
+        outcome = Outcome(Kind.FAILED, status, retry_after_refused_reason(status, retry_after))
+        apply_outcome(self.conn, article_url, outcome, b"", self.raw_dir)
+        self.counts[Kind.FAILED] += 1
+
     def parse_article(self, response: Response, article_url: str) -> None:
+        request = response.request
+        if request is not None and request.meta.get(_RETRY_AFTER_RECORDED):
+            return  # 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败
         outcome = process_response(self.conn, article_url, response, self.raw_dir)
         self.counts[outcome.kind] += 1
         if outcome.kind == Kind.FAILED:

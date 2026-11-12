@@ -459,11 +459,13 @@ def test_request_stop_sets_reason_and_schedules_engine_close(
     class Engine:
         def __init__(self) -> None:
             self.reason: str | None = None
+            self.mode: str | None = None
 
         async def close_spider_async(
             self, *, reason: str = "cancelled", mode: str = "graceful"
         ) -> None:
             self.reason = reason
+            self.mode = mode
 
     engine = Engine()
 
@@ -478,16 +480,18 @@ def test_request_stop_sets_reason_and_schedules_engine_close(
 
     def fake_deferred_from_coro(o: object) -> object:
         scheduled.append(o)
+        asyncio.run(o)  # type: ignore[arg-type]  # 真的跑一下，让 close_spider_async 记下 reason / mode
         return o
 
     monkeypatch.setattr(spider_mod, "deferred_from_coro", fake_deferred_from_coro)
     spider.request_stop("robots 跨站")
     assert spider.stop_reason == "robots 跨站"
     assert len(scheduled) == 1 and asyncio.iscoroutine(scheduled[0])  # type: ignore[arg-type]
+    assert engine.reason == "robots 跨站"
+    assert engine.mode == "fast"  # 停站一律 fast：取消下载器里还没发出去的请求
     # 幂等：再调用一次不重复调度、不改原因
     spider.request_stop("另一个原因")
     assert spider.stop_reason == "robots 跨站" and len(scheduled) == 1
-    scheduled[0].close()  # type: ignore[attr-defined]  # 关掉没被调度的协程，避免"never awaited"警告
     conn.close()
 
 
@@ -522,6 +526,33 @@ def test_backoff_retry_after_over_limit_calls_request_stop(
     assert asyncio.run(mw.process_response(request, resp)) is resp
     assert request.meta[META_RETRY_AFTER_REFUSED] == 3600.0
     assert spider.stop_reason is not None and "Retry-After 3600" in spider.stop_reason
+
+
+def test_backoff_retry_after_over_limit_records_article_failure(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    """长 Retry-After：文章先记失败，再 fast 停站；parse_article 看到标记不重复记。"""
+    _, conn = db
+    counts: Counter[Kind] = Counter()
+    spider = _spider(conn, tmp_path, counts)
+
+    class _SpiderHolder:
+        def __init__(self, spider: ArticleSpider) -> None:
+            self.spider = spider
+
+    mw = _middleware(FakeClock())
+    mw._crawler = _SpiderHolder(spider)  # type: ignore[assignment]
+    request = Request(BASE + "alpha", cb_kwargs={"article_url": BASE + "alpha"})
+    resp = _response(request, 429, {"Retry-After": "3600"})
+    assert asyncio.run(mw.process_response(request, resp)) is resp
+    # 这一篇已经记失败，并标了 _RETRY_AFTER_RECORDED
+    assert counts == Counter({Kind.FAILED: 1})
+    assert request.meta.get(spider_mod._RETRY_AFTER_RECORDED) is True
+    assert store.get_article(conn, BASE + "alpha")["status"] == Status.FAILED  # type: ignore[index]
+    assert spider.stop_reason is not None
+    # 即便响应到了 parse_article，也会因标记跳过，不重复记
+    spider.parse_article(resp, article_url=BASE + "alpha")
+    assert counts == Counter({Kind.FAILED: 1})
 
 
 def test_run_fetch_removes_stale_tmp_before_crawling(

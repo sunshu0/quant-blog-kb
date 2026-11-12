@@ -95,6 +95,11 @@ def _content_type(response: Response) -> str:
     return (_header(response, "Content-Type") or "").split(";")[0].strip().lower()
 
 
+def retry_after_refused_reason(status: int, seconds: float) -> str:
+    """Retry-After 超过上限时，把当前文章记失败的统一原因。"""
+    return f"HTTP {status}：服务器要求 Retry-After {seconds:.0f} 秒，超过上限，不重试并停止本次抓取"
+
+
 def classify_response(response: Response) -> Outcome:
     """只看响应决定结果，不碰状态库和文件系统。"""
     status = response.status
@@ -117,11 +122,7 @@ def classify_response(response: Response) -> Outcome:
         return Outcome(Kind.FAILED, status, f"HTTP {status}：页面不存在")
     refused = response.request.meta.get(META_RETRY_AFTER_REFUSED) if response.request else None
     if refused is not None:
-        reason = (
-            f"HTTP {status}：服务器要求 Retry-After {refused:.0f} 秒，"
-            "超过上限，不重试并停止本次抓取"
-        )
-        return Outcome(Kind.FAILED, status, reason)
+        return Outcome(Kind.FAILED, status, retry_after_refused_reason(status, refused))
     if status in RETRY_HTTP_CODES:
         n = _retry_times(response)
         return Outcome(Kind.FAILED, status, f"HTTP {status}：重试 {n} 次后仍失败")

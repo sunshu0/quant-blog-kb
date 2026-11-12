@@ -345,7 +345,7 @@ def fetch_in_process(args: argparse.Namespace, site_name: str) -> int:
     )
     if s.stop_reason:
         print(f"[fetch] {site.name}: 停止抓取：{s.stop_reason}")
-    return EXIT_ATTENTION if s.failed else EXIT_OK
+    return EXIT_ATTENTION if s.failed or s.stop_reason else EXIT_OK
 
 
 def fetch_in_subprocess(args: argparse.Namespace, site_name: str) -> int:

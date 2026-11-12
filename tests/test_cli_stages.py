@@ -148,3 +148,25 @@ def test_fetch_subprocess_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
             "cfg",
         ]
     ]
+
+
+def test_fetch_in_process_returns_attention_when_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整站被停止（stop_reason 非空）但文章没失败时，fetch 也要返回 EXIT_ATTENTION。"""
+    import qbkb.fetch
+
+    def fake_run_fetch(*args: Any, **kwargs: Any) -> qbkb.fetch.FetchStats:
+        return qbkb.fetch.FetchStats(stop_reason="服务器要求 Retry-After 3600 秒，超过上限")
+
+    monkeypatch.setattr(qbkb.fetch, "run_fetch", fake_run_fetch)
+    args = argparse.Namespace(
+        db=str(tmp_path / "s.db"),
+        raw_dir=str(tmp_path / "raw"),
+        limit=None,
+        fetch_delay=None,
+        verbose=False,
+        config_dir=None,
+        url_file=None,
+    )
+    assert cli.fetch_in_process(args, "man") == cli.EXIT_ATTENTION

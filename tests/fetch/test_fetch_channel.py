@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("scenario", ["robots", "retry_after"])
+@pytest.mark.parametrize("scenario", ["robots", "robots_retry", "retry_after", "queue"])
 def test_fetch_stop_channel(scenario: str, tmp_path: Path) -> None:
     script = Path(__file__).with_name("crawl_stop_channel.py")
     result = subprocess.run(
@@ -27,11 +27,19 @@ def test_fetch_stop_channel(scenario: str, tmp_path: Path) -> None:
     if scenario == "robots":
         # robots.txt 302 到不同 hostname：没有任何文章被请求，也没被误标失败
         assert data["article_hits"] == []
-        assert data["rows"] == {"a": "discovered", "b": "discovered"}
+        assert data["rows"] == {"a": "discovered", "b": "discovered", "c": "discovered"}
         assert "robots.txt 被重定向到未许可站点" in data["stop_reason"]
+    elif scenario == "robots_retry":
+        # robots.txt 长 Retry-After：fast 停站，任何文章都不被请求、不被误标失败
+        assert data["article_hits"] == []
+        assert data["rows"] == {"a": "discovered", "b": "discovered", "c": "discovered"}
+        assert "Retry-After 3600" in data["stop_reason"]
+        assert data["failed"] == 0 and data["fetched"] == 0
     else:
-        # 第一篇 429 + Retry-After 3600：第二篇没有被请求；第一篇记失败
+        # 第一篇 429 + Retry-After 3600（retry_after 单并发 / queue 并发 3）：
+        # 只有 /a 被请求；/a 记失败，/b /c 不被请求、保持 discovered。
         assert data["article_hits"] == ["/a"]
         assert data["rows"]["a"] == "failed"
         assert data["rows"]["b"] == "discovered"
+        assert data["rows"]["c"] == "discovered"
         assert "Retry-After 3600" in data["stop_reason"]
