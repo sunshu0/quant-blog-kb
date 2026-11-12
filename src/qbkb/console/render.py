@@ -25,6 +25,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 _SUPSUB = re.compile(r"&lt;(sup|sub)&gt;((?:(?!&lt;|&gt;)[^<>]){1,40}?)&lt;/\1&gt;")
+_CODE = re.compile(r"(<code[^>]*>.*?</code>)", re.DOTALL)
 
 
 def strip_frontmatter(text: str) -> str:
@@ -49,10 +50,28 @@ def _rewrite(tokens: list[Token], md_dir: Path, out_root: Path, url_prefix: str)
             tok.attrSet("src", image_url(src, md_dir, out_root, url_prefix) or "")
             tok.attrSet("loading", "lazy")
         elif tok.type == "link_open":
-            href = str(tok.attrGet("href") or "")
-            if urlsplit(href).scheme in ("http", "https", "mailto"):
-                tok.attrSet("target", "_blank")
-                tok.attrSet("rel", "noopener noreferrer")
+            _rewrite_link(tok)
+
+
+def _rewrite_link(tok: Token) -> None:
+    """链接点了不能把控制台页面换掉：
+    - 外部链接（http / https / mailto，以及 //host 这种省略协议的）在新标签页打开；
+    - 页内锚点（#…，脚注之类）保留；
+    - 其他站内相对链接（index.md 里的 man/xxx.md 之类）在控制台里没有意义：去掉地址，只留文字。
+    """
+    href = str(tok.attrGet("href") or "")
+    if href.startswith("//"):
+        href = "https:" + href
+        tok.attrSet("href", href)
+    if urlsplit(href).scheme in ("http", "https", "mailto"):
+        tok.attrSet("target", "_blank")
+        tok.attrSet("rel", "noopener noreferrer")
+        return
+    if href.startswith("#"):
+        return
+    tok.attrs.pop("href", None)
+    tok.attrSet("class", "link-disabled")
+    tok.attrSet("title", "知识库里的相对链接，在控制台里不能直接打开")
 
 
 def image_url(src: str, md_dir: Path, out_root: Path, url_prefix: str) -> str | None:
@@ -77,4 +96,10 @@ def render_markdown(text: str, md_path: Path, out_root: Path, url_prefix: str = 
     html = md.renderer.render(tokens, md.options, {})
     # 地址被去掉的图片：markdown-it 会输出 src=""，换成只显示 alt 文字
     html = re.sub(r'<img src="" alt="([^"]*)"[^>]*>', r'<span class="img-missing">\1</span>', html)
-    return _SUPSUB.sub(r"<\1>\2</\1>", html)
+    return restore_supsub(html)
+
+
+def restore_supsub(html: str) -> str:
+    """把转义过的纯文字 <sup>/<sub> 还原成上下标；<code>（行内代码和代码块）里面的不动。"""
+    parts = _CODE.split(html)
+    return "".join(p if i % 2 else _SUPSUB.sub(r"<\1>\2</\1>", p) for i, p in enumerate(parts))

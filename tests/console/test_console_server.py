@@ -193,6 +193,9 @@ def test_key_check_network_error_does_not_leak_key(tmp_path: Path) -> None:
 
 def test_schedule_toggle_creates_and_deletes_our_task(tmp_path: Path) -> None:
     app, tasks = _app(tmp_path)
+    exe = tmp_path / ".venv" / "Scripts" / "pythonw.exe"  # uv sync 之后才有
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
     st = app.set_schedule({"enabled": True, "time": "08:15", "limit": 3})
     assert st["schedule"] == {"enabled": True, "time": "08:15", "limit": 3, "supported": True}
     assert st["task"] == {"exists": True, "ours": True}

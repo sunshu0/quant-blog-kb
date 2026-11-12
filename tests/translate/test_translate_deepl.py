@@ -169,9 +169,9 @@ def test_glossary_with_wrong_entry_count_is_not_reused() -> None:
     client = FakeClient()
     client.glossaries.append(_info("stale", glossary_name(GLOSSARY), len(GLOSSARY)))
     t, _ = _translator(client)
-    # 词条数是展开变体后的数量，旧的（没展开）不复用；同名但不能复用的也是我们的旧表，先删掉
+    # 词条数是展开变体后的数量，旧的（没展开）不复用；同名的不是"旧版本"，不删
     assert t.sync_glossary(GLOSSARY) == "id-1"
-    assert client.deleted == ["stale"]
+    assert client.deleted == []
 
 
 def test_glossary_upgrade_deletes_only_our_old_versions() -> None:
@@ -193,6 +193,39 @@ def test_glossary_upgrade_deletes_only_our_old_versions() -> None:
         "qbkb-cccccccc",
         glossary_name(new),
     }
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qbkb-v1",  # 没有指纹
+        "qbkb-v1-ABCDEF12",  # 大写：不是 glossary_name 生成的
+        "qbkb-v1-aaaa-extra",
+        "qbkb-vx-aaaaaaaa",
+        "qbkb-v1-aaaaaaaa (copy)",
+        "my-qbkb-v1-aaaaaaaa",
+    ],
+)
+def test_names_that_only_look_like_ours_are_not_deleted(name: str) -> None:
+    client = FakeClient()
+    client.glossaries.append(_info("x", name, 3))
+    t, _ = _translator(client)
+    t.sync_glossary(Glossary("3", {"drawdown": "回撤"}))
+    assert client.deleted == []
+
+
+def test_old_glossary_already_gone_does_not_stop_translation() -> None:
+    """删旧术语表时 404（别的进程 / 手工已经删了）：跳过，照常建新表、翻译。"""
+
+    class Gone(FakeClient):
+        def delete_glossary(self, glossary: Any) -> None:
+            raise deepl.GlossaryNotFoundException("Glossary not found", http_status_code=404)
+
+    client = Gone()
+    client.glossaries.append(_info("old", "qbkb-v1-aaaaaaaa", 3))
+    t, sleeps = _translator(client)
+    assert t.translate(["x"], Glossary("3", {"drawdown": "回撤"})) == ["ZH:x"]
+    assert t.deleted_glossaries == [] and len(client.created) == 1 and sleeps == []
 
 
 def test_current_glossary_is_reused_without_deleting() -> None:

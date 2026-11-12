@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -26,7 +27,8 @@ from qbkb.translate.lines import LineSplit, split_lines
 GLOSSARY_PREFIX = "qbkb-"
 # 带版本号的术语表名字的前缀（glossary_name）。换版本时只删这种名字的旧术语表：
 # DeepL Free 账户同时只能保留 1 份术语表（2026-11-12 实测），不删旧的就建不了新的
-VERSIONED_PREFIX = f"{GLOSSARY_PREFIX}v"
+# 只认 glossary_name 生成的形状 qbkb-v<版本>-<十六进制指纹>，别的名字（哪怕以 qbkb-v 开头）不碰
+OUR_VERSIONED_NAME = re.compile(rf"^{re.escape(GLOSSARY_PREFIX)}v\d+-[0-9a-f]+$")
 
 
 class GlossaryLimitError(RuntimeError):
@@ -191,7 +193,8 @@ class DeepLTranslator:
         """确保 DeepL 上有和本地内容一致的术语表，返回它的 id。空术语表返回 None。
 
         按名字查找：已有同名、语言对一致、词条数一致的就复用，否则新建。
-        新建之前先删掉我们自己的旧术语表（名字以 qbkb-v 开头、但不是可以复用的这一份）：
+        新建之前先删掉我们自己的旧版本术语表（名字精确匹配 qbkb-v<版本>-<指纹>、
+        且不是当前这个名字）：
         DeepL Free 账户同时只能保留 1 份术语表。别人的术语表（其他名字）不动。
         术语表数量到上限时抛 GlossaryLimitError（不是额度用完）。
         """
@@ -217,10 +220,14 @@ class DeepLTranslator:
         delete: Callable[[str], object] | None = getattr(self._client, "delete_glossary", None)
         if found is None:
             for old in existing:
-                if delete is not None and old.name.startswith(VERSIONED_PREFIX):
-                    gid = old.glossary_id
+                if delete is None or old.name == name or not OUR_VERSIONED_NAME.match(old.name):
+                    continue
+                gid = old.glossary_id
+                try:
                     self._with_retry(lambda gid=gid: delete(gid))
-                    self.deleted_glossaries.append(old.name)
+                except (deepl.GlossaryNotFoundException, deepl.NotFoundException):
+                    continue  # 已经被删掉了（别的进程 / 手工）：不影响翻译
+                self.deleted_glossaries.append(old.name)
             found = self._with_retry(
                 lambda: self._client.create_glossary(
                     name, self.source_lang, self.glossary_target_lang, entries

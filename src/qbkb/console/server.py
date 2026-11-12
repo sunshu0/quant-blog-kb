@@ -332,13 +332,8 @@ class App:
     # ---- 写 ----
 
     def _env_for(self, ws: Workspace) -> dict[str, str]:
-        env = dict(self.environ)
-        if ws.demo:
-            return demo.demo_env(ws, env)
-        # .env 里的 key 优先：控制台启动后才保存的 key 也能用上
-        # （子进程的 load_dotenv 不覆盖已有的环境变量）
-        env.update({k: v for k, v in self.keys().items() if v})
-        return env
+        # .env 里的 key 优先：控制台启动后才保存的 key 也能用上（规则见 jobs.job_env）
+        return jobs.job_env(ws, self.environ, self.keys())
 
     def _prepare(self, ws: Workspace) -> None:
         if self.jobs.running():

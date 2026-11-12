@@ -82,17 +82,16 @@ def run_auto(root: Path, *, popen: jobs.Popen | None = None) -> int:
             return 0
         site: demo.DemoSite | None = None
         try:
-            env = dict(os.environ)
             if ws.demo:
                 site = demo.DemoSite(ws)
                 site.start()
-                env = demo.demo_env(ws, env)
+            env = jobs.job_env(ws, os.environ, keys)
             before = published_count(ws)
             cmd = jobs.run_command(ws, settings.schedule.limit, python=_console_python())
             code = jobs.execute(
                 [cmd],
                 cwd=root,
-                env=jobs.child_env(env),
+                env=env,
                 on_line=write,
                 popen=popen or subprocess.Popen,
             )

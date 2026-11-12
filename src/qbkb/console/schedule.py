@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -24,7 +23,7 @@ from qbkb.console.workspace import check_time
 
 TASK_NAME = "qbkb-daily-update"
 MARKER = "qbkb-console"
-# 一次自动更新最多跑这么久（任务计划的执行时限）；jobs.STALE_SECONDS 比它长
+# 一次自动更新最多跑这么久（任务计划的执行时限）
 TIME_LIMIT = "PT2H"
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
@@ -44,13 +43,15 @@ def default_runner(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
 
 
 def task_python(root: Path) -> Path:
-    """任务用的解释器：项目 .venv 里的 pythonw.exe（没有就用当前解释器旁边的 pythonw）。"""
+    """任务用的解释器：只用项目 .venv 里的 pythonw.exe。
+
+    不回退到别的解释器：python.exe 每天会弹一个黑窗口，别处的解释器也可能没装 qbkb，
+    那样任务每天都"运行"但什么都没做。找不到就报错，让用户先 uv sync。
+    """
     venv = root / ".venv" / "Scripts" / "pythonw.exe"
-    if venv.is_file():
-        return venv
-    exe = Path(sys.executable)
-    w = exe.with_name("pythonw.exe")
-    return w if w.is_file() else exe
+    if not venv.is_file():
+        raise ScheduleError(f"找不到 {venv}：请先在项目目录运行一次 uv sync，再打开每天自动更新")
+    return venv
 
 
 def task_xml(root: Path, python: Path, at: str) -> str:
@@ -136,12 +137,13 @@ class Scheduler:
         return TaskState(True, MARKER in (r.stdout or ""))
 
     def enable(self, root: Path, at: str, python: Path | None = None) -> None:
+        python = python or task_python(root)  # 先检查解释器，找不到就不去动任务计划
         st = self.state()
         if st.exists and not st.ours:
             raise ScheduleError(
                 f"任务计划里已经有一个叫 {TASK_NAME} 的任务，但不是控制台建的，没有覆盖"
             )
-        xml = task_xml(root, python or task_python(root), at)
+        xml = task_xml(root, python, at)
         fd, name = tempfile.mkstemp(prefix="qbkb-task-", suffix=".xml", dir=self._tmp)
         path = Path(name)
         try:

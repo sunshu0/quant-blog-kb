@@ -26,6 +26,7 @@ class FakeProc:
         self._gate = gate
         self.pid = 4242
         self.terminated = False
+        self.finished = False
         self.stdout: Any = self
 
     def __iter__(self) -> Any:
@@ -34,7 +35,11 @@ class FakeProc:
         return iter([line + "\n" for line in self._lines])
 
     def wait(self) -> int:
+        self.finished = True
         return self._code
+
+    def poll(self) -> int | None:
+        return self._code if self.finished else None
 
     def terminate(self) -> None:
         self.terminated = True
@@ -124,20 +129,94 @@ def test_execute_runs_export_after_translate_needs_attention(tmp_path: Path) -> 
     assert len(popen.calls) == 2
 
 
-def test_run_lock_is_exclusive_and_recovers_stale(tmp_path: Path) -> None:
+def test_run_lock_is_exclusive(tmp_path: Path) -> None:
     a, b = jobs.RunLock(tmp_path), jobs.RunLock(tmp_path)
     a.acquire("控制台")
     with pytest.raises(jobs.Busy) as info:
         b.acquire("定时任务")
     assert "控制台" in str(info.value)
+    h = a.holder()
+    assert h is not None and h["pid"] == os.getpid() and isinstance(h["started"], float)
     a.release()
     b.acquire("定时任务")
     b.release()
-    # 残留的锁（超过 STALE_SECONDS）会被接管
-    stale = jobs.RunLock(tmp_path, clock=lambda: time.time() + jobs.STALE_SECONDS + 60)
-    jobs.RunLock(tmp_path).acquire("崩掉的进程")
-    stale.acquire("新任务")
-    assert stale.holder() is not None and stale.holder()["who"] == "新任务"  # type: ignore[index]
+    assert not b.path.exists()
+
+
+def _write_lock(tmp_path: Path, data: object) -> Path:
+    path = tmp_path / ".qbkb" / jobs.LOCK_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), "utf-8")
+    return path
+
+
+def test_lock_of_dead_process_is_taken_over_immediately(tmp_path: Path) -> None:
+    """持有者被硬杀（pid 不在了）：不用等，马上能拿到锁。"""
+    _write_lock(tmp_path, {"who": "崩掉的控制台", "pid": 999999, "started": 1.0, "since": "x"})
+    seen: list[tuple[int, float | None]] = []
+
+    def alive(pid: int, started: float | None) -> bool:
+        seen.append((pid, started))
+        return False
+
+    lock = jobs.RunLock(tmp_path, alive=alive)
+    lock.acquire("新任务")
+    assert seen == [(999999, 1.0)]
+    assert lock.holder()["who"] == "新任务"  # type: ignore[index]
+
+
+def test_lock_of_reused_pid_is_stale_but_live_owner_is_respected(tmp_path: Path) -> None:
+    """pid 被别的进程复用：创建时间对不上 → 残留；对得上 → 有效。用真实的进程信息判断。"""
+    from qbkb.console import procinfo
+
+    me = procinfo.self_start_time()
+    assert me is not None and me > 0
+    # 当前进程的 pid、但创建时间早了一小时：等于"同一个号码换了个进程"
+    _write_lock(tmp_path, {"who": "旧进程", "pid": os.getpid(), "started": me - 3600})
+    assert jobs.RunLock(tmp_path).stale() is True
+    _write_lock(tmp_path, {"who": "控制台", "pid": os.getpid(), "started": me})
+    assert jobs.RunLock(tmp_path).stale() is False
+    with pytest.raises(jobs.Busy):
+        jobs.RunLock(tmp_path).acquire("定时任务")
+
+
+def test_lock_of_finished_real_process_is_stale(tmp_path: Path) -> None:
+    import subprocess
+
+    from qbkb.console import procinfo
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        started = procinfo.start_time(child.pid)
+        assert started is not None
+        _write_lock(tmp_path, {"who": "子进程", "pid": child.pid, "started": started})
+        assert jobs.RunLock(tmp_path).stale() is False
+    finally:
+        child.kill()
+        child.wait()
+    assert jobs.RunLock(tmp_path).stale() is True
+    assert procinfo.start_time(child.pid) is None or not procinfo.same_process(child.pid, started)
+
+
+def test_corrupt_lock_gets_a_grace_period(tmp_path: Path) -> None:
+    path = tmp_path / ".qbkb" / jobs.LOCK_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text("", "utf-8")  # 另一个进程刚创建、还没写完
+    assert jobs.RunLock(tmp_path).stale() is False
+    later = jobs.RunLock(tmp_path, clock=lambda: time.time() + jobs.CORRUPT_GRACE_S + 5)
+    assert later.stale() is True
+    later.acquire("新任务")
+
+
+def test_touch_refreshes_lock_while_held(tmp_path: Path) -> None:
+    lock = jobs.RunLock(tmp_path)
+    lock.acquire("控制台")
+    os.utime(lock.path, (1, 1))
+    lock.touch()
+    assert lock.path.stat().st_mtime > 1
+    lock.release()
+    lock.touch()  # 没持有时什么都不做
+    assert not lock.path.exists()
 
 
 def _manager(tmp_path: Path, popen: FakePopen, **kw: Any) -> jobs.JobManager:
@@ -222,6 +301,83 @@ def test_stop_kills_child_and_reports_stopped(tmp_path: Path) -> None:
     assert proc.terminated and job.exit_code == jobs.EXIT_STOPPED
     assert "已停止" in str(job.summary()["result"])
     assert m.stop() is False
+
+
+def test_stop_between_commands_kills_nothing(tmp_path: Path) -> None:
+    """重翻是两条命令：第一条已经退出、第二条还没起的时候点停止，不能去杀第一条的旧 pid。"""
+    killed: list[int] = []
+    gate = threading.Event()
+    first = FakeProc(["translate done"], 0)
+
+    class Gated(FakePopen):
+        def __call__(self, cmd: list[str], **kwargs: Any) -> FakeProc:
+            if len(self.calls) == 1:
+                gate.wait(5)  # 第二条命令启动前停一下，让测试在"两条之间"点停止
+            return super().__call__(cmd, **kwargs)
+
+    second = FakeProc(["export"], 0)
+    m = jobs.JobManager(tmp_path, popen=Gated(first, second), kill=lambda p: killed.append(p.pid))
+    job = m.start(workspace(tmp_path, "demo"), "retranslate", "重翻", [["t"], ["e"]], {})
+    for _ in range(200):
+        if first.finished and m._proc is None:  # pyright: ignore[reportPrivateUsage]
+            break
+        time.sleep(0.01)
+    assert first.finished and m._proc is None  # pyright: ignore[reportPrivateUsage]
+    assert m.stop() is True
+    gate.set()
+    m.wait(5)
+    assert killed == []  # 旧 pid 没被杀
+    assert job.exit_code == jobs.EXIT_STOPPED
+
+
+def test_kill_tree_skips_finished_process() -> None:
+    proc = FakeProc([], 0)
+    proc.wait()
+    jobs.kill_tree(proc)  # 已经退出：不调用 taskkill / terminate
+    assert proc.terminated is False
+
+
+def test_start_failure_after_lock_releases_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = _manager(tmp_path, FakePopen(FakeProc([], 0)))
+    ws = workspace(tmp_path, "demo")
+
+    class NoThread:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            assert m.lock.path.exists()  # 这时候锁已经拿到了
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(jobs.threading, "Thread", NoThread)
+    with pytest.raises(RuntimeError):
+        m.start(ws, "run", "运行", [["a"]], {})
+    monkeypatch.undo()
+    assert not m.lock.path.exists() and m.job is None
+    job = m.start(ws, "run", "运行", [["a"]], {})  # 之后还能正常开始
+    m.wait(5)
+    assert job.exit_code == 0
+
+
+def test_child_env_bypasses_proxy_for_localhost() -> None:
+    env = jobs.child_env({"HTTP_PROXY": "http://proxy.test:8080", "NO_PROXY": "corp.test"})
+    assert env["NO_PROXY"] == "corp.test,127.0.0.1,localhost,::1"
+    assert env["no_proxy"] == "127.0.0.1,localhost,::1"
+    assert env["HTTP_PROXY"] == "http://proxy.test:8080"  # 真实站点照常走代理
+    assert jobs.child_env(env)["NO_PROXY"] == env["NO_PROXY"]  # 重复调用不重复追加
+
+
+def test_job_env_prefers_dotenv_keys_and_strips_them_in_demo(tmp_path: Path) -> None:
+    environ = {"DEEPL_API_KEY": "old-from-shell", "PATH": "p"}
+    keys = {"DEEPL_API_KEY": "new-from-dotenv", "LLM_API_KEY": "sk-x"}
+    real = jobs.job_env(workspace(tmp_path, "real"), environ, keys)
+    assert real["DEEPL_API_KEY"] == "new-from-dotenv" and real["LLM_API_KEY"] == "sk-x"
+    assert "127.0.0.1" in real["NO_PROXY"]
+    demo = jobs.job_env(workspace(tmp_path, "demo"), environ, keys)
+    assert "DEEPL_API_KEY" not in demo and "LLM_API_KEY" not in demo
+    assert "127.0.0.1" in demo["no_proxy"] and demo["QBKB_DEMO_STATE"]
 
 
 def test_failed_spawn_releases_lock(tmp_path: Path) -> None:

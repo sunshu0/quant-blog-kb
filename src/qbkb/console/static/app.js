@@ -314,6 +314,13 @@ async function quit() {
 
 document.addEventListener("DOMContentLoaded", () => {
   for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => showTab(b.dataset.tab));
+  // 文章里的链接：外部的在新标签页打开（服务端已加 target），其他的（站内相对链接）不让它把控制台页面换掉
+  $("reader-body").addEventListener("click", (ev) => {
+    const a = ev.target.closest("a");
+    if (!a) return;
+    const href = a.getAttribute("href") || "";
+    if (a.target !== "_blank" && !href.startsWith("#")) ev.preventDefault();
+  });
   for (const b of document.querySelectorAll(".views button")) {
     b.addEventListener("click", () => { if (state.url) openArticle(state.url, b.dataset.view); });
   }

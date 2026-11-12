@@ -2,7 +2,8 @@
 
 - Twisted reactor 一个进程只能启动一次，所以控制台从不在自己的进程里跑流程，一律开子进程；
 - 同一时间只允许一个任务：进程内用 threading.Lock，跨进程（控制台和每天的定时任务）用
-  数据目录下的锁文件 `.qbkb/run.lock`（O_EXCL 创建；超过 STALE_SECONDS 视为残留）；
+  数据目录下的锁文件 `.qbkb/run.lock`（O_EXCL 创建；记下持有者的 pid 和进程创建时间，
+  进程不在了就算残留）；
 - 日志每个任务一份，写在数据目录的 logs/ 下；写之前把 key 换成 ***（纵深防御）。
 """
 
@@ -22,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO, Any, Protocol
 
+from qbkb.console import procinfo
 from qbkb.console.workspace import Workspace, redact
 from qbkb.console.workspace import state_dir as _state_dir
 
@@ -56,8 +58,12 @@ _STAGE_LINE = re.compile(r"^\[(discover|fetch|extract|filter|translate|export)\]
 _QUOTA_LINE = re.compile(r"本月额度：已用 (\d+) / 上限 (\d+) 字符（剩余 (\d+)）")
 _PUBLISHED_LINE = re.compile(r"^\[export\] \S+: 发布 (\d+)（内容没变 (\d+)）")
 MAX_LINES = 5000
-STALE_SECONDS = 3 * 3600  # 定时任务的执行时限是 2 小时，锁超过 3 小时一定是残留
+# 锁文件内容读不出来（另一个进程刚创建还没写完）时，等这么久再当残留
+CORRUPT_GRACE_S = 120
+# 运行中每隔这么久刷新一次锁文件的修改时间
+TOUCH_EVERY_S = 30
 LOCK_FILE = "run.lock"
+LOCAL_NO_PROXY = ("127.0.0.1", "localhost", "::1")
 
 
 def describe_exit(code: int | None) -> str:
@@ -127,7 +133,28 @@ def child_env(base: Mapping[str, str]) -> dict[str, str]:
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUNBUFFERED"] = "1"
+    # 访问本机的请求不走代理：配了系统代理（HTTP_PROXY 等）的电脑上，Scrapy 和 httpx
+    # 会把 127.0.0.1 的示例站点也交给代理，演示全部失败。真实站点照常走代理
+    for name in ("NO_PROXY", "no_proxy"):
+        have = [x.strip() for x in env.get(name, "").split(",") if x.strip()]
+        env[name] = ",".join(have + [h for h in LOCAL_NO_PROXY if h not in have])
     return env
+
+
+def job_env(ws: Workspace, environ: Mapping[str, str], keys: Mapping[str, str]) -> dict[str, str]:
+    """任务子进程的环境变量（控制台和每天的定时任务用同一套规则）。
+
+    - 演示模式：去掉 API key，带上演示状态目录；
+    - 真实模式：以 .env 里的 key 为准（覆盖进程环境里可能过期的同名变量；子进程里的
+      load_dotenv 不会覆盖已有变量）。
+    """
+    from qbkb.console import demo
+
+    if ws.demo:
+        return child_env(demo.demo_env(ws, environ))
+    env = dict(environ)
+    env.update({k: v for k, v in keys.items() if v})
+    return child_env(env)
 
 
 # ---- 跨进程锁 ----------------------------------------------------------------
@@ -138,11 +165,29 @@ class Busy(RuntimeError):
 
 
 class RunLock:
-    """一个数据根目录同时只跑一个任务（控制台和定时任务共用）。"""
+    """一个数据根目录同时只跑一个任务（控制台和定时任务共用）。
 
-    def __init__(self, root: Path, *, clock: Callable[[], float] = time.time) -> None:
+    锁文件里记下持有者进程的 pid 和创建时间。别人检查时：pid 对应的进程还活着、而且创建时间
+    对得上（Windows 会复用 pid），才算锁有效；进程不在了（被硬杀、断电）就视为没有锁，
+    不用等。锁文件坏了（读不出来）且超过 CORRUPT_GRACE_S 秒没更新，也视为残留。
+    持有期间 touch() 刷新修改时间，方便人看（`last_seen`）。
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        clock: Callable[[], float] = time.time,
+        alive: Callable[[int, float | None], bool] = procinfo.same_process,
+        me: Callable[[], tuple[int, float | None]] = lambda: (
+            os.getpid(),
+            procinfo.self_start_time(),
+        ),
+    ) -> None:
         self.path = _state_dir(root) / LOCK_FILE
         self._clock = clock
+        self._alive = alive
+        self._me = me
         self.held = False
 
     def holder(self) -> dict[str, Any] | None:
@@ -158,7 +203,7 @@ class RunLock:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError as e:
-                if self._stale():
+                if self.stale():
                     with contextlib.suppress(OSError):
                         self.path.unlink()
                     continue
@@ -166,19 +211,33 @@ class RunLock:
                 raise Busy(
                     f"已经有任务在运行（{h.get('who', '未知')}，{h.get('since', '?')} 开始）"
                 ) from e
+            pid, started = self._me()
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 since = datetime.now().isoformat(timespec="seconds")
-                json.dump({"who": who, "pid": os.getpid(), "since": since}, f, ensure_ascii=False)
+                data = {"who": who, "pid": pid, "started": started, "since": since}
+                json.dump(data, f, ensure_ascii=False)
             self.held = True
             return
         raise Busy("锁文件删不掉，请稍后再试")
 
-    def _stale(self) -> bool:
-        try:
-            age = self._clock() - self.path.stat().st_mtime
-        except OSError:
-            return True
-        return age > STALE_SECONDS
+    def stale(self) -> bool:
+        """锁是不是残留的（持有者进程已经不在了）。"""
+        h = self.holder()
+        pid = h.get("pid") if h else None
+        if not isinstance(pid, int):
+            # 读不出来：可能另一个进程刚创建、还没写完，给一点时间
+            try:
+                age = self._clock() - self.path.stat().st_mtime
+            except OSError:
+                return True
+            return age > CORRUPT_GRACE_S
+        started = h.get("started") if h else None
+        return not self._alive(pid, started if isinstance(started, (int, float)) else None)
+
+    def touch(self) -> None:
+        if self.held:
+            with contextlib.suppress(OSError):
+                os.utime(self.path)
 
     def release(self) -> None:
         if self.held:
@@ -195,6 +254,8 @@ class Proc(Protocol):
     pid: int
 
     def wait(self) -> int: ...
+
+    def poll(self) -> int | None: ...
 
     def terminate(self) -> None: ...
 
@@ -273,6 +334,7 @@ def execute(
     on_line: Callable[[str], None],
     popen: Popen = subprocess.Popen,
     on_start: Callable[[Proc], None] | None = None,
+    on_exit: Callable[[Proc], None] | None = None,
     should_stop: Callable[[], bool] = lambda: False,
 ) -> int:
     """依次跑几个命令，每行输出交给 on_line。前一个出错（1、2）或被停止就不跑后面的。"""
@@ -299,6 +361,8 @@ def execute(
             for raw in proc.stdout:
                 on_line(raw.rstrip("\r\n"))
         code = proc.wait()
+        if on_exit is not None:
+            on_exit(proc)  # 立刻忘掉这个 pid：退出后它可能被别的进程复用
         if should_stop():
             codes.append(EXIT_STOPPED)
             break
@@ -309,7 +373,13 @@ def execute(
 
 
 def kill_tree(proc: Proc) -> None:
-    """结束子进程和它的子进程（run 会再开一个跑 Scrapy 的子进程）。Windows 上用 taskkill /T。"""
+    """结束子进程和它的子进程（run 会再开一个跑 Scrapy 的子进程）。Windows 上用 taskkill /T。
+
+    只杀我们自己启动、而且还在运行的进程：先用 Popen 对象的 poll() 确认没退出
+    （Popen 持有进程句柄，进程没退出时这个 pid 不会被复用）。已经退出的直接返回。
+    """
+    if proc.poll() is not None:
+        return
     if os.name == "nt":
         with contextlib.suppress(OSError):
             subprocess.run(
@@ -344,6 +414,7 @@ class JobManager:
         self._mutex = threading.Lock()
         self._job: Job | None = None
         self._proc: Proc | None = None
+        self._proc_mutex = threading.Lock()
         self._thread: threading.Thread | None = None
         self._next_id = 1
 
@@ -367,16 +438,22 @@ class JobManager:
             if self.running():
                 raise Busy("已经有任务在运行，等它跑完再开始新的")
             self.lock.acquire(f"控制台：{title}")
-            job = Job(self._next_id, kind, title, ws.mode, commands)
+            try:
+                job = Job(self._next_id, kind, title, ws.mode, commands)
+                ws.logs.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                job.log_path = str(ws.logs / f"console-{stamp}-{job.id}.log")
+                thread = threading.Thread(
+                    target=self._work, args=(job, ws, child_env(env)), daemon=True
+                )
+                thread.start()
+            except BaseException:
+                # 拿到锁之后出错（建不了日志目录、起不了线程）：把锁放掉，不然要等它被判成残留
+                self.lock.release()
+                raise
             self._next_id += 1
-            ws.logs.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            job.log_path = str(ws.logs / f"console-{stamp}-{job.id}.log")
             self._job = job
-            self._thread = threading.Thread(
-                target=self._work, args=(job, ws, child_env(env)), daemon=True
-            )
-            self._thread.start()
+            self._thread = thread
             return job
 
     def _work(self, job: Job, ws: Workspace, env: dict[str, str]) -> None:
@@ -386,7 +463,13 @@ class JobManager:
             assert job.log_path is not None
             log = open(job.log_path, "a", encoding="utf-8", newline="\n")  # noqa: SIM115
 
+            last_touch = [time.monotonic()]
+
             def on_line(line: str) -> None:
+                now = time.monotonic()
+                if now - last_touch[0] >= TOUCH_EVERY_S:
+                    self.lock.touch()
+                    last_touch[0] = now
                 line = redact(line, secrets)
                 job.add(line)
                 if log is not None:
@@ -394,7 +477,13 @@ class JobManager:
                     log.flush()
 
             def on_start(proc: Proc) -> None:
-                self._proc = proc
+                with self._proc_mutex:
+                    self._proc = proc
+
+            def on_exit(proc: Proc) -> None:
+                with self._proc_mutex:
+                    if self._proc is proc:
+                        self._proc = None
 
             code = execute(
                 job.commands,
@@ -403,6 +492,7 @@ class JobManager:
                 on_line=on_line,
                 popen=self._popen,
                 on_start=on_start,
+                on_exit=on_exit,
                 should_stop=lambda: job.stop_requested,
             )
         except Exception as e:  # 子进程都起不来（找不到 python 之类）：也要把锁放掉
@@ -411,7 +501,8 @@ class JobManager:
         finally:
             if log is not None:
                 log.close()
-            self._proc = None
+            with self._proc_mutex:
+                self._proc = None
             self.lock.release()
         job.finished = datetime.now().isoformat(timespec="seconds")
         job.exit_code = code
@@ -421,12 +512,16 @@ class JobManager:
 
     def stop(self) -> bool:
         """请求停止当前任务（结束子进程）。进度已经在状态库里，下次运行接着跑。"""
-        job, proc = self._job, self._proc
+        job = self._job
         if job is None or job.exit_code is not None:
             return False
         job.stop_requested = True
-        if proc is not None:
-            self._kill(proc)
+        with self._proc_mutex:
+            # 在锁里取出并杀：两条命令之间（上一个已退出、下一个还没起）这里是 None，什么都不杀；
+            # 下一条命令看到 stop_requested 就不会再启动
+            proc = self._proc
+            if proc is not None:
+                self._kill(proc)
         return True
 
     def wait(self, timeout: float | None = None) -> None:

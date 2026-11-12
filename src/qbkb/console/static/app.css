@@ -81,6 +81,7 @@ input { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-r
 .doc th, .doc td { border: 1px solid var(--line); padding: 4px 8px; }
 .doc pre { background: var(--bg); padding: 10px; overflow-x: auto; }
 .img-missing { color: var(--muted); font-style: italic; }
+.doc a.link-disabled { color: inherit; text-decoration: underline dotted; cursor: default; }
 .empty { color: var(--muted); }
 
 .card {
