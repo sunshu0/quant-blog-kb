@@ -16,8 +16,9 @@ from urllib.parse import urlsplit
 import scrapy
 from scrapy.crawler import Crawler
 from scrapy.downloadermiddlewares.retry import RetryMiddleware
-from scrapy.exceptions import CloseSpider, IgnoreRequest
+from scrapy.exceptions import IgnoreRequest
 from scrapy.http import Request, Response
+from scrapy.utils.defer import deferred_from_coro
 from twisted.python.failure import Failure
 
 from qbkb import store
@@ -93,19 +94,29 @@ class BackoffRetryMiddleware:
         self.retry_after_max = retry_after_max
         self._clock = clock
         self.resume_at = 0.0
+        self._crawler: Crawler | None = None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
         s = crawler.settings
-        return cls(
+        mw = cls(
             RetryMiddleware.from_crawler(crawler),
             base=s.getfloat("QBKB_BACKOFF_BASE", RETRY_BACKOFF_BASE_SECONDS),
             max_delay=s.getfloat("QBKB_BACKOFF_MAX", RETRY_BACKOFF_MAX_SECONDS),
             retry_after_max=s.getfloat("QBKB_RETRY_AFTER_MAX", RETRY_AFTER_MAX_SECONDS),
         )
+        mw._crawler = crawler
+        return mw
 
     def pause(self, seconds: float) -> None:
         self.resume_at = max(self.resume_at, self._clock() + seconds)
+
+    def _stop_site(self, reason: str) -> None:
+        """让整站停止：Retry-After 太久时，继续抓其他文章同样违背服务器要求。"""
+        spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
+        stop = getattr(spider, "request_stop", None) if spider is not None else None
+        if stop is not None:
+            stop(reason)
 
     async def process_request(self, request: Request) -> None:
         wait = self.resume_at - self._clock()
@@ -119,6 +130,7 @@ class BackoffRetryMiddleware:
             retry_after = parse_retry_after(header.decode("latin-1") if header else None)
             if retry_after is not None and retry_after > self.retry_after_max:
                 request.meta[META_RETRY_AFTER_REFUSED] = retry_after
+                self._stop_site(f"服务器要求 Retry-After {retry_after:.0f} 秒，超过上限")
                 return response
         result = self._retry.process_response(request, response)
         if isinstance(result, Request):
@@ -176,6 +188,11 @@ class HostAllowlistMiddleware:
         return host == self.allowed_host or host.endswith("." + self.allowed_host)
 
     def process_request(self, request: Request, spider: scrapy.Spider) -> None:
+        stop_reason = getattr(spider, "stop_reason", None)
+        if stop_reason is not None:
+            # 整站已经被叫停（robots 跨站 / Retry-After 太久）：所有后续请求一律 IgnoreRequest，
+            # 由 errback 处理但不记文章失败——这是站点级停止，不是这一篇的问题。
+            raise IgnoreRequest(f"站点已停止抓取：{stop_reason}")
         if self.is_allowed(request.url):
             return
         article_url = request.cb_kwargs.get("article_url")
@@ -185,9 +202,11 @@ class HostAllowlistMiddleware:
             # 真跨 host 就停掉整站，不能放任 Scrapy 对 robots 失败默认放行、继续抓文章。
             if self._host_allowed(request.url):
                 return
-            raise CloseSpider(
-                f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则，停止抓取"
+            spider.request_stop(  # type: ignore[attr-defined]
+                f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则",
+                mode="fast",
             )
+            raise IgnoreRequest(f"robots.txt 被重定向到未许可站点 {request.url}")
         spider.fail_cross_host(str(article_url), request.url)  # type: ignore[attr-defined]
         # 已经记过一次失败：标记一下，errback 别再记第二次（否则失败数和 retries 都会翻倍）
         request.meta[_CROSS_HOST_BLOCKED] = True
@@ -217,6 +236,28 @@ class ArticleSpider(scrapy.Spider):
         self.allowed_domains = [allowed_host]
         self.allowed_scheme = allowed_scheme.lower()
         self.counts = counts
+        # 整站停止的原因（robots 跨站、Retry-After 太久……）；设了之后不再发任何请求
+        self.stop_reason: str | None = None
+
+    def request_stop(self, reason: str, mode: str = "graceful") -> None:
+        """请求停止整站抓取：记下原因，并通知引擎关闭（fire-and-forget）。
+
+        robots 跨站被拦、服务器要求过长的 Retry-After 等"继续抓其他文章也违背服务器要求"的
+        情况都会走这里。stop_reason 一记下，后续请求在 HostAllowlistMiddleware 里会被直接
+        IgnoreRequest（不计文章失败）；引擎的 close_spider_async 让还没发出去的请求不再发出。
+        只调用一次（幂等）：第一次调用生效，之后再调用直接返回。
+
+        mode 和 close_spider_async 一样：robots 跨站要用 "fast"（当前这篇还卡在 robots 检查、
+        还没下载，直接丢掉别让它发出去）；Retry-After 太久用默认 "graceful"（当前这篇的响应
+        已经拿到，让它记完失败再停）。
+        """
+        if self.stop_reason is not None:
+            return
+        self.stop_reason = reason
+        engine = getattr(getattr(self, "crawler", None), "engine", None)
+        if engine is not None:
+            # Scrapy 2.20：close_spider_async 是 async，deferred_from_coro 把它调度到运行中的 loop。
+            deferred_from_coro(engine.close_spider_async(reason=reason, mode=mode))
 
     def fail_cross_host(self, article_url: str, target_url: str) -> None:
         """跨站（或换 scheme）请求：把文章记成失败，不保存目标内容。"""
@@ -251,14 +292,13 @@ class ArticleSpider(scrapy.Spider):
             self.logger.warning("failed %s: %s", article_url, outcome.reason)
         else:
             self.logger.info("%s %s %s", outcome.kind.value, outcome.http_status, article_url)
-        if response.meta.get(META_RETRY_AFTER_REFUSED) is not None:
-            # 服务器要求等很久：不只是这篇不重试，整个站点这次都不再请求
-            raise CloseSpider("retry_after_too_long")
 
     def on_error(self, failure: Failure) -> None:
         request: Request = failure.request  # type: ignore[attr-defined]
         if request.meta.get(_CROSS_HOST_BLOCKED):
             return  # 白名单中间件已经记过失败，别重复计数 / 累加 retries
+        if self.stop_reason is not None:
+            return  # 整站停止（robots 跨站 / Retry-After），不是这一篇的失败，不记
         url = str(request.cb_kwargs["article_url"])
         exc = failure.value
         if not isinstance(exc, BaseException):

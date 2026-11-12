@@ -9,7 +9,7 @@ import pytest
 import scrapy
 from scrapy.crawler import Crawler
 from scrapy.downloadermiddlewares.redirect import RedirectMiddleware
-from scrapy.exceptions import CloseSpider, IgnoreRequest
+from scrapy.exceptions import IgnoreRequest
 from scrapy.http import HtmlResponse, Request, Response
 from scrapy.utils.test import get_crawler
 from twisted.python.failure import Failure
@@ -291,15 +291,15 @@ def _spider(conn: sqlite3.Connection, raw_dir: Path, counts: Counter[Kind]) -> A
     )
 
 
-def test_spider_stops_when_retry_after_is_too_long(
+def test_parse_article_records_retry_after_failure(
     db: tuple[Path, sqlite3.Connection], tmp_path: Path
 ) -> None:
+    """长 Retry-After：停止由 BackoffRetryMiddleware 的 request_stop 处理，这里只记这一篇失败。"""
     _, conn = db
     counts: Counter[Kind] = Counter()
     request = Request(BASE + "alpha", meta={META_RETRY_AFTER_REFUSED: 3600.0})
     resp = HtmlResponse(request.url, status=429, body=b"slow", request=request)
-    with pytest.raises(CloseSpider):
-        _spider(conn, tmp_path, counts).parse_article(resp, article_url=BASE + "alpha")
+    _spider(conn, tmp_path, counts).parse_article(resp, article_url=BASE + "alpha")
     assert counts == Counter({Kind.FAILED: 1})
     row = store.get_article(conn, BASE + "alpha")
     assert row is not None
@@ -427,10 +427,10 @@ def test_robots_request_without_article_url_is_not_recorded_as_article(
     _, conn = db
     mw = HostAllowlistMiddleware("https", "www.example.test")
     # robots 请求没有 article_url：跨 host 被拦时不能当文章记失败（之前会 KeyError），而是停掉整站
-    with pytest.raises(CloseSpider):
-        mw.process_request(
-            Request("https://unapproved.test/robots.txt"), _spider(conn, tmp_path, Counter())
-        )
+    spider = _spider(conn, tmp_path, Counter())
+    with pytest.raises(IgnoreRequest):
+        mw.process_request(Request("https://unapproved.test/robots.txt"), spider)
+    assert spider.stop_reason is not None  # 记下停止原因
     # 没有文章被误标失败
     for slug in ("alpha", "beta"):
         assert store.get_article(conn, BASE + slug)["status"] == Status.DISCOVERED  # type: ignore[index]
@@ -450,6 +450,80 @@ def test_robots_same_host_scheme_change_is_allowed(
     )
 
 
+def test_request_stop_sets_reason_and_schedules_engine_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = store.connect(tmp_path / "s.db")
+    spider = _spider(conn, tmp_path, Counter())
+
+    class Engine:
+        def __init__(self) -> None:
+            self.reason: str | None = None
+
+        async def close_spider_async(
+            self, *, reason: str = "cancelled", mode: str = "graceful"
+        ) -> None:
+            self.reason = reason
+
+    engine = Engine()
+
+    class Crawler:
+        pass
+
+    crawler = Crawler()
+    crawler.engine = engine  # type: ignore[attr-defined]
+    spider.crawler = crawler  # type: ignore[attr-defined]
+
+    scheduled: list[object] = []
+
+    def fake_deferred_from_coro(o: object) -> object:
+        scheduled.append(o)
+        return o
+
+    monkeypatch.setattr(spider_mod, "deferred_from_coro", fake_deferred_from_coro)
+    spider.request_stop("robots 跨站")
+    assert spider.stop_reason == "robots 跨站"
+    assert len(scheduled) == 1 and asyncio.iscoroutine(scheduled[0])  # type: ignore[arg-type]
+    # 幂等：再调用一次不重复调度、不改原因
+    spider.request_stop("另一个原因")
+    assert spider.stop_reason == "robots 跨站" and len(scheduled) == 1
+    scheduled[0].close()  # type: ignore[attr-defined]  # 关掉没被调度的协程，避免"never awaited"警告
+    conn.close()
+
+
+def test_host_allowlist_blocks_all_requests_after_stop(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    _, conn = db
+    spider = _spider(conn, tmp_path, Counter())
+    spider.stop_reason = "测试停止"
+    mw = HostAllowlistMiddleware("https", "www.example.test")
+    request = Request(BASE + "alpha", cb_kwargs={"article_url": BASE + "alpha"})
+    with pytest.raises(IgnoreRequest):
+        mw.process_request(request, spider)
+    # 整站停止不是这一篇的失败：没有记失败
+    assert store.get_article(conn, BASE + "alpha")["status"] == Status.DISCOVERED  # type: ignore[index]
+
+
+def test_backoff_retry_after_over_limit_calls_request_stop(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    _, conn = db
+    spider = _spider(conn, tmp_path, Counter())
+
+    class _SpiderHolder:
+        def __init__(self, spider: ArticleSpider) -> None:
+            self.spider = spider
+
+    mw = _middleware(FakeClock())
+    mw._crawler = _SpiderHolder(spider)  # type: ignore[assignment]
+    request = Request(BASE + "alpha")
+    resp = _response(request, 429, {"Retry-After": "3600"})
+    assert asyncio.run(mw.process_response(request, resp)) is resp
+    assert request.meta[META_RETRY_AFTER_REFUSED] == 3600.0
+    assert spider.stop_reason is not None and "Retry-After 3600" in spider.stop_reason
+
+
 def test_run_fetch_removes_stale_tmp_before_crawling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -463,11 +537,17 @@ def test_run_fetch_removes_stale_tmp_before_crawling(
     stale.parent.mkdir(parents=True)
     stale.write_bytes(b"half")
 
+    class _CrawlerStub:
+        spider = None
+
     class NoCrawl:
         def __init__(self, settings: object) -> None:
             pass
 
-        def crawl(self, *args: object, **kwargs: object) -> None:
+        def create_crawler(self, spidercls: object) -> _CrawlerStub:
+            return _CrawlerStub()
+
+        def crawl(self, crawler: object, **kwargs: object) -> None:
             pass
 
         def start(self) -> None:

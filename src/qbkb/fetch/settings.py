@@ -48,8 +48,10 @@ def build_settings(
         "RETRY_HTTP_CODES": list(RETRY_HTTP_CODES),
         "DOWNLOADER_MIDDLEWARES": {
             "scrapy.downloadermiddlewares.retry.RetryMiddleware": None,
-            # 在 Offsite（500）之后、Retry（550）之前：拦下 dont_filter 绕过的跨站重定向
-            "qbkb.fetch.spider.HostAllowlistMiddleware": 505,
+            # 在 Offsite（50）之前：拦下 dont_filter 绕过的跨站重定向，也拦下 robots.txt 的
+            # 跨站重定向（robots 请求没有 dont_filter，会被 Offsite 先拦掉、吞掉异常，导致
+            # 「没有 robots、全部允许」继续抓文章）。必须排在 Offsite 之前才能看到 robots 请求。
+            "qbkb.fetch.spider.HostAllowlistMiddleware": 40,
             "qbkb.fetch.spider.BackoffRetryMiddleware": 550,
         },
         # 非 2xx 也交给回调，由 process_response 统一写状态库

@@ -213,6 +213,32 @@ def test_connect_switches_existing_wal_back_to_delete(tmp_path: Path) -> None:
     c.close()
 
 
+def test_connect_survives_wal_locked_by_other_connection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """老 WAL 库还被别的连接打开时，connect 切 DELETE 报 database is locked：不崩，继续当前模式。"""
+    db = tmp_path / "state.db"
+    a = sqlite3.connect(db)
+    a.execute("PRAGMA journal_mode = WAL")
+    a.execute(
+        "CREATE TABLE articles (url TEXT PRIMARY KEY, site TEXT, slug TEXT, status TEXT,"
+        " updated_at TEXT)"
+    )
+    a.execute(
+        "INSERT INTO articles (url, site, slug, status, updated_at)"
+        " VALUES ('https://a.test/1', 'x', '1', 'discovered', 'now')"
+    )
+    a.commit()
+    # a 保持打开：connect 切 DELETE 需要独占锁，拿不到就告警、继续用 WAL
+    with caplog.at_level("WARNING"):
+        c = store.connect(db)
+    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"  # 保持当前模式
+    assert c.execute("SELECT COUNT(*) FROM articles").fetchone()[0] == 1
+    assert any("journal_mode 切回 DELETE 失败" in m for m in caplog.messages)
+    c.close()
+    a.close()
+
+
 def test_concurrent_writers_wait_instead_of_failing(tmp_path: Path) -> None:
     """一个连接持有写事务时，另一个连接的写操作在 busy_timeout 内等待，而不是立刻报锁冲突。"""
     import threading
