@@ -128,7 +128,7 @@ class App:
         self._translator_obj: Translator | None = None
         self._translator_mode: str | None = None
         self._translator_key: str | None = None
-        self._translating: dict[tuple[str, str], bool] = {}
+        self._translating = False  # 整个控制台同一时间只允许一个栏目在翻译（防并发重复计费）
         self._translating_lock = threading.Lock()
         kwargs: dict[str, Any] = {}
         if popen is not None:
@@ -630,12 +630,13 @@ class App:
         sec_rows = [r for r in rows if r.get("栏目id") == section]
         if not sec_rows:
             raise _bad("这个栏目没有抽样的文章")
-        # 互斥：同一站点 / 栏目翻译进行中，拒绝新的（防并发重复计费）
-        key = (site, section)
+        # 互斥：翻译记忆按文本 hash 共享，不同栏目可能撞同一段文本；只按栏目拦重入挡不住两个标签页
+        # 同时翻不同栏目各自重复计费。所以用一把 App 级锁：整个控制台同一时间只允许一个栏目在翻译。
+        # 跨进程（CLI 和控制台同时翻）不在此锁范围内。
         with self._translating_lock:
-            if self._translating.get(key):
-                raise ApiError(HTTPStatus.CONFLICT, "这个栏目正在翻译，等它完成再点")
-            self._translating[key] = True
+            if self._translating:
+                raise ApiError(HTTPStatus.CONFLICT, "已有栏目正在翻译，等它完成再点")
+            self._translating = True
         done = 0
         failed_plain: list[str] = []
         try:
@@ -679,7 +680,7 @@ class App:
                 conn.close()
         finally:
             with self._translating_lock:
-                self._translating.pop(key, None)
+                self._translating = False
         view = self.sections_view(site)
         view["translated"] = done
         view["failed"] = failed_plain

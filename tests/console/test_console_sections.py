@@ -225,6 +225,33 @@ def test_translate_section_rejects_concurrent_same_section(tmp_path: Path) -> No
     assert "first" in result and not isinstance(result["first"], Exception)
 
 
+def test_translate_section_rejects_concurrent_different_sections(tmp_path: Path) -> None:
+    """翻译记忆按文本共享，两个标签页翻不同栏目也可能撞同一段文本；App 级锁要一起拦住。"""
+    gated = GatedTranslator()
+    app = _setup(tmp_path, gated)
+    app.generate_sections({"site": "demo"})
+    result: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            result["first"] = app.translate_section({"site": "demo", "section": "article"})
+        except Exception as e:  # noqa: BLE001
+            result["first"] = e
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert gated.started.wait(timeout=5)
+    try:
+        # 另一栏目同时翻也要被拒：整把锁，不让两个标签页各自翻同一段文本重复计费
+        with pytest.raises(ApiError) as info:
+            app.translate_section({"site": "demo", "section": "weekly"})
+        assert "正在翻译" in info.value.message
+    finally:
+        gated.release.set()
+    t.join(timeout=5)
+    assert "first" in result and not isinstance(result["first"], Exception)
+
+
 def test_concurrent_update_marks_preserves_both(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -257,6 +284,43 @@ def test_concurrent_update_marks_preserves_both(
     assert result[urls[0]] == "ok" and result[urls[1]] == "ok"
     by_url = {r["网址"]: r["要不要"] for r in survey.read_csv(path)}
     assert by_url[urls[0]] == "要" and by_url[urls[1]] == "要"
+
+
+def test_write_csv_uses_unique_temp_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写回抽样表用唯一临时文件（不再固定 .csv.tmp），成功和失败后都不残留临时文件。"""
+    app = _setup(tmp_path)
+    app.generate_sections({"site": "demo"})
+    path = _csv(tmp_path)
+    url = survey.read_csv(path)[0]["网址"]
+    made: list[str] = []
+    real_mkstemp = sections_ui.tempfile.mkstemp
+
+    def spy(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        fd, name = real_mkstemp(*args, **kwargs)
+        made.append(name)
+        return fd, name
+
+    monkeypatch.setattr(sections_ui.tempfile, "mkstemp", spy)
+    sections_ui.update_marks(path, {url: ("要", None)})
+    sections_ui.update_marks(path, {url: ("不要", None)})
+    assert len(made) == 2 and made[0] != made[1]  # 两次写用不同临时文件
+    assert all(not Path(name).name.endswith(".csv.tmp") for name in made)  # 不是固定名
+    assert list(path.parent.glob("*.tmp")) == []  # 成功写入后不残留
+    monkeypatch.undo()
+
+    before = path.read_bytes()
+
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise OSError("device busy")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(sections_ui.SamplingCsvError):
+        sections_ui.update_marks(path, {url: ("要", None)})
+    monkeypatch.undo()
+    assert list(path.parent.glob("*.tmp")) == []  # 失败后也清理干净
+    assert path.read_bytes() == before  # 原文件未变
 
 
 class FailingAfterTranslator:

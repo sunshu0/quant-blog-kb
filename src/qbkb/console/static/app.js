@@ -322,6 +322,7 @@ function sectionCard(sec, site) {
     if (translatingSection) return;
     translatingSection = true;
     const btn = head.querySelector(".sec-translate");
+    const label = btn.textContent;
     btn.disabled = true;
     btn.textContent = "翻译中…";
     try {
@@ -333,8 +334,15 @@ function sectionCard(sec, site) {
       } else {
         toast("已翻译这一栏的标题和摘要（命中的不重复计费）。");
       }
-    } catch (e) { toast(e.message, true); }
-    finally { translatingSection = false; }
+    } catch (e) {
+      toast(e.message, true);
+      // 失败（409/429/502/400/网络错误）后按钮还留在 DOM 里，得恢复，否则会一直停在「翻译中…」。
+      // 成功路径里 renderSections 重建列表、旧按钮已被摘掉，isConnected 为 false，这里不碰它。
+      if (btn.isConnected) {
+        btn.disabled = false;
+        btn.textContent = label;
+      }
+    } finally { translatingSection = false; }
   });
   if (expandedSections.has(sec.id)) { body.hidden = false; toggle.textContent = "收起"; }
   return el("div", { className: "card sec-card" }, head, body);

@@ -13,7 +13,9 @@ from __future__ import annotations
 import contextlib
 import csv
 import html
+import os
 import sqlite3
+import tempfile
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
@@ -198,13 +200,15 @@ def update_marks(
 
 
 def _write_csv(path: Path, rows: Sequence[dict[str, str]], fieldnames: Sequence[str]) -> None:
-    """按原列顺序写回（含 Excel 加的多余列）；先写临时文件再原子替换。
+    """按原列顺序写回（含 Excel 加的多余列）；先写唯一临时文件再原子替换。
 
-    写不进去时清理临时文件、抛 SamplingCsvError（原文不动）。
+    写不进去时清理临时文件、抛 SamplingCsvError（原文不动）。临时文件用唯一名字，避免并发
+    写同一张表时互相截断临时文件（跨进程同时写表、互相覆盖的冲突本版不处理）。
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        with tmp.open("w", encoding="utf-8-sig", newline="") as f:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(fieldnames))
             w.writeheader()
             w.writerows(rows)
