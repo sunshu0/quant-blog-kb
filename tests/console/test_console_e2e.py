@@ -72,7 +72,7 @@ def test_auto_update_runs_and_records_result(tmp_path: Path) -> None:
     assert last["mode"] == "demo" and "待复查" in last["result"]
     log = (workspace(tmp_path, "demo").logs / auto.LOG_NAME).read_text("utf-8")
     assert "自动更新开始" in log and "[export] demo: 发布 3" in log
-    assert not jobs.RunLock(tmp_path).path.exists()
+    assert jobs.RunLock(tmp_path).holder() is None  # 跑完放锁（元数据已清空）
 
 
 def test_auto_update_skips_when_disabled_or_busy(tmp_path: Path) -> None:

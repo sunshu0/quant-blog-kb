@@ -180,3 +180,47 @@ def test_translation_memory_none_glossary(conn: sqlite3.Connection) -> None:
     h = Segment(0, "<p>x</p>").src_hash
     store.tm_put(conn, h, "fake", "<p>x</p>", "<p>叉</p>")
     assert store.tm_get(conn, h, "fake", None) == "<p>叉</p>"
+
+
+# ---- 并发：busy_timeout + WAL ----
+
+
+def test_connect_sets_busy_timeout_and_wal(tmp_path: Path) -> None:
+    c = store.connect(tmp_path / "state.db")
+    assert c.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    c.close()
+
+
+def test_concurrent_writers_wait_instead_of_failing(tmp_path: Path) -> None:
+    """一个连接持有写事务时，另一个连接的写操作在 busy_timeout 内等待，而不是立刻报锁冲突。"""
+    import threading
+
+    db = tmp_path / "state.db"
+    b = store.connect(db)  # 只在主线程用
+    started = threading.Event()
+    release = threading.Event()
+
+    def writer_a() -> None:
+        a = store.connect(db)  # 只在 writer_a 这个线程用
+        a.execute(
+            "INSERT INTO articles (url, site, slug, status, updated_at)"
+            " VALUES ('https://a.test/1', 'x', '1', 'discovered', 'now')"
+        )
+        started.set()
+        release.wait(5)
+        a.commit()
+        a.close()
+
+    t = threading.Thread(target=writer_a)
+    t.start()
+    assert started.wait(5)
+    threading.Timer(0.5, release.set).start()
+    # a 还持有写锁：b 的这条写会等 busy_timeout，等 a 提交后成功，而不是抛 database is locked
+    b.execute(
+        "INSERT INTO articles (url, site, slug, status, updated_at)"
+        " VALUES ('https://a.test/2', 'x', '2', 'discovered', 'now')"
+    )
+    b.commit()
+    t.join(5)
+    b.close()
