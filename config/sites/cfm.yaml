@@ -1,7 +1,7 @@
 # Capital Fund Management（CFM）Our thinking。字段说明见 docs/design.md 3.1、4.1、4.3。
 # WordPress 站：文章网址平铺 https://www.cfm.com/<slug>/，服务端渲染，全站一个文章模板。
 # 栏目（The Edge / Commentary & Insights / Academic Papers / Whitepaper）从 JSON-LD
-# articleSection 读进 tags；按栏目选择采集（sections 节）等 PR C 合并后再接。
+# articleSection 读进 tags；采集选择从页面栏目标题读取，见 sections 节。
 
 compliance:
   robots_txt: "Yoast 生成：User-agent: * 全部放行（Disallow 为空）；Crawl-delay: 10（写在 User-agent 行之前，照样遵守，见下面 crawl_delay）"
@@ -74,3 +74,31 @@ extract:
         - ".content-blocks-container .col-80"
         # 论文、白皮书的全文是 PDF：把侧栏的 "Download PDF" 链接附在正文后面
         - ".sidebar ul.file-list"
+
+
+# 栏目来自页面的 Type 标题。四栏均待用户勾选；识别不了的新栏目只提醒，不翻译。
+# 论文、白皮书目前只抽网页摘要，PDF 正文不在本次范围。
+sections:
+  page_key:
+    selector: ".thinking-type-container h5"
+  list:
+    - id: the-edge-a-cfm-blog
+      name: The Edge a CFM blog
+      key: The Edge a CFM blog
+      collect: false
+      status: 待选择
+    - id: commentary-insights
+      name: Commentary & Insights
+      key: Commentary & Insights
+      collect: false
+      status: 待选择
+    - id: academic-papers
+      name: Academic Papers
+      key: Academic Papers
+      collect: false
+      status: 待选择
+    - id: whitepaper
+      name: Whitepaper
+      key: Whitepaper
+      collect: false
+      status: 待选择

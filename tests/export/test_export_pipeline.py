@@ -242,3 +242,51 @@ def test_index_does_not_repeat_group_for_duplicate_order(conn: sqlite3.Connectio
     )
     assert text.count("## Research") == 1
     assert text.count("ex/2024-03-05_carry-1.md") == 2  # 主文件与对照版
+
+
+def test_index_resolves_same_section_id_per_site(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    cfg = tmp_path / "config"
+    (cfg / "sites").mkdir(parents=True)
+    section = {
+        "list": [{"id": "article", "name": "Other research", "url_prefix": "/", "collect": True}]
+    }
+    (cfg / "sites" / "other.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "base_url": "https://other.test",
+                "compliance": {"decision": "allowed"},
+                "sections": section,
+            }
+        ),
+        encoding="utf-8",
+    )
+    current = SiteConfig(
+        "ex",
+        "allowed",
+        {
+            **SITE.raw,
+            "sections": {
+                "list": [
+                    {
+                        "id": "article",
+                        "name": "Current research",
+                        "url_prefix": "/",
+                        "collect": True,
+                    }
+                ]
+            },
+        },
+    )
+    add_translated(conn)
+    store.set_status(conn, URL, Status.PUBLISHED, section="article")
+    other_url = "https://other.test/example"
+    store.upsert_discovered(conn, DiscoveredUrl(other_url, "other", "other-article"))
+    store.set_status(conn, other_url, Status.PUBLISHED, section="article", title="Other title")
+    out = tmp_path / "out"
+    run(conn, current, GLOSSARY, out, config_dir=cfg)
+    text = (out / "index.md").read_text(encoding="utf-8")
+    assert "## Current research（1）" in text
+    assert "## Other research（1）" in text
+    before, after = text.split("## Other research")
+    assert "other/undated_other-article.md" not in before
+    assert "other/undated_other-article.md" in after

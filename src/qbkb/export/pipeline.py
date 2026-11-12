@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from qbkb import store
-from qbkb.config import SiteConfig
+from qbkb.config import CONFIG_DIR, SiteConfig, load_site
 from qbkb.export.images import ImageError, ImageFetcher
 from qbkb.export.markdown import (
     ArticleDoc,
@@ -275,6 +275,7 @@ def run(
     categories: Sequence[str] = (),
     rebuild: bool = False,
     limit: int | None = None,
+    config_dir: Path = CONFIG_DIR,
 ) -> ExportStats:
     """导出 translated / published 文章，以及还没翻全文、但已经入库（extracted / filtered）的
     文章（中文正文留空），最后重建 index.md。
@@ -304,9 +305,22 @@ def run(
             stats.failed.append(f"{url}：{msg}")
             store.record_failure(conn, url, msg)
     _record_image_failures(out_dir, site.name, stats.image_failures)
-    sections = load_section_rules(site).sections
-    names = {s.id: s.name for s in sections}
-    order = [s.name for s in sections] + list(categories)
+    # index 包含所有站点，栏目 id 只能在本站内解释，不能套用当前站点的同名 id。
+    sites = {str(r["site"]) for r in store.list_rows(conn, [Status.PUBLISHED])}
+    names: dict[str, str] = {}
+    order: list[str] = []
+    for name in sorted(sites | {site.name}):
+        if name == site.name:
+            other = site
+        else:
+            try:
+                other = load_site(name, config_dir)
+            except FileNotFoundError:
+                continue  # 配置已移走的旧站点仍保留其栏目 id。
+        for section in load_section_rules(other).sections:
+            names[f"{name}:{section.id}"] = section.name
+            order.append(section.name)
+    order += list(categories)
     write_index(conn, out_dir, order, names)
     return stats
 
@@ -330,7 +344,8 @@ def _group(row: sqlite3.Row, section_names: Mapping[str, str]) -> str:
     """分组：v2 按栏目（站点配置里的栏目名）；没有栏目的老数据按 v1 的打分类别。"""
     section = row["section"]
     if section:
-        return section_names.get(str(section), str(section))
+        scoped = f"{row['site']}:{section}"
+        return section_names.get(scoped, section_names.get(str(section), str(section)))
     return str(row["category"] or UNCATEGORIZED)
 
 
