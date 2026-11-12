@@ -21,6 +21,13 @@ MISSING_URL = "https://www.man.com/insights/fixture-missing-raw"
 EMPTY_URL = "https://www.man.com/insights/fixture-empty"
 
 
+def _man_all_sections() -> config.SiteConfig:
+    """man 的抽取规则，不分栏目（全部采集）：这里只测抽取本身，栏目见 tests/sections。"""
+    site = config.load_site("man")
+    raw = {k: v for k, v in site.raw.items() if k != "sections"}
+    return config.SiteConfig(site.name, site.compliance_decision, raw)
+
+
 @pytest.fixture
 def conn(tmp_path: Path) -> Iterator[sqlite3.Connection]:
     c = store.connect(tmp_path / "state.db")
@@ -47,7 +54,7 @@ def _setup(conn: sqlite3.Connection, tmp_path: Path) -> None:
 
 def test_run_extracts_and_records(conn: sqlite3.Connection, tmp_path: Path) -> None:
     _setup(conn, tmp_path)
-    site = config.load_site("man")
+    site = _man_all_sections()
     stats = run(conn, site, root=tmp_path)
 
     assert stats.extracted == 2
@@ -84,7 +91,7 @@ def test_run_extracts_and_records(conn: sqlite3.Connection, tmp_path: Path) -> N
 
 def test_run_is_idempotent(conn: sqlite3.Connection, tmp_path: Path) -> None:
     _setup(conn, tmp_path)
-    site = config.load_site("man")
+    site = _man_all_sections()
     run(conn, site, root=tmp_path)
     first = store.get_segment_hashes(conn, GOOD_URL)
     # 再跑一次：已经 extracted 的不再处理；手动退回 fetched 后重跑，结果一样
@@ -97,7 +104,7 @@ def test_run_is_idempotent(conn: sqlite3.Connection, tmp_path: Path) -> None:
 def test_run_only_touches_own_site(conn: sqlite3.Connection, tmp_path: Path) -> None:
     store.upsert_discovered(conn, DiscoveredUrl(url="https://o.test/x", site="other", slug="x"))
     store.set_status(conn, "https://o.test/x", Status.FETCHED, raw_path="nope.html")
-    stats = run(conn, config.load_site("man"), root=tmp_path)
+    stats = run(conn, _man_all_sections(), root=tmp_path)
     assert (stats.extracted, stats.failed) == (0, 0)
     row = store.get_article(conn, "https://o.test/x")
     assert row is not None
@@ -108,7 +115,7 @@ def test_retry_failed_reprocesses_extract_failures_only(
     conn: sqlite3.Connection, tmp_path: Path
 ) -> None:
     _setup(conn, tmp_path)
-    site = config.load_site("man")
+    site = _man_all_sections()
     run(conn, site, root=tmp_path)
     # fetch 阶段的失败：没有 raw_path，error 也不是 extract 写的
     fetch_fail = "https://www.man.com/insights/fixture-fetch-403"
@@ -140,7 +147,7 @@ def test_crash_between_segments_and_status_heals_on_rerun(
     按 URL 排序第一篇是 SHORT_URL，它写完段落、改状态时"进程被杀"。
     """
     _setup(conn, tmp_path)
-    site = config.load_site("man")
+    site = _man_all_sections()
     real_set_status = store.set_status
 
     def killed(*args: object, **kwargs: object) -> None:

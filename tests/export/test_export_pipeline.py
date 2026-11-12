@@ -93,6 +93,7 @@ def test_export_article_files_and_frontmatter(conn: sqlite3.Connection, tmp_path
         "author",
         "published",
         "source_url",
+        "section",
         "category",
         "value_score",
         "rubric_version",
@@ -163,7 +164,7 @@ def test_missing_translation_requeues(conn: sqlite3.Connection, tmp_path: Path) 
     stats = run(conn, SITE, newer, tmp_path / "output")
     assert stats.requeued == [URL]
     row = store.get_article(conn, URL)
-    assert row is not None and row["status"] == Status.FILTERED
+    assert row is not None and row["status"] == Status.EXTRACTED  # v2：退回 extracted
     assert "缺 1 段译文" in row["error"]
 
 
@@ -229,3 +230,15 @@ def test_build_index_empty() -> None:
 def test_export_article_unknown_url(conn: sqlite3.Connection, tmp_path: Path) -> None:
     with pytest.raises(KeyError):
         export_article(conn, URL, SITE, GLOSSARY, tmp_path, None, ExportStats())
+
+
+def test_index_does_not_repeat_group_for_duplicate_order(conn: sqlite3.Connection) -> None:
+    add_translated(conn)
+    store.set_status(conn, URL, Status.PUBLISHED, section="article")
+    text = build_index(
+        store.list_rows(conn, [Status.PUBLISHED]),
+        ["Research", "Research"],
+        {"article": "Research"},
+    )
+    assert text.count("## Research") == 1
+    assert text.count("ex/2024-03-05_carry-1.md") == 2  # 主文件与对照版

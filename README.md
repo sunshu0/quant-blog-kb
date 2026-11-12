@@ -13,14 +13,15 @@ uv sync
 bash scripts/verify.sh      # 离线检查：lint、类型、测试
 uv run qbkb init-db
 uv run qbkb sites
-uv run qbkb run --site man --limit 5   # 发现 → 抓取 → 抽取 → 筛选 → 翻译 → 输出
+uv run qbkb run --site man --limit 5   # 发现 → 抓取 → 抽取（判定栏目）→ 翻译 → 输出
 uv run qbkb status
+uv run qbkb sections --site man        # 栏目调研：篇数、抽样表（output/sections/），标好后再跑一次算占比
 uv run qbkb console                    # 本地网页控制台（只监听 127.0.0.1）
 ```
 
-不想花额度时加 `--scorer fake --translator fake`（假后端，跑通流程用）。退出码：0 正常，1 出错，3 额度用完（进度已保存，下个月再跑同一条命令即可接着翻），4 后端暂时不可用（稍后再跑），5 跑完了但有文章需要人工处理（`qbkb status` 查看）。完整说明见 `uv run qbkb --help`。
+不想花额度时加 `--translator fake`（假后端，跑通流程用）。**v2：只翻译站点配置里勾选了的栏目**（`config/sites/man.yaml` 的 `sections`，现在全部未勾选），默认流程不调用 LLM 打分（`qbkb filter` 仍可单独运行）。退出码：0 正常，1 出错，3 额度用完（进度已保存，下个月再跑同一条命令即可接着翻），4 后端暂时不可用（稍后再跑），5 跑完了但有文章需要人工处理（`qbkb status` 查看）。完整说明见 `uv run qbkb --help`。
 
-需要真实翻译时，复制 `.env.example` 为 `.env` 并填写 API key。filter 结束时会打印 LLM 的请求数和 token 数，translate 前后会打印 DeepL 本月的"已用 / 上限"字符数。
+需要真实翻译时，复制 `.env.example` 为 `.env` 并填写 API key。单独运行 filter 时会打印 LLM 的请求数和 token 数；translate 前后会打印 DeepL 本月的"已用 / 上限"字符数。
 
 ## 已知局限
 

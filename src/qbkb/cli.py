@@ -1,4 +1,4 @@
-"""命令行入口：各阶段子命令、run（按顺序跑完全部阶段）、status、eval。
+"""命令行入口：各阶段子命令、run（按顺序跑完默认流程）、status、sections、eval。
 
 退出码见 EXIT_CODES_HELP。
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -35,13 +36,15 @@ EXIT_CODES_HELP = """退出码：
   0  正常完成
   1  出错（配置错误、缺 key、网络错误等），看 stderr
   2  参数错误
-  3  额度用完（打分或翻译）：进度已保存，额度恢复后运行同一条命令接着跑
+  3  额度用完（翻译；单独运行 filter 时也包括打分）：进度已保存，额度恢复后运行同一条命令接着跑
   4  后端暂时不可用（限流 / 网络）：稍后运行同一条命令接着跑
   5  跑完了，但有文章需要人工处理：抓取 / 抽取 / 翻译 / 导出失败、翻译需复查、
-     打分输出不合格、因缺译文退回重翻、sitemap 部分失败（qbkb status 查看）
+     因缺译文退回重翻、sitemap 部分失败、发现了配置里没有的新栏目（qbkb status 查看）
 同时出现多种情况时按 4、3、5 的顺序取第一个。"""
 
-STAGES = ("discover", "fetch", "extract", "filter", "translate", "export")
+# 默认流程（v2，design.md 2）：采集阶段只有确定性规则，不调用 LLM。
+# filter（L2 打分）保留为可选的加工命令 `qbkb filter`，不在 run / 控制台 / 每天自动更新里。
+STAGES = ("discover", "fetch", "extract", "translate", "export")
 # 查翻译额度（只用来显示）最多等这么久
 USAGE_TIMEOUT_S = 5.0
 RESUME_HINT = "进度已保存在状态库里，下次运行同一条命令会从中断处接着跑。"
@@ -96,6 +99,11 @@ def _common(p: argparse.ArgumentParser) -> None:
 
 def _fetch_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--raw-dir", default="raw", help="原始 HTML 目录（默认 raw）")
+    p.add_argument(
+        "--url-file",
+        type=Path,
+        help="只抓这个文件里列出的网址（每行一个，须属于该站点；qbkb sections 抽样时用）",
+    )
     p.add_argument(
         "--fetch-delay",
         type=float,
@@ -180,10 +188,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = stage("extract", "从原始 HTML 抽取正文")
     _common(p)
     p.add_argument("--retry-failed", action="store_true", help="重试抽取阶段失败过的文章")
-    p = stage("filter", "价值筛选（L1 规则、L2 打分、L3 人工覆盖）")
+    p = stage(
+        "filter",
+        "可选的加工步骤：L2 LLM 打分（不在 run 的默认流程里；会把文章标成 filtered / skipped）",
+    )
     _common(p)
     _filter_opts(p)
-    p = stage("translate", "翻译 filtered 的文章")
+    p = stage("translate", "翻译 extracted 的文章（只翻采集栏目里的）")
     _common(p)
     _translate_opts(p)
     p = stage("export", "把 translated 的文章输出成 Markdown")
@@ -192,12 +203,38 @@ def build_parser() -> argparse.ArgumentParser:
     p = stage("run", "按顺序跑完全部阶段：" + " → ".join(STAGES))
     _common(p)
     _fetch_opts(p)
-    _filter_opts(p)
     _translate_opts(p)
     _export_opts(p)
     p.add_argument("--skip", action="append", choices=STAGES, default=[], help="跳过某个阶段")
-    p = stage("status", "各状态的文章数，列出 needs_review 和 failed")
+    p = stage("status", "各状态的文章数、各栏目的篇数、新栏目提醒，列出 needs_review 和 failed")
     _common(p)
+    p = stage(
+        "sections",
+        "栏目调研：每个栏目的篇数、固定种子随机抽样的标题（CSV），标好要 / 不要后再运行一次算占比",
+    )
+    _common(p)
+    _fetch_opts(p)
+    p.add_argument("--sample", type=int, default=20, help="每个栏目抽几篇（默认 20）")
+    p.add_argument(
+        "--seed", type=int, default=2026, help="随机种子（默认 2026，同一种子结果可复现）"
+    )
+    p.add_argument(
+        "--csv",
+        type=Path,
+        help="抽样表路径（默认 output/sections/<站点>.csv；output/ 不进仓库）",
+    )
+    p.add_argument(
+        "--resample",
+        action="store_true",
+        help="重新抽样（已经标过的按网址保留）；不加时抽样表已存在就只读标记、算占比",
+    )
+    p.add_argument(
+        "--fetch",
+        type=int,
+        default=0,
+        metavar="N",
+        help="先随机抓 N 篇还没判定栏目的页面再统计（走正常的限速和合规闸门）",
+    )
     p = stage("eval", "L2 评测：LLM 判断和人工判断的一致率")
     _common(p)
     p.add_argument("--file", type=Path, help="评测集（默认 config/eval/<site>.yaml）")
@@ -235,7 +272,24 @@ def stage_discover(args: argparse.Namespace, deps: Deps, site: config.SiteConfig
     )
     for e in s.errors:
         print(f"  ! {e}")
+    _print_sections(args, site, "discover")
     return EXIT_ATTENTION if s.errors else EXIT_OK
+
+
+def _print_sections(args: argparse.Namespace, site: config.SiteConfig, stage: str) -> None:
+    """按栏目配置推进 / 退回状态，打印一行（没有变化不打印）。"""
+    from qbkb import sections
+
+    conn = store.connect(args.db)
+    try:
+        st = sections.apply_sections(conn, site)
+    finally:
+        conn.close()
+    if st.unselected or st.reselected:
+        print(
+            f"[{stage}] {site.name}: 标为未选栏目 {st.unselected} 篇、"
+            f"栏目改成采集后回到流程 {st.reselected} 篇"
+        )
 
 
 def fetch_delay_overrides(delay: float | None, site: config.SiteConfig) -> dict[str, object]:
@@ -261,10 +315,15 @@ def fetch_in_process(args: argparse.Namespace, site_name: str) -> int:
 
     site = config.load_site(site_name, _cfg(args))
     overrides = fetch_delay_overrides(args.fetch_delay, site)
+    url_file: Path | None = getattr(args, "url_file", None)
+    urls = None
+    if url_file is not None:
+        urls = [u.strip() for u in url_file.read_text(encoding="utf-8").splitlines() if u.strip()]
     s = run_fetch(
         site,
         args.db,
         args.raw_dir,
+        urls=urls,
         limit=args.limit,
         log_level="INFO" if args.verbose else "WARNING",
         settings_overrides=overrides,
@@ -284,6 +343,8 @@ def fetch_in_subprocess(args: argparse.Namespace, site_name: str) -> int:
         cmd += ["--limit", str(args.limit)]
     if args.fetch_delay is not None:
         cmd += ["--fetch-delay", str(args.fetch_delay)]
+    if getattr(args, "url_file", None) is not None:
+        cmd += ["--url-file", str(args.url_file)]
     if args.verbose:
         cmd.append("-v")
     if args.config_dir:
@@ -303,9 +364,35 @@ def stage_extract(args: argparse.Namespace, site: config.SiteConfig) -> int:
     finally:
         conn.close()
     print(f"[extract] {site.name}: 抽取 {s.extracted}、失败 {s.failed}、质检提示 {len(s.flagged)}")
+    if s.legacy or s.backfilled:
+        print(
+            f"  v1 老数据：重新抽取 {s.legacy} 篇（按 v2 规则判定栏目后进入流程），"
+            f"已翻译 / 已发布的补记栏目 {s.backfilled} 篇"
+        )
     for url, issues in s.flagged.items():
         print(f"  ? {url}：{'；'.join(issues)}")
-    return EXIT_ATTENTION if s.failed else EXIT_OK  # 质检提示只是提示，不算
+    if s.sections.unselected or s.sections.reselected:
+        print(
+            f"  栏目：标为未选栏目 {s.sections.unselected} 篇、"
+            f"栏目改成采集后回到流程 {s.sections.reselected} 篇"
+        )
+    _print_new_sections(s.new, site)
+    # 质检提示只是提示，不算；新栏目要人确认，算"需要处理"
+    return EXIT_ATTENTION if s.failed or s.new else EXIT_OK
+
+
+def _print_new_sections(new: Sequence[object], site: config.SiteConfig) -> None:
+    from qbkb.sections import NewSection
+
+    items = [n for n in new if isinstance(n, NewSection)]
+    if not items:
+        return
+    print(
+        f"  ! 发现 {len(items)} 个配置里没有的栏目（只记录，不采集；确认后加进 "
+        f"config/sites/{site.name}.yaml 的 sections）："
+    )
+    for n in items:
+        print(f"    {n.label}：{n.count} 篇，例如 {n.example}")
 
 
 def _make_scorer(args: argparse.Namespace, deps: Deps) -> Scorer:
@@ -476,9 +563,20 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
 
     if getattr(args, "titles", False):
         return stage_titles(args, deps, site)
+    from qbkb import sections
+
     conn = store.connect(args.db)
     try:
-        urls = store.list_by_status(conn, Status.FILTERED, site.name)
+        rules = sections.load_section_rules(site)
+        sections.apply_sections(conn, site, rules)
+        urls = sections.translatable(conn, site, rules)
+        if rules.enabled and not any(s.collect for s in rules.sections):
+            print(
+                f"[translate] {site.name}: 还没有勾选任何采集栏目"
+                "（sections 的 collect 都是 false），"
+                f"不翻译新文章。用 qbkb sections --site {site.name} 调研后在 "
+                f"config/sites/{site.name}.yaml 里勾选"
+            )
         if args.retry_rejected or getattr(args, "recheck", False):
             urls = sorted(urls + store.list_by_status(conn, Status.NEEDS_REVIEW, site.name))
         if getattr(args, "recheck", False):
@@ -587,7 +685,7 @@ def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
     for e in s.failed:
         print(f"  ! {e}")
     for url in s.requeued:
-        print(f"  ! {url}：缺译文，已退回 filtered，下次 translate 重翻")
+        print(f"  ! {url}：缺译文，已退回 extracted，下次 translate 重翻")
     print(f"  索引：{out / export.INDEX_NAME}")
     # 图片失败不算：原链接保留了，外站图片按规则本来就不下载
     return EXIT_ATTENTION if s.failed or s.requeued else EXIT_OK
@@ -604,6 +702,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"共 {total} 篇" + (f"（站点 {args.site}）" if args.site else ""))
         for st in Status:
             print(f"  {st.value:<13}{counts.get(st, 0):>6}")
+        _status_sections(conn, args)
         for st, label in ((Status.NEEDS_REVIEW, "需要人工复查"), (Status.FAILED, "失败")):
             rows = store.list_rows(conn, [st], args.site)
             if not rows:
@@ -614,6 +713,124 @@ def cmd_status(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     return EXIT_OK
+
+
+def _status_sections(conn: sqlite3.Connection, args: argparse.Namespace) -> None:
+    """status 里每个站点的栏目统计和新栏目提醒。"""
+    from qbkb import sections
+
+    for site in _sites(args):
+        rules = sections.load_section_rules(site)
+        if not rules.enabled:
+            continue
+        rows = store.site_rows(conn, site.name)
+        per: dict[str | None, int] = {}
+        pending = 0
+        for r in rows:
+            if r["section_key"] is None and rules.by_url(r["url"]) is None:
+                pending += 1
+                continue
+            sec = rules.classify(str(r["url"]), r["section_key"])
+            per[None if sec is None else sec.id] = per.get(None if sec is None else sec.id, 0) + 1
+        print(f"栏目（站点 {site.name}；还没判定栏目的 {pending} 篇不计）：")
+        for sec in rules.sections:
+            mark = "采集" if sec.collect else "不采集"
+            note = f"，{sec.status}" if sec.status else ""
+            print(f"  {sec.name}（{sec.id}）：{per.get(sec.id, 0)} 篇，{mark}{note}")
+        new = sections.new_sections(conn, site, rules)
+        if new:
+            print(f"  ! 新栏目（配置里没有，只记录不采集，{len(new)} 个）：")
+            for n in new:
+                print(f"    {n.label}：{n.count} 篇，例如 {n.example}")
+
+
+def cmd_sections(args: argparse.Namespace, deps: Deps) -> int:
+    """栏目调研（design.md 4.9）：数篇数、抽样、读人工标记、算占比。不调用 LLM。"""
+    from qbkb import sections
+    from qbkb.sections import survey
+
+    if not args.site:
+        print("错误：qbkb sections 要用 --site 指定站点", file=sys.stderr)
+        return EXIT_ERROR
+    site = config.load_site(args.site, _cfg(args))
+    rules = sections.load_section_rules(site)
+    if not rules.enabled:
+        print(f"站点 {site.name} 的配置里没有 sections，不分栏目（全部采集）")
+        return EXIT_OK
+    code = EXIT_OK
+    if args.fetch > 0:
+        config.ensure_allowed(site)
+        conn = store.connect(args.db)
+        try:
+            urls = survey.pick_unclassified(conn, site.name, rules, args.fetch, args.seed)
+        finally:
+            conn.close()
+        if urls:
+            csv_dir = (args.csv or Path("output") / "sections" / f"{site.name}.csv").parent
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            url_file = csv_dir / f"{site.name}-fetch-urls.txt"
+            url_file.write_text("\n".join(urls) + "\n", encoding="utf-8")
+            print(
+                f"[sections] {site.name}: 随机抓 {len(urls)} 篇还没判定栏目的页面"
+                f"（种子 {args.seed}）"
+            )
+            args.url_file = url_file
+            args.limit = None
+            for name in ("fetch", "extract"):
+                c = _run_stage(name, args, deps, site)
+                if c == EXIT_ERROR:
+                    return c
+                code = max(code, c)
+    conn = store.connect(args.db)
+    try:
+        tallies = survey.tally(conn, site.name, rules)
+    finally:
+        conn.close()
+    path: Path = args.csv or Path("output") / "sections" / f"{site.name}.csv"
+    old = survey.read_csv(path) if path.is_file() else []
+    if old and not args.resample:
+        rows = old
+        print(f"[sections] 读取已有的抽样表 {path}（重新抽样加 --resample，已标的会保留）")
+    else:
+        n = survey.write_samples(path, tallies, args.sample, args.seed, old)
+        rows = survey.read_csv(path)
+        print(
+            f"[sections] 抽样表写到 {path}（{n} 篇，每栏 {args.sample} 篇、"
+            f"不超过 {survey.FULL_BELOW} 篇的栏目列全部，种子 {args.seed}）。"
+            "在「要不要」一列填 要 / 不要，再运行一次同一条命令算占比"
+        )
+    sampled: dict[str, int] = {}
+    for r in rows:
+        sampled[r.get("栏目id", "")] = sampled.get(r.get("栏目id", ""), 0) + 1
+    vs, bad = survey.verdicts(rows)
+    summary = survey.summary_rows(tallies, vs, sampled)
+    print("栏目 | 采集 | 已判定 | 估计（未抓取） | 抽样 | 已标 | 要 | 占比 | 结论")
+    for r in summary:
+        sid, name, collect, known, est, smp, marked, yes, _no, ratio, verdict = r
+        print(
+            f"  {name}（{sid}）| {collect} | {known} | {est} | {smp} | {marked} | {yes} | "
+            f"{ratio or '—'} | {verdict}"
+        )
+    print(
+        "  已判定 = 抓到页面、按规则定了栏目（或网址前缀就能定）的实际篇数；"
+        "估计 = 没抓页面、按网址猜的，只供参考"
+    )
+    for b in bad:
+        print(f"  ? 看不懂的标记：{b}（填 要 / 不要）")
+    out = path.with_name(path.stem + "-summary.csv")
+    survey.write_summary(out, summary)
+    print(f"[sections] 占比汇总写到 {out}")
+    done = [v for v in vs.values() if v.marked and v.section in {s.id for s in rules.sections}]
+    if done:
+        print("调研记录（确认后抄进站点配置对应栏目的 survey，并填上判断人）：")
+        today = time.strftime("%Y-%m-%d")
+        for v in done:
+            ratio = "null" if v.ratio is None else f"{v.ratio:.2f}"
+            print(
+                f"  {v.section}: survey: {{sampled: {v.marked}, wanted: {v.yes}, "
+                f"ratio: {ratio}, date: {today}, by: 填判断人}}"
+            )
+    return code
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -678,7 +895,7 @@ def cmd_stages(args: argparse.Namespace, deps: Deps) -> int:
     """单个阶段，或 run（按顺序跑全部阶段）。
 
     run 里某个阶段因为额度 / 后端不可用停下时，后面的阶段照常处理已经就绪的文章
-    （比如打分额度用完，已经 filtered 的文章照样翻译、导出），最后用对应的退出码结束。
+    （比如翻译额度用完，已经翻好的文章照样导出），最后用对应的退出码结束。
     """
     stages = [s for s in STAGES if s not in args.skip] if args.command == "run" else [args.command]
     seen: set[int] = set()
@@ -699,7 +916,7 @@ def cmd_stages(args: argparse.Namespace, deps: Deps) -> int:
     if EXIT_UNAVAILABLE in seen:
         print(f"后端暂时不可用。{RESUME_HINT}")
     if EXIT_ATTENTION in seen:
-        print("有文章需要人工处理（失败、需复查或退回重翻），用 qbkb status 查看。")
+        print("有文章需要人工处理（失败、需复查、退回重翻或新栏目），用 qbkb status 查看。")
     return final
 
 
@@ -724,6 +941,8 @@ def main(argv: Sequence[str] | None = None, *, deps: Deps | None = None) -> int:
             return cmd_status(args)
         if args.command == "eval":
             return cmd_eval(args)
+        if args.command == "sections":
+            return cmd_sections(args, deps)
         if args.command == "console":
             from qbkb.console.server import run_console
 

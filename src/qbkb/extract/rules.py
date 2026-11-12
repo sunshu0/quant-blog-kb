@@ -117,6 +117,8 @@ class ExtractRules:
     title_strip: re.Pattern[str] | None = None
     drop_text: tuple[re.Pattern[str], ...] = ()
     date_formats: tuple[str, ...] = DEFAULT_DATE_FORMATS
+    # 模板没给出作者时、用 trafilatura 猜之前试的选择器（例如博客页的作者卡片）
+    author_fallback: tuple[FieldRule, ...] = ()
 
 
 def _err(path: str, msg: str) -> ValueError:
@@ -259,4 +261,7 @@ def load_rules(site: SiteConfig) -> ExtractRules:
         title_strip=_regex(raw.get("title_strip"), "title_strip"),
         drop_text=_regexes(raw.get("drop_text"), "drop_text"),
         date_formats=DEFAULT_DATE_FORMATS if formats is None else tuple(formats),
+        author_fallback=tuple(
+            FieldRule(sel) for sel in _selectors(raw.get("author_fallback"), "author_fallback")
+        ),
     )

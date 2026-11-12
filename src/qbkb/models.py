@@ -14,11 +14,17 @@ from typing import Protocol
 
 
 class Status(StrEnum):
-    """一篇文章在流程里的状态（见 design.md 第 2、5 节）。"""
+    """一篇文章在流程里的状态（见 design.md 第 2、5 节）。
+
+    v2 默认流程：discovered → fetched → extracted → translated → published。
+    filtered / skipped 只由可选的 `qbkb filter`（加工阶段）产生，不再是必经状态；
+    unselected 是"不在采集的栏目里"：保留记录、不翻译，栏目改成采集后自动回到流程。
+    """
 
     DISCOVERED = "discovered"
     FETCHED = "fetched"
     EXTRACTED = "extracted"
+    UNSELECTED = "unselected"  # 未选栏目（v2）
     FILTERED = "filtered"
     SKIPPED = "skipped"
     TRANSLATED = "translated"

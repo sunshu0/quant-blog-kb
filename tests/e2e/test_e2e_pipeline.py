@@ -2,7 +2,8 @@
 
 - 大部分用例注入 sitemap 下载、fetch 和图片下载（不起 Scrapy，快）；
 - 最后一个用例起本机 HTTP 服务，真跑一次 `qbkb run`（fetch 在子进程里跑 Scrapy）。
-FakeScorer + FakeTranslator，不花任何额度。
+FakeTranslator，不花任何额度；默认流程不打分（注入的 FakeScorer 只用来确认它没被调用）。
+构造站点只采集"独立文章"栏目：播客那篇和 A Moment in Macro 那篇是未选栏目。
 """
 
 from __future__ import annotations
@@ -26,7 +27,12 @@ from qbkb.models import Status
 from qbkb.translate import FakeTranslator
 
 BASE = "http://site.test"
-KEPT = {"/insights/carry-basics": "2024-05-07", "/insights/momentum-method": "2023-06-12"}
+KEPT = {
+    "/insights/carry-basics": "2024-05-07",
+    "/insights/momentum-method": "2023-06-12",
+    "/insights/short-clip": "2025-01-03",  # 正文太短只标记（qc_issues），照样翻译
+}
+WITH_IMAGES = ("/insights/carry-basics", "/insights/momentum-method")
 
 
 class Env:
@@ -128,12 +134,22 @@ def test_full_pipeline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> No
     assert env.statuses() == {
         "/insights/carry-basics": Status.PUBLISHED,
         "/insights/momentum-method": Status.PUBLISHED,
-        "/insights/climate-note": Status.SKIPPED,  # L2：ESG/气候
-        "/insights/a-moment-in-macro/rates-week": Status.SKIPPED,  # L1：排除栏目
-        "/insights/short-clip": Status.SKIPPED,  # L1：太短
+        "/insights/short-clip": Status.PUBLISHED,
+        "/insights/climate-note": Status.UNSELECTED,  # 播客栏目，不采集
+        "/insights/a-moment-in-macro/rates-week": Status.UNSELECTED,  # 网址前缀定栏目，不抓
     }
     out = capsys.readouterr().out
-    assert "[discover] local: 新 5" in out and "[export] local: 发布 2" in out
+    assert "[discover] local: 新 5" in out and "[export] local: 发布 3" in out
+    assert "[filter]" not in out  # 默认流程没有打分
+    assert not any("rates-week" in p.name for p in env.raw.rglob("*.html"))
+    conn = store.connect(env.db)
+    rows = {urlsplit(r["url"]).path: r for r in store.site_rows(conn, SITE)}
+    conn.close()
+    assert rows["/insights/carry-basics"]["section"] == "article"
+    assert rows["/insights/climate-note"]["section"] == "a-sustainable-future"
+    assert rows["/insights/a-moment-in-macro/rates-week"]["section"] == "a-moment-in-macro"
+    assert "正文太短" in rows["/insights/short-clip"]["qc_issues"]
+    assert all(r["value_score"] is None for r in rows.values())
 
     for path, date in KEPT.items():
         main = env.out / SITE / md_name(path)
@@ -142,30 +158,32 @@ def test_full_pipeline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> No
         assert fm["source_url"] == BASE + path
         assert fm["published"] == date
         assert fm["firm"] == "Example Capital" and fm["author"] == "Test Author"
-        assert fm["translator"] == "fake" and fm["rubric_version"] == "v1@fake"
+        assert fm["translator"] == "fake" and fm["rubric_version"] is None
         assert str(fm["title_zh"]).startswith("【译】")
-        assert fm["value_score"] == 8.0 and fm["category"]
+        assert fm["value_score"] is None and fm["section"] == "article"
         assert "> 来源：Example Capital" in text
         assert "趋势跟踪（trend following）" in text  # 术语第一次出现附英文
-        assert "](images/" in text  # 图片本地化
         assert "---\n\n## 【译】Important information" in text  # 版权声明（译文）保留
         bilingual = (env.out / "bilingual" / SITE / md_name(path)).read_text(encoding="utf-8")
         assert "Paragraph 0 about" in bilingual and "【译】Paragraph 0 about" in bilingual
-        assert f"](../../{SITE}/images/" in bilingual
+        if path in WITH_IMAGES:
+            assert "](images/" in text  # 图片本地化
+            assert f"](../../{SITE}/images/" in bilingual
 
     images = sorted(p.name for p in (env.out / SITE / "images").iterdir())
     assert len(images) == 2
     assert all((env.out / SITE / "images" / n).read_bytes() == PNG for n in images)
 
     index = (env.out / "index.md").read_text(encoding="utf-8")
-    assert "共 2 篇" in index
+    assert "共 3 篇" in index and "## 独立文章（ARTICLE，无系列）（3）" in index
     for path in KEPT:
         assert f"({SITE}/{md_name(path)})" in index
         assert f"(bilingual/{SITE}/{md_name(path)})" in index
 
-    assert cli.main(["status", "--db", str(env.db)]) == 0
+    assert cli.main(["status", "--db", str(env.db), "--config-dir", str(env.cfg)]) == 0
     status = capsys.readouterr().out
-    assert "published         2" in status and "skipped           3" in status
+    assert "published         3" in status and "unselected        2" in status
+    assert "独立文章（ARTICLE，无系列）（article）：3 篇，采集" in status
 
 
 def test_idempotent(tmp_path: Path) -> None:
@@ -197,7 +215,7 @@ def test_resume_after_translation_quota(tmp_path: Path, capsys: pytest.CaptureFi
     assert "额度用完" in out and "下次运行同一条命令会从中断处接着跑" in out
     states = env.statuses()
     assert Status.PUBLISHED in states.values()  # 翻完的那篇照样导出
-    assert Status.FILTERED in states.values()
+    assert Status.EXTRACTED in states.values()
 
     second = FakeTranslator()
     assert cli.main(env.argv(), deps=env.deps(translator=second)) == cli.EXIT_OK
@@ -213,15 +231,38 @@ def test_resume_after_translation_quota(tmp_path: Path, capsys: pytest.CaptureFi
     }
 
 
-def test_resume_after_scoring_quota(tmp_path: Path) -> None:
+def test_run_never_scores(tmp_path: Path) -> None:
+    """C1：run 不调用打分后端，打分额度为 0 也照常跑完。"""
     env = Env(tmp_path)
-    assert cli.main(env.argv(), deps=env.deps(FakeScorer(quota_calls=1))) == cli.EXIT_QUOTA
-    assert list(env.statuses().values()).count(Status.PUBLISHED) == 1
-    assert Status.EXTRACTED in env.statuses().values()
-    scorer = FakeScorer()
+    scorer = FakeScorer(quota_calls=0)
     assert cli.main(env.argv(), deps=env.deps(scorer)) == cli.EXIT_OK
-    assert len(scorer.calls) == 2  # 只打剩下的两篇（另两篇被 L1 筛掉，不打分）
-    assert list(env.statuses().values()).count(Status.PUBLISHED) == 2
+    assert scorer.calls == []
+    assert list(env.statuses().values()).count(Status.PUBLISHED) == 3
+
+
+def test_selecting_a_section_later_translates_without_refetch(tmp_path: Path) -> None:
+    """勾选一个原来不采集的栏目：下次 run 直接翻译已经抽取过的文章，不重抓。"""
+    env = Env(tmp_path)
+    assert cli.main(env.argv(), deps=env.deps()) == cli.EXIT_OK
+    path = env.cfg / "sites" / f"{SITE}.yaml"
+    site = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for sec in site["sections"]["list"]:
+        if sec["id"] == "a-sustainable-future":
+            sec["collect"] = True
+    path.write_text(yaml.safe_dump(site, allow_unicode=True), encoding="utf-8")
+    fetched: list[str] = []
+
+    def no_refetch(args: argparse.Namespace, site_name: str) -> int:
+        conn = store.connect(args.db)
+        fetched.extend(store.list_by_status(conn, Status.DISCOVERED, site_name))
+        conn.close()
+        return 0
+
+    deps = env.deps()
+    deps.fetch_runner = no_refetch
+    assert cli.main(env.argv(), deps=deps) == cli.EXIT_OK
+    assert fetched == []
+    assert env.statuses()["/insights/climate-note"] == Status.PUBLISHED
 
 
 def _db_rows(db: Path) -> list[sqlite3.Row]:
@@ -237,15 +278,16 @@ def test_real_fetch_against_local_server(tmp_path: Path) -> None:
     with serve() as (base, hits):
         env = Env(tmp_path, base)
         code = cli.main(
-            env.argv("--scorer", "fake", "--translator", "fake", "--fetch-delay", "0"),
+            env.argv("--translator", "fake", "--fetch-delay", "0"),
         )
         assert code == cli.EXIT_OK
     rows = _db_rows(env.db)
-    assert {r["status"] for r in rows} == {Status.PUBLISHED, Status.SKIPPED}
-    assert sum(r["status"] == Status.PUBLISHED for r in rows) == 2
-    assert all(Path(r["raw_path"]).is_file() for r in rows)
+    assert {r["status"] for r in rows} == {Status.PUBLISHED, Status.UNSELECTED}
+    assert sum(r["status"] == Status.PUBLISHED for r in rows) == 3
+    assert all(Path(r["raw_path"]).is_file() for r in rows if r["raw_path"])
     for p in PAGES:
-        assert p.path in hits.paths
+        # A Moment in Macro 按网址前缀就知道不采集，不抓
+        assert (p.path in hits.paths) == ("a-moment-in-macro" not in p.path), p.path
     assert "/robots.txt" in hits.paths and "/sitemap.xml" in hits.paths
     images = [p for p in hits.paths if p.startswith("/files/")]
     assert sorted(images) == ["/files/carry-fig1.png", "/files/momentum-fig1.png"]

@@ -45,16 +45,16 @@ EXIT_MESSAGES: dict[int, str] = {
     EXIT_ATTENTION: "跑完了，但有文章需要处理：看「待复查」页（失败的原因、需要重翻的文章）。",
     EXIT_STOPPED: "已停止：进度已经保存，下次运行会接着跑。",
 }
-STAGES = ("discover", "fetch", "extract", "filter", "translate", "export")
+# 和 cli.STAGES 一致（v2 默认流程没有打分）
+STAGES = ("discover", "fetch", "extract", "translate", "export")
 STAGE_NAMES = {
     "discover": "发现新文章",
     "fetch": "抓取",
-    "extract": "抽取正文",
-    "filter": "筛选打分",
+    "extract": "抽取正文、判定栏目",
     "translate": "翻译",
     "export": "导出 Markdown",
 }
-_STAGE_LINE = re.compile(r"^\[(discover|fetch|extract|filter|translate|export)\]")
+_STAGE_LINE = re.compile(r"^\[(discover|fetch|extract|translate|export)\]")
 _QUOTA_LINE = re.compile(r"本月额度：已用 (\d+) / 上限 (\d+) 字符（剩余 (\d+)）")
 _PUBLISHED_LINE = re.compile(r"^\[export\] \S+: 发布 (\d+)（内容没变 (\d+)）")
 MAX_LINES = 5000
@@ -99,7 +99,7 @@ def base_args(ws: Workspace) -> list[str]:
 
 def backend_args(ws: Workspace) -> list[str]:
     if ws.demo:
-        return ["--scorer", "fake", "--translator", "demo"]
+        return ["--translator", "demo"]
     return []
 
 

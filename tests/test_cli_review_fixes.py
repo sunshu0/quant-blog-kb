@@ -38,20 +38,19 @@ def test_requeue_exits_attention(tmp_path: Path) -> None:
     store.upsert_discovered(conn, DiscoveredUrl(URL, "man", "x"))
     store.replace_segments(conn, URL, [Segment(0, "<p>A momentum note.</p>")])
     store.set_status(conn, URL, Status.FILTERED, title="T")
-    # 用和 config/glossary.yaml 不同的术语表翻：导出时查不到译文，退回 filtered
+    # 用和 config/glossary.yaml 不同的术语表翻：导出时查不到译文，退回 extracted
     translate_article(conn, URL, FakeTranslator(), Glossary("0", {"momentum": "势头"}))
     conn.close()
     argv = ["run", "--site", "man", "--db", str(db), "--out", str(tmp_path / "o"), "--no-images"]
-    skips = [
-        x for s in ("discover", "fetch", "extract", "filter", "translate") for x in ("--skip", s)
-    ]
+    skips = [x for s in ("discover", "fetch", "extract", "translate") for x in ("--skip", s)]
     assert cli.main([*argv, *skips]) == cli.EXIT_ATTENTION
     conn = store.connect(db)
     row = store.get_article(conn, URL)
     conn.close()
-    assert row is not None and row["status"] == Status.FILTERED
+    assert row is not None and row["status"] == Status.EXTRACTED
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_quota_wins_over_attention(tmp_path: Path) -> None:
     db = tmp_path / "s.db"
     conn = store.connect(db)
@@ -65,7 +64,7 @@ def test_quota_wins_over_attention(tmp_path: Path) -> None:
     conn.close()
     deps = cli.Deps(translator=FakeTranslator(quota_chars=len("<p>Text a.</p>")))
     argv = ["run", "--site", "man", "--db", str(db), "--out", str(tmp_path / "o"), "--no-images"]
-    skips = [x for s in ("discover", "fetch", "extract", "filter") for x in ("--skip", s)]
+    skips = [x for s in ("discover", "fetch", "extract") for x in ("--skip", s)]
     assert cli.main([*argv, *skips], deps=deps) == cli.EXIT_QUOTA
 
 

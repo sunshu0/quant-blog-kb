@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS articles (
   translated_at  TEXT,
   md_path        TEXT,
   qc_issues      TEXT,     -- extract 质检问题，JSON 数组；没有问题为 NULL
+  section_key    TEXT,     -- 页面上读到的栏目标识（如 "ARTICLE | VIEWS FROM THE FLOOR"、"url:/insights/x"）；
+                           -- "" 表示读不到；NULL 表示还没按 v2 规则判定过（老数据）
+  section        TEXT,     -- 对应站点配置 sections 里的栏目 id；NULL 表示配置里没有这个栏目
   error          TEXT,
   retries        INTEGER NOT NULL DEFAULT 0,
   updated_at     TEXT NOT NULL

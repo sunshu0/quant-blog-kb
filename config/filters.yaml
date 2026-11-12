@@ -12,10 +12,12 @@ exclude_categories:
   - ESG/气候
   - 公司文化/软文
 
+#
+# v2（2026-11-12）：这些规则只用于可选的 `qbkb filter`（加工阶段），不在 `qbkb run`、控制台和
+# 每天自动更新里。原来按系列排除的 /insights/a-moment-in-macro/ 改成"不选这个栏目"
+# （config/sites/man.yaml 的 sections）。
 sites:
   man:
-    exclude_prefixes:
-      - /insights/a-moment-in-macro/
     # 只数正文（不含文末的版权声明和重要信息）的英文单词
     min_words: 300
 

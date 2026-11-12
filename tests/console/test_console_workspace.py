@@ -82,7 +82,9 @@ def test_mask_never_returns_the_key() -> None:
 def test_resolve_mode() -> None:
     both = {DEEPL_KEY: DEEPL, LLM_KEY: LLM}
     assert resolve_mode("auto", both) == "real"
-    assert resolve_mode("auto", {DEEPL_KEY: DEEPL, LLM_KEY: ""}) == "demo"
+    # v2：默认流程不打分，只要翻译的 key 就是真实模式
+    assert resolve_mode("auto", {DEEPL_KEY: DEEPL, LLM_KEY: ""}) == "real"
+    assert resolve_mode("auto", {DEEPL_KEY: "", LLM_KEY: LLM}) == "demo"
     assert resolve_mode("demo", both) == "demo"
     assert resolve_mode("real", {DEEPL_KEY: "", LLM_KEY: ""}) == "real"
 

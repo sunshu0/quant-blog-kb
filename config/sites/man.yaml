@@ -60,6 +60,10 @@ extract:
       remove:
         - .d-md-none # 标题里给手机看的重复文字
     - "#insights-important-information-section .accordion-body"
+  # 模板没给出作者时用（A Moment in Macro 博客页的作者卡片；不写的话 trafilatura 会把
+  # "About the author" 小标题和职位一起抽成作者）
+  author_fallback:
+    - "#insights-blog-author-grid .team-card h4"
   templates:
     # /insights/ 下的文章、视频、播客共用一个 Drupal 模板
     - name: insight
@@ -74,3 +78,86 @@ extract:
       body:
         - "#article-intro-blurb-text .paragraph-body"
         - "#article-body-text .digital-article"
+
+# 栏目（design.md 4.8）。采集阶段只按这里的 collect 决定翻译哪些文章，不做任何价值判断。
+# 调研依据：D:\dev\qbkb_smoke\research-v2.md 第 1 节（58 页样本 + sitemap 的网址计数，2026-11-12）。
+#
+# collect 现在全部是 false、status 是"待调研"：用户还没有勾选栏目。全部 true 的话，每天的自动
+# 更新会把约 1000 篇全部送去翻译（估计 1500 万字符以上，远超免费额度），而且没法撤回；全部 false
+# 时最多是"抓了、没翻译"，勾选后下一次运行自动补上（不重抓）。调研用 `qbkb sections --site man`。
+# 勾选后把 status 改成"已调研"，survey 填上调研记录。
+sections:
+  # Man 的文章网址是平铺的 /insights/<slug>，看不出栏目：栏目 = tagline 的"类型 + 系列名"。
+  # tagline 格式"类型 | 时长 | 系列名"，时长和系列名都可能没有：
+  #   "ARTICLE | 4 MIN | VIEWS FROM THE FLOOR" → "ARTICLE | VIEWS FROM THE FLOOR"
+  #   "VIDEO | 7 MIN" → "VIDEO"
+  page_key:
+    selector: "#article-tagline-text p"
+    pattern: '^\s*(?P<type>[^|]+?)\s*(?:\|\s*(?P<length>\d+\s*MINS?)\s*)?(?:\|\s*(?P<series>[^|]+?)\s*)?$'
+    parts: [type, series]
+  # dataLayer 的 contentType 和 tagline 的类型有不一致的（webinar-sfdr-explained 等），
+  # 不一致时记一条质量提示，以 tagline 为准
+  cross_check:
+    pattern: '"contentType"\s*:\s*"([^"]+)"'
+    part: type
+    label: dataLayer contentType
+    # 播客页的 contentType 多数写的是 Article（样本 5 篇里 4 篇），不算不一致
+    equivalent: {PODCAST: [Article]}
+  # 每个栏目：id（不要改，状态库里记的是它）、name、url_prefix 或 key（二选一）、collect、
+  # status、survey（调研记录）、estimate（没抓页面时按网址最后一段估计篇数，只用于调研）。
+  # 括号里的篇数是调研时按 sitemap 网址估计的，不是实际篇数。
+  list:
+    - id: a-moment-in-macro
+      name: A Moment in Macro（宏观博客，模板不同）
+      url_prefix: /insights/a-moment-in-macro
+      collect: false
+      status: 待调研 # 约 5 篇；v1 里按"宏观周评"整栏排除
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+    - id: article
+      name: 独立文章（ARTICLE，无系列）
+      key: ARTICLE
+      collect: false
+      status: 待调研 # 约 350–450 篇，量化方法论类文章最集中的地方
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+    - id: views-from-the-floor
+      name: Views From the Floor（每周市场评论）
+      key: ARTICLE | VIEWS FROM THE FLOOR
+      collect: false
+      status: 待调研 # 约 289 篇
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+      estimate: ['^views-from-the-floor']
+    - id: the-road-ahead
+      name: The Road Ahead
+      key: ARTICLE | THE ROAD AHEAD
+      collect: false
+      status: 待调研 # 约 53 篇
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+      estimate: ['road-ahead']
+    - id: the-early-view
+      name: The Early View
+      key: ARTICLE | THE EARLY VIEW
+      collect: false
+      status: 待调研 # 约 57 篇
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+      estimate: ['early-view']
+    - id: a-sustainable-future
+      name: A Sustainable Future（播客）
+      key: PODCAST | A SUSTAINABLE FUTURE
+      collect: false
+      status: 待调研 # 约 73 篇
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+      estimate: ['^ri-podcast']
+    - id: podcast
+      name: 其他播客（PODCAST，无系列）
+      key: PODCAST
+      collect: false
+      status: 待调研 # 约 9 篇（如 Long Story Short；它们若带系列名，会作为新栏目提醒）
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+      estimate: ['podcast']
+    - id: video
+      name: 视频（VIDEO，无系列，含 AHL Explains）
+      key: VIDEO
+      collect: false
+      status: 待调研 # 约 60–100 篇
+      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+      estimate: ['^ahl-explains', 'video', 'webinar']

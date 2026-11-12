@@ -270,7 +270,9 @@ def test_articles_and_article_and_images(served: tuple[App, httpx.Client], tmp_p
     assert toc["groups"][0]["articles"][0]["title"] == "标题<script>"  # 页面用 textContent 显示
     a = client.get("/api/article", params={"url": url, "view": "zh"}).json()
     assert "<script" not in a["html"] and 'src="/out/demo/images/a.png"' in a["html"]
-    assert a["score"] == 8.0 and a["category"] == "基础概念" and a["source_url"] == url
+    # v2：不显示打分；没有栏目的老数据按类别分组，详情里栏目为空
+    assert "score" not in a and a["section"] is None and a["source_url"] == url
+    assert "score" not in toc["groups"][0]["articles"][0]
     bi = client.get("/api/article", params={"url": url, "view": "bi"}).json()
     assert "English" in bi["html"]
     img = client.get("/out/demo/images/a.png")

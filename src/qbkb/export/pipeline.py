@@ -7,7 +7,7 @@ import dataclasses
 import logging
 import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +30,7 @@ from qbkb.export.markdown import (
     url_allowed,
 )
 from qbkb.models import Status
+from qbkb.sections import load_section_rules
 from qbkb.translate import Glossary, lookup_translation, translated_title
 
 log = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ class ImageFailure:
 class ExportStats:
     published: int = 0
     unchanged: int = 0  # 文件内容和上次一样，没有重写
-    requeued: list[str] = field(default_factory=list)  # 缺译文，退回 filtered 重新翻译
+    requeued: list[str] = field(default_factory=list)  # 缺译文，退回 extracted 重新翻译
     failed: list[str] = field(default_factory=list)
     images_downloaded: int = 0
     image_failures: list[ImageFailure] = field(default_factory=list)
@@ -144,7 +145,7 @@ def export_article(
     images: ImageFetcher | None,
     stats: ExportStats,
 ) -> Path | None:
-    """导出一篇。返回主文件路径；缺译文时退回 filtered 并返回 None。"""
+    """导出一篇。返回主文件路径；缺译文时退回 extracted 并返回 None。"""
     row = store.get_article(conn, url)
     if row is None:
         raise KeyError(url)
@@ -162,8 +163,8 @@ def export_article(
             missing += 1
         zh_html.append(tgt or "")
     if missing:
-        msg = f"{FAIL_PREFIX}缺 {missing} 段译文（术语表改过？），退回 filtered 重新翻译"
-        store.set_status(conn, url, Status.FILTERED, error=msg)
+        msg = f"{FAIL_PREFIX}缺 {missing} 段译文（术语表改过？），退回 extracted 重新翻译"
+        store.set_status(conn, url, Status.EXTRACTED, error=msg)
         stats.requeued.append(url)
         return None
 
@@ -201,6 +202,7 @@ def export_article(
         "author": row["author"],
         "published": row["published"],
         "source_url": checked_source_url(url),
+        "section": row["section"],
         "category": category,
         "value_score": None if score is None else float(score),
         "rubric_version": row["rubric_version"],
@@ -279,7 +281,10 @@ def run(
             stats.failed.append(f"{url}：{msg}")
             store.record_failure(conn, url, msg)
     _record_image_failures(out_dir, site.name, stats.image_failures)
-    write_index(conn, out_dir, categories)
+    sections = load_section_rules(site).sections
+    names = {s.id: s.name for s in sections}
+    order = [s.name for s in sections] + list(categories)
+    write_index(conn, out_dir, order, names)
     return stats
 
 
@@ -298,17 +303,30 @@ def _index_entry(row: sqlite3.Row) -> str:
     )
 
 
-def build_index(rows: Sequence[sqlite3.Row], categories: Sequence[str] = ()) -> str:
-    """index.md 的内容：按类别分组（先按 filters.yaml 的顺序，再是其他类别），组内按日期新到旧。"""
+def _group(row: sqlite3.Row, section_names: Mapping[str, str]) -> str:
+    """分组：v2 按栏目（站点配置里的栏目名）；没有栏目的老数据按 v1 的打分类别。"""
+    section = row["section"]
+    if section:
+        return section_names.get(str(section), str(section))
+    return str(row["category"] or UNCATEGORIZED)
+
+
+def build_index(
+    rows: Sequence[sqlite3.Row],
+    categories: Sequence[str] = (),
+    section_names: Mapping[str, str] | None = None,
+) -> str:
+    """index.md 的内容：按栏目分组（老数据按类别；先按给定顺序，再是其他），组内按日期新到旧。"""
+    names = section_names or {}
     groups: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        groups.setdefault(str(row["category"] or UNCATEGORIZED), []).append(row)
-    order = [c for c in categories if c in groups]
+        groups.setdefault(_group(row, names), []).append(row)
+    order = [c for c in dict.fromkeys(categories) if c in groups]
     order += sorted(c for c in groups if c not in order)
     lines = [
         "# 量化博客中文知识库",
         "",
-        f"共 {len(rows)} 篇，按类别分组。机器翻译，仅供内部学习参考。",
+        f"共 {len(rows)} 篇，按栏目分组。机器翻译，仅供内部学习参考。",
     ]
     for cat in order:
         items = sorted(groups[cat], key=lambda r: (str(r["published"] or ""), str(r["url"])))
@@ -317,8 +335,14 @@ def build_index(rows: Sequence[sqlite3.Row], categories: Sequence[str] = ()) -> 
     return "\n".join(lines) + "\n"
 
 
-def write_index(conn: sqlite3.Connection, out_dir: Path, categories: Sequence[str] = ()) -> Path:
+def write_index(
+    conn: sqlite3.Connection,
+    out_dir: Path,
+    categories: Sequence[str] = (),
+    section_names: Mapping[str, str] | None = None,
+) -> Path:
     """按状态库里全部已发布的文章（所有站点）重建 output/index.md。"""
     path = out_dir / INDEX_NAME
-    write_if_changed(path, build_index(store.list_rows(conn, [Status.PUBLISHED]), categories))
+    rows = store.list_rows(conn, [Status.PUBLISHED])
+    write_if_changed(path, build_index(rows, categories, section_names))
     return path

@@ -2,6 +2,7 @@
 
 - 版本：v0.1 初稿（2026-11-11）
 - 状态：已实现（Phase 0–2 和冒烟修复已合并；本地控制台见第 10 节）；第 0 节列出仍待决定的事项。
+- **v2（2026-11-12）**：按栏目采集、采集与筛选分开（老板反馈）。默认流程不再调用 LLM 打分，筛选改为人工选择栏目，见 D13 和 4.9。
 - 性质：面试小项目，同时作为"工程化 AI 工作流"的试点。
 
 ---
@@ -11,17 +12,18 @@
 | # | 事项 | 影响 | 当前状态 |
 |---|---|---|---|
 | D1 | **数据来源合规**：man.com 的条款要求自动抓取、建库需经书面许可（见第 3 节） | 决定抓哪里 | **已定**（2026-11-11/12）：本项目由公司安排，用户确认已获许可，man.com 可以使用；许可凭证由用户保管，不放进仓库。他人从公开仓库拷贝代码时不在该许可内（见 D12 演示模式） |
-| D2 | **L2 价值打分要用 LLM**，但翻译已定为只用免费机翻 | 筛选的第二层没有可用后端 | **已定**：用便宜的 LLM API **只做打分**（默认 DeepSeek，后端可插拔），只读标题和前 500 个单词。API key 由用户注册，放进 `.env`（见 4.4） |
+| D2 | **L2 价值打分要用 LLM**，但翻译已定为只用免费机翻 | 筛选的第二层没有可用后端 | **已定**：用便宜的 LLM API **只做打分**（默认 DeepSeek，后端可插拔），只读标题和前 500 个单词。API key 由用户注册，放进 `.env`（见 4.4）。**v2（2026-11-12）**：打分移出默认流程（爬虫里不用 LLM 筛选），代码保留为可选的 `qbkb filter` |
 | D3 | GitHub 仓库 | PR 协作流程的载体 | **已定**：`sunshu0/quant-blog-kb`，**公开（PUBLIC）**，目前是空仓库。因为是公开仓库，任何原文内容都不能提交（见 3.3） |
 | D5 | 黄金样本用什么 HTML | 公开仓库不能放原文 | **已定**：用**构造的 HTML** 提交进仓库（照抄页面结构，正文换成自己写的文字）；真实页面只在本地的 `tests/local_samples/` 里验证（见 7） |
 | D4 | 知识库的形式（飞书 / Notion / Git / 向量库） | 只影响最后一步"上传" | **待定**：用户向公司确认（2026-11-12）；在此之前输出 md 文件夹 |
-| D6 | **"有价值文章"的具体标准**：现行标准（`config/rubrics/v2.md`）没有偏向股票，债券配置、私募股权对冲、通胀资产配置类文章也被归进"量化方法论"收录；只看前 500 个单词；evergreen 不参与决策 | 决定收哪些文章、花多少翻译额度 | **待定**（2026-11-12）：用户向公司确认想要的文章标准，之后写评分标准 v3，并用人工标注的评测集（`config/eval/man.yaml`）校准 |
+| D6 | **"有价值文章"的具体标准**：现行标准（`config/rubrics/v2.md`）没有偏向股票，债券配置、私募股权对冲、通胀资产配置类文章也被归进"量化方法论"收录；只看前 500 个单词；evergreen 不参与决策 | 决定收哪些文章、花多少翻译额度 | **待定**（2026-11-12）：用户向公司确认想要的文章标准，之后写评分标准 v3，并用人工标注的评测集（`config/eval/man.yaml`）校准。**v2**：不再用评分标准决定收哪些文章，改为人工选择栏目（D13） |
 | D7 | 结构校验分级：第一批 50 篇里 6 篇共 13 段被拦，其中 7 段只是 `<em>` 数量变了、3 段是链接被拆分；另有脚注上标重复 / 错位（译文验收发现） | needs_review 的比例（本批 6/10） | **已定**（2026-11-12）：**严格**——sup（编号唯一、不重复、不丢失）、img、math、code、table；**按地址**——a 比较 href 集合；**放宽**——em/i/strong/b 不比数量。同时查清脚注重复的来源。**已实现**（PR A 译文质量修复，见 4.5）：脚注重复的原因是占位链接的文字就是编号本身，DeepL 把它当正文数字处理 |
 | D8 | 翻译额度与全量规模：实测平均约 2.3 万字符/篇，man.com 全站约 200 篇收录 ≈ 460 万字符，约 5 个月的 DeepL Free 额度 | 全量需要多久、要不要付费或换翻译后端 | **已定**（2026-11-12）：先做出 MVP（30–50 篇），扩大规模时再议 |
 | D9 | 自动定时更新 | 新文章能否自动入库 | **已定**（2026-11-12）：Windows 任务计划，**每天一次**（默认 09:00，错过后开机补跑，每次最多 5 篇，均可在设置页修改）；网页控制台保留**手动运行**按钮和**自动更新开关**。**已实现**（PR B 控制台，见第 10 节） |
 | D10 | 其他机构的站点（AQR、Two Sigma 等） | 知识库覆盖面 | **已定**（2026-11-12）：暂不考虑，MVP 只做 man.com；以后要加再按"合规检查 → 发现方式 → 抽取规则 → 真实冒烟"逐站添加 |
 | D11 | Man 许可的范围：是否覆盖在公司内部知识库共享译文 | 能否把译文放进团队知识库 | 随 D1：由公司安排、用户确认有许可；公开仓库只放代码 |
 | D12 | 使用与演示方式 | 日常使用、面试演示 | **已定**（2026-11-12）：一个**本地网页控制台**——浏览文章（中文 / 中英对照）、点击运行（选篇数、实时进度、额度）、待复查列表与重翻、设置（API key 存本机 `.env`、自动更新开关和时间）；桌面快捷方式双击启动。**演示模式**（默认，无 key 时）：抓取仓库自带的构造示例站点，本机服务、不联网、假后端；**真实模式**：用户自己的 key。给面试官演示时可单独建一个限额 key，私下提供，用完停用。另写 `docs/usage.md`。**已实现**（PR B 控制台，见第 10 节） |
+| D13 | **按栏目采集**（v2，老板 2026-11-12 的反馈）：爬虫里不用 LLM 筛选，采集和筛选分开；筛选就是选择栏目，某栏目需要的文章超过七成就整栏采集，入库后再筛 | 采集哪些文章、翻译额度 | **已定**：栏目写在站点配置的 `sections` 里，`collect` 决定是否采集；新栏目只提醒不采集；`qbkb sections` 做抽样调研（见 4.9）。Man 的栏目已列出，**用户还没勾选**，现在全部 `collect: false`（待调研） |
 
 ---
 
@@ -57,6 +59,8 @@
                           store（SQLite）
                  文章状态 · 整篇 hash · 段落翻译记忆
 ```
+
+**v2（2026-11-12，见 4.9）**：默认流程是 discover → fetch → extract（顺带判定栏目）→ translate → export，**不再有 filter**；translate 只处理采集栏目里的文章。上图的 filter 保留为可选的加工命令 `qbkb filter`，不在 `qbkb run`、控制台和每天自动更新里。
 
 每个阶段只处理状态库里"轮到自己"的文章，所以整个流程可以**断点续跑**，而且是**幂等**的：同一条命令跑一次和跑十次，结果一样。
 
@@ -117,6 +121,9 @@ compliance:
 - 自动质检：正文太短、出现噪音关键词、缺少元数据的，标记出来给人看。
 
 ### 4.4 filter：价值筛选
+
+> **v2（2026-11-12）**：本节描述的打分只在单独运行 `qbkb filter` 时发生（加工阶段，可选），不在默认流程里。L1 的"正文太短"等改为 extract 的质量提示（`qc_issues`），文章照常往下走；按系列排除（`exclude_prefixes: /insights/a-moment-in-macro/`）已从 `filters.yaml` 删掉，改为"不选这个栏目"（见 4.9）。
+
 - 收：量化方法论 / 研究、基础概念讲解、行为金融 / 金融史、与量化相关的 AI。
 - 不收：宏观周评、ESG / 气候、公司文化 / 软文。
 - 顺序：**L3 人工覆盖 → L1 规则 → L2 打分**，处理 `extracted` 的文章，结果是 `filtered`（收）或 `skipped`（不收，原因写在 `score_reason`）。
@@ -178,12 +185,75 @@ compliance:
 
 ### 4.8 CLI 串联
 - 子命令：`discover`、`fetch`、`extract`、`filter`、`translate`、`export`，`run`（按这个顺序跑完全部阶段，`--skip` 跳过某些阶段），`status`（每个状态的文章数，列出 needs_review 和 failed 的文章及原因），`eval`（见 4.4），`console`（本地网页控制台，见第 10 节），以及 `init-db`、`sites`。`translate --url` 只翻这几篇（控制台的「重翻」用）；`--translator demo` 是演示模式的翻译后端。
+- **v2**：`run` 跑 discover → fetch → extract → translate → export（`--skip` 只能选这五个），没有打分，也没有 `--scorer` / `--refilter`；`filter` 仍可单独运行。新增 `sections`（栏目调研，见 4.9）；`status` 另外列出每个栏目的篇数、是否采集和新栏目提醒；`fetch --url-file` 只抓文件里列出的网址（`sections --fetch` 用）。发现新栏目时 extract 的退出码是 5（需要人确认）。
 - 通用参数：`--site`（默认全部站点）、`--db`、`--limit`（每个阶段最多处理多少篇）、`--config-dir`、`-v`。后端开关：`--scorer deepseek|fake`、`--translator deepl|fake`；其他：`--no-images`、`--refilter`、`--retry-rejected`、`--recheck`（见 4.5）、`--rebuild`、`--fetch-delay`（只对本机测试服务调小）。
 - 退出码（`--help` 里也有）：0 正常；1 出错；2 参数错误；**3 额度用完**（打分或翻译），进度已保存，下次运行同一条命令从中断处接着跑；4 后端暂时不可用（限流、网络）；**5 跑完了但有文章需要人工处理**（抓取 / 抽取 / 翻译 / 导出失败、翻译需复查、打分输出不合格、缺译文退回重翻、sitemap 部分失败；extract 的质检提示和图片下载失败不算）。同时出现时按 4、3、5 的顺序取。`run` 里某个阶段因为额度停下，后面的阶段照样处理已就绪的文章（打分额度用完，已经 filtered 的文章照样翻译、导出）。
 - 抓取间隔：`--fetch-delay` 只有本机测试站点（localhost、127.0.0.1、`*.localhost`、`*.test`）可以调到默认的 2 秒以下；真实站点只能调大，调小会提示并用默认值。
 - Twisted reactor 一个进程只能启动一次：单独的 `qbkb fetch` 在本进程里跑 Scrapy；`run` 把 fetch 放进子进程（`python -m qbkb.cli fetch …`），所以一个进程里可以跑多个站点、反复调用。
 - 缺 key 时只有真的要调用后端才报错（全部复用旧打分、没有待翻译文章时不需要 key）。
 - Windows 控制台的 stdout / stderr 统一用 UTF-8。
+
+
+### 4.9 栏目（v2，PR C）
+
+**为什么**：老板要求爬虫里不用 LLM 筛选（自动化运行时出问题难查），采集和筛选分成两步；筛选就是**人工选择栏目**，
+某栏目需要的文章超过七成就整栏采集，入库后再筛。采集阶段的每一步都是确定性规则，同样的输入得到同样的结果。
+
+**配置**：站点配置的 `sections` 节（例子见 `config/sites/man.yaml`）：
+- `list`：每个栏目一项——`id`（状态库里记的就是它，不要改）、`name`、识别规则 `url_prefix` 或 `key`（二选一）、
+  `collect: true/false`（必须写明）、`status`（如"待调研 / 已调研"）、`survey`（调研记录：抽样数、要的篇数、
+  占比、日期、判断人）、`estimate`（没抓页面时按网址最后一段估计篇数的正则，**只用于调研**，不用于采集判定）；
+- `page_key`：从页面上读栏目标识——`selector` 第一个匹配的文字，`pattern` 的命名分组按 `parts` 的顺序用 " | " 拼起来
+  （统一大写、折叠空白）；
+- `cross_check`（可选）：原始 HTML 里再按一个正则取值，和栏目标识的某一部分比较，不一致记一条质量提示，
+  **以 page_key 为准**；`equivalent` 列出算作一致的组合。
+- 没有 `sections` 节的站点不分栏目，全部采集（老行为）。
+
+**判定顺序**：
+1. **网址前缀**（discover 阶段就能定）：前缀栏目不采集时直接标 `unselected`，**不抓取**；
+2. **页面元数据**（抓取并抽取后）：extract 写 `section_key` / `section`，栏目不在采集列表里（包括配置里没有的
+   新栏目、页面上读不到栏目信息的）→ `unselected`，不翻译，但保留记录。
+3. 每次 discover / extract / translate 都按当前配置重新对一遍（`sections.apply_sections`，不联网、幂等）：
+   取消勾选 → extracted 退回 unselected；勾选 → 抽取过的回到 extracted（不重抓），没抓过的回到 discovered。
+   已翻译 / 已发布 / 需复查 / 失败的文章**从不降级**，只补记栏目。
+
+**质量提示只标记、不跳过（C2）**：正文太短、噪音关键词、缺标题 / 日期、用了 trafilatura 兜底、
+栏目核对不一致、读不到栏目信息……都写进 `qc_issues`，文章照常往下走。
+
+**新栏目提醒（C5）**：判定出的栏目标识在配置里没有 → 只记录（`section` 为 NULL）、不采集；extract 的输出和
+`qbkb status` 都列出"标识、篇数、一个例子"，extract 退出码 5。确认后把它加进 `sections.list`。
+
+**栏目调研 `qbkb sections --site <站点>`**（不调用任何 LLM）：
+- 每个栏目的篇数：**已判定**（抓到页面按规则定了的，或者网址前缀就能定的）是实际篇数；没抓的按 `estimate`
+  估计，标明"约"；都对不上的归入"未分类"；
+- 抽样：每个栏目的成员按网址排序后用 `random.Random("<种子>:<栏目 id>")` 洗牌取前 N 篇（默认 20，种子默认 2026），
+  **同一种子可复现**；把 N 调大时原来抽到的仍在里面（补抽不浪费已标的）；不超过 30 篇的栏目列全部；
+- 输出 `output/sections/<站点>.csv`（UTF-8 带 BOM，Excel 直接打开；`output/` 不进仓库）：栏目、是否采集、网址、
+  英文标题、日期、**要不要**（人工填"要 / 不要"）、备注；抽样表已存在时只读标记、不重抽（`--resample` 重抽，
+  已标的按网址保留）；
+- 再运行一次：按栏目算占比，结论分三档——**高于 80%：超过七成**（可以整栏采集）；**60%–80%：七成上下**
+  （补抽 20–30 篇或请老板决定）；**低于 60%：不够**。汇总写到 `<站点>-summary.csv`，并打印可以抄进配置的 `survey` 行；
+- `--fetch N`：先按固定种子随机抓 N 篇还没判定栏目的页面（走正常的 fetch 阶段：合规闸门、robots、限速、重试），
+  抽取判定后再统计。中文标题暂不做。
+
+**Man 的栏目**（依据：只读调研，58 页样本 + sitemap 网址计数，2026-11-12）：网址是平铺的 `/insights/<slug>`，
+栏目 = tagline（`#article-tagline-text`，"类型 | 时长 | 系列名"）的**类型 + 系列名**；A Moment in Macro 按网址前缀
+`/insights/a-moment-in-macro` 单独成栏（模板不同）。已列出：A Moment in Macro、独立文章（ARTICLE 无系列）、
+Views From the Floor、The Road Ahead、The Early View、A Sustainable Future（播客）、其他播客、视频。dataLayer 的
+contentType 和 tagline 不一致时记质量提示（播客页的 contentType 多数是 Article，列为一致）。
+
+**`collect` 的默认值**：Man 的栏目现在**全部 `false`、标"待调研"**。理由：全部 `true` 时每天的自动更新会把约 1000 篇
+全部送去翻译（估计 1500 万字符以上，远超免费额度），而且送出去就收不回；全部 `false` 时最坏只是"抓了、没翻译"，
+勾选后下一次运行直接翻译已抽取的文章，不用重抓。translate 发现一个采集栏目都没有时会打印提示。
+
+**v1 老数据的迁移策略**（状态库 v2 → v3 自动加列；状态由 extract 在下次运行时处理，只读本地原始 HTML，不联网、不花额度）：
+- extracted / filtered / skipped（v1 的打分结果）：**重新抽取一次**，按 v2 的栏目规则判定，采集栏目里的进入
+  extracted 等翻译，其余标 unselected。打分列（value_score、category 等）保留但不再起作用；
+  也就是说 v1 被 L1 / L2 筛掉的文章，只要栏目被选中，就会被翻译；
+- translated / needs_review / published：**不改状态**，只读原始 HTML 补记栏目（已花的翻译额度不浪费，
+  也不会因为栏目没选就被撤下）；
+- 原始 HTML 不在了的老数据保持原样（分栏目的站点里，它们没有栏目信息，不会被翻译）；
+- 还没重新抽取之前，老数据不会被翻译（translate 只翻栏目在采集列表里的）。
 
 ---
 
@@ -192,10 +262,11 @@ compliance:
 表结构以 [`src/qbkb/store/schema.sql`](../src/qbkb/store/schema.sql) 为准，这里只写要点：
 
 - `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、last_modified、http_status、raw_path 绝对路径）、正文 hash、正文段落数（body_segments：前多少段是正文，其后是版权声明等附录）、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、抽取质检问题（qc_issues，JSON 数组，和失败原因 error 分开）、输出路径、失败原因和重试次数。
-- 状态：discovered → fetched → extracted → filtered / skipped → translated → published；另有 failed（失败，error 写原因）、pdf_pending、**needs_review**（翻译结果有问题，等人工复查）。
+- 状态（v2）：discovered → fetched → extracted → translated → published；**unselected**（未选栏目：保留记录、不翻译，栏目改成采集后自动回到流程）。filtered / skipped 只由可选的 `qbkb filter` 产生，不再是必经状态。另有 failed（失败，error 写原因）、pdf_pending、**needs_review**（翻译结果有问题，等人工复查）。v1 的说法：discovered → fetched → extracted → filtered / skipped → translated → published；另有 failed（失败，error 写原因）、pdf_pending、**needs_review**（翻译结果有问题，等人工复查）。
 - `segments`：文章由哪些段落组成，**同时存段落 HTML**，translate 直接从这里取要翻的正文。
 - `translation_memory`：段落级翻译记忆，主键 `(src_hash, backend)`，backend 带目标语言（如 `deepl:ZH-HANS`）；**术语表版本不同视为未命中**（版本按段落里实际出现的术语计算）；`quality` 为 `ok` / `rejected`，`tm_get` 只返回 ok，结构校验没过的译文以 rejected 保存、不会被复用。
 - 老库升级：`store.connect()` 按 `PRAGMA user_version` 自动补新列（只加不删；v2 加了 body_segments），并把 PR #3 时期 `#rejected` 后缀的隔离译文转成 `quality = rejected`。
+- 栏目（v3，PR C）：`section_key`（页面上读到的栏目标识，`url:` 开头表示按网址前缀判定；`""` 表示读不到；NULL 表示还没按 v2 规则判定过）、`section`（站点配置里的栏目 id，NULL 表示配置里没有这个栏目）。老库自动加列；老数据的状态怎么迁移见 4.9。
 
 增量规则（`upsert_discovered`）：lastmod 变化时文章退回 `discovered`，同时清掉 etag、error、retries；打分保留；filter 比较当前 body_hash 和 scored_body_hash，相同就复用打分；translate 靠段落翻译记忆复用。
 
@@ -287,6 +358,7 @@ quant-blog-kb/
 
 ### 10.2 四个页面
 - **浏览文章**：左边按类别分组（`filters.yaml` 的顺序）列出已发布的文章（中文标题、日期、分数），右边是渲染好的文章，可切换"中文 / 中英对照"；顶部显示原文链接、分数、类别、翻译时间。图片走 `/out/` 接口，只允许 output 目录里的图片文件。
+  - v2：按**栏目**分组（站点配置的栏目名；没有栏目的老数据按 v1 的类别），不再显示分数；顶部显示栏目。真实模式只需要 DeepL 的 key（DeepSeek 的 key 留给以后的加工步骤，可不填）。
 - **运行**：选"这次最多处理 N 篇"（`--limit`）→ 后台子进程跑 `qbkb run`（Twisted reactor 一个进程只能启动一次，控制台从不在自己进程里跑流程）。页面每秒轮询一次增量日志，按 `[stage]` 行显示当前阶段和进度条；结束后按退出码说明（0 / 3 / 4 / 5，以及"已停止"），并显示 DeepL 剩余额度（从 translate 打印的 usage 行解析，存进 `.qbkb/quota.json`）。可以停止（Windows 上 `taskkill /T` 连同 Scrapy 子进程一起结束）。
 - **待复查**：列出 needs_review 和 failed 的文章及原因；needs_review 的有「重翻」按钮：`translate --retry-rejected --url <这篇>`，然后 `export` 把它发布出来。
 - **设置**：DeepL / DeepSeek 的 key（写入本机 `.env`，页面只显示是否已配置和后 4 位；「测试连接」查 DeepL `/v2/usage`、DeepSeek `/models`，都不计费）；模式（自动 / 演示 / 真实）；每天自动更新（开关、时间、篇数，见 10.4）；清空演示数据。
@@ -295,6 +367,7 @@ quant-blog-kb/
 - 没有配置两个 key 时默认是演示模式（`auto`），页面顶部明确提示；也可以在设置里手动切换。
 - 用仓库自带的**构造示例站点**（`console/demo.py`）：6 篇照 man.com 模板结构写的页面（抽取规则直接复用 `man.yaml`），正文都是为演示自己写的英文，**没有任何真实原文**；在本机 127.0.0.1 起 HTTP 服务提供，配一份 `allowed` 的站点配置 `demo`。打分用 `FakeScorer`；翻译用 `DemoTranslator`：每段示例原文配一份自己写的中文，按段落原文查表，所以演示时看到的是像样的译文、术语注释和本地图片。
 - 特意安排的情况：一篇 ESG（L2 筛掉）、一篇排除栏目（L1 筛掉）、一篇 404（failed）、一篇前两次翻译"丢脚注"（结构校验拦下 → needs_review，点「重翻」第三次就好），四个页面都有东西可看。
+  - v2：演示配置只采集"独立文章"栏目；原来"L2 筛掉"的那篇改成视频栏目、A Moment in Macro 那篇按网址前缀判定，两篇都是"未选栏目"。
 - 数据完全隔离：状态库、`raw/`、`output/`、日志、生成的配置都在 `.qbkb/demo/` 下（已被忽略）；演示模式的子进程去掉 API key 环境变量。
 - 文章 URL 里带端口，所以示例站点的端口记在 `.qbkb/demo/site.json`，下次尽量用同一个；端口被别的程序占了才清空演示数据、换端口。被另一个进程里的示例站点占着（控制台开着时定时任务也来跑）就直接用它——这一条是实测发现的：最初的写法让定时任务清空了控制台正在用的演示数据。
 

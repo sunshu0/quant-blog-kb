@@ -84,6 +84,7 @@ def _translate(tmp_path: Path, translator: FakeTranslator) -> int:
     )
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_translate_prints_real_quota_before_and_after(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -96,6 +97,7 @@ def test_translate_prints_real_quota_before_and_after(
     assert "默认值" not in out
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_translate_quota_falls_back_to_constant(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -105,6 +107,7 @@ def test_translate_quota_falls_back_to_constant(
     assert f"已用 10 / 上限 {FREE_MONTHLY_CHARS} 字符" in out and "按 API Free 的默认值" in out
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_translate_survives_a_broken_usage_call(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

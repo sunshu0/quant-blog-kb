@@ -37,6 +37,7 @@ class Page:
     date: str  # 页面上显示的日期，例如 "7 May 2024"
     paras: tuple[str, ...]
     image: str | None = None
+    tagline: str = "ARTICLE | 5 MIN"
 
 
 PAGES = (
@@ -54,8 +55,13 @@ PAGES = (
         tuple(_sentences("momentum", 9)),
         "/files/momentum-fig1.png",
     ),
+    # 播客栏目（A Sustainable Future）：e2e 只采集独立文章，这篇是"未选栏目"
     Page(
-        "/insights/climate-note", "A Climate Note", "1 March 2024", tuple(_sentences("weather", 9))
+        "/insights/climate-note",
+        "A Climate Note",
+        "1 March 2024",
+        tuple(_sentences("weather", 9)),
+        tagline="PODCAST | 30 MIN | A SUSTAINABLE FUTURE",
     ),
     Page(
         "/insights/a-moment-in-macro/rates-week",
@@ -77,7 +83,7 @@ def page_html(p: Page) -> str:
 </head><body>
 <header><nav><a href="/insights">Insights</a></nav></header>
 <main>
-<div id="article-tagline-text"><p>ARTICLE | 5 MIN</p></div>
+<div id="article-tagline-text"><p>{p.tagline}</p></div>
 <div id="article-title-text"><h1>{p.title}</h1></div>
 <div id="article-date-text"><p>{p.date}</p></div>
 <div id="article-authors"><a href="/people/x"><span class="fw-600">Test Author</span></a></div>
@@ -130,6 +136,9 @@ def make_config(root: Path, base: str) -> Path:
     man["firm"] = "Example Capital"
     man["discover"]["sitemap"] = f"{base}/sitemap.xml"
     man["compliance"] = {"decision": "allowed", "checked_at": "2026-11-11"}
+    # 栏目照抄 man，只采集独立文章（ARTICLE，无系列）；A Moment in Macro 那篇是未选栏目
+    for sec in man["sections"]["list"]:
+        sec["collect"] = sec["id"] == "article"
     (cfg / "sites").mkdir()
     (cfg / "sites" / f"{SITE}.yaml").write_text(
         yaml.safe_dump(man, allow_unicode=True), encoding="utf-8"

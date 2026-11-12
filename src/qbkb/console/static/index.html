@@ -24,7 +24,7 @@
 </header>
 <div id="demo-banner" class="banner" hidden>
   演示模式：使用自带的示例文章，不联网、不需要 API key。示例文章是为演示自己写的，不是真实文章。
-  在「设置」里填好两个 key 后会切到真实模式。
+  在「设置」里填好 DeepL 的 key 后会切到真实模式。
 </div>
 <div id="toast" class="toast" hidden></div>
 
@@ -34,8 +34,7 @@
     <div id="reader-meta" class="meta" hidden>
       <div class="meta-row">
         <a id="meta-source" target="_blank" rel="noopener noreferrer">原文链接</a>
-        <span id="meta-score"></span>
-        <span id="meta-category"></span>
+        <span id="meta-section"></span>
         <span id="meta-translated"></span>
       </div>
       <div class="views" role="group" aria-label="显示方式">
@@ -52,7 +51,7 @@
 <section id="tab-run" class="tab" hidden>
   <div class="card">
     <h2>运行一次更新</h2>
-    <p class="hint">发现新文章 → 抓取 → 抽取正文 → 筛选打分 → 翻译 → 导出 Markdown。
+    <p class="hint">发现新文章 → 抓取 → 抽取正文、判定栏目 → 翻译（只翻选定的栏目） → 导出 Markdown。
       已经处理过的文章不会重复花额度；中途停下，下次运行会从中断处接着跑。</p>
     <div class="row">
       <label>这次最多处理 <input id="run-limit" type="number" min="1" max="50" value="5"> 篇</label>
@@ -91,7 +90,7 @@
       <button type="button" data-test="deepl">测试连接</button>
     </div>
     <div class="key-row">
-      <label for="key-llm">DeepSeek（打分）</label>
+      <label for="key-llm">DeepSeek（可选：以后的加工步骤用）</label>
       <input id="key-llm" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
       <span id="key-llm-state" class="keystate"></span>
       <button type="button" data-test="llm">测试连接</button>
@@ -104,7 +103,7 @@
   <div class="card">
     <h2>模式</h2>
     <div class="row radios">
-      <label><input type="radio" name="mode" value="auto"> 自动（两个 key 都填了就是真实模式）</label>
+      <label><input type="radio" name="mode" value="auto"> 自动（填了 DeepL 的 key 就是真实模式）</label>
       <label><input type="radio" name="mode" value="demo"> 演示模式</label>
       <label><input type="radio" name="mode" value="real"> 真实模式</label>
     </div>

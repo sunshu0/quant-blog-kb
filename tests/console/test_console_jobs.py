@@ -63,7 +63,7 @@ def test_run_command_demo_uses_isolated_paths_and_fake_backends(tmp_path: Path) 
     assert args["--db"] == str(ws.db) and str(ws.db).startswith(str(tmp_path / ".qbkb" / "demo"))
     assert args["--raw-dir"] == str(ws.raw) and args["--out"] == str(ws.out)
     assert args["--config-dir"] == str(ws.config_dir) and args["--site"] == "demo"
-    assert args["--scorer"] == "fake" and args["--translator"] == "demo"
+    assert "--scorer" not in cmd and args["--translator"] == "demo"  # v2：run 不打分
     assert args["--limit"] == "3" and args["--fetch-delay"] == "0"
 
 
@@ -244,7 +244,7 @@ def test_job_manager_collects_output_and_result(tmp_path: Path) -> None:
     assert job.exit_code == 5 and done == [job]
     s = job.summary()
     assert s["running"] is False and "待复查" in str(s["result"])
-    assert s["stage"] == "export" and s["progress"] == {"done": 6, "total": 6}
+    assert s["stage"] == "export" and s["progress"] == {"done": 5, "total": 5}
     assert job.quota == {"used": 1200, "limit": 1000000, "remaining": 998800}
     assert job.published == 2
     assert "sk-abcdefghijklmnop9876" not in "\n".join(job.lines)  # key 被换成 ***

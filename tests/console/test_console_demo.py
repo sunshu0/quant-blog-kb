@@ -4,7 +4,6 @@ import socket
 from pathlib import Path
 
 import httpx
-import yaml
 
 from qbkb.config import load_site
 from qbkb.console import demo
@@ -136,8 +135,9 @@ def test_ensure_config_points_to_local_site_only(tmp_path: Path) -> None:
     assert site.compliance_decision == "allowed"
     assert site.raw["base_url"] == "http://127.0.0.1:12345"
     assert site.raw["discover"]["sitemap"] == "http://127.0.0.1:12345/sitemap.xml"
-    filters = yaml.safe_load((cfg / "filters.yaml").read_text("utf-8"))
-    assert list(filters["sites"]) == ["demo"]
+    # 栏目照抄 man，演示时只采集独立文章
+    collect = {s["id"]: s["collect"] for s in site.raw["sections"]["list"]}
+    assert {k for k, v in collect.items() if v} == {"article"}
     assert not (cfg / "fixed_translations.yaml").exists()  # 本机的固定译文不带进演示配置
     assert (cfg / "glossary.yaml").is_file() and list((cfg / "rubrics").glob("*.md"))
 
