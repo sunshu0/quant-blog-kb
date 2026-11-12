@@ -38,7 +38,7 @@
 - 有设计文档、自动测试和局限性说明。
 
 **不做（非目标）**：
-- PDF 白皮书：标记为 `pdf_pending`，只记录链接。
+- 扫描版（无文字层）PDF：标记出来，**不做 OCR**；PDF 里的公式 / 表格不做结构化提取，只保留原文字。
 - 需要渲染 JS 或有反爬挑战的站点：不绕过，标记为需要人工处理。
 - 图表内的文字翻译：只翻译图注和 alt 文字。
 - 公开发布译文。
@@ -114,6 +114,7 @@ compliance:
 - **原始 HTML 由我们自己存到** `raw/<site>/<slug>.html`。这是对讨论时"用 HTTPCACHE"的细化：HTTPCACHE 的存储格式是 Scrapy 内部的，extract 阶段不方便直接读，所以只在开发调试时打开它。
 - 支持条件请求（ETag / If-Modified-Since），对方返回 304 就跳过。
 - 遇到 403 或人机验证页面：标记 `failed`，写明原因，**不绕过**。
+- **站内 PDF 正文**（配置了 `pdf:` 节的站点）：文章 HTML 里按 `pdf.selector` 找到**同一站点**（scheme + host 一致）的 PDF 链接时，走同一条抓取通道（限速、robots、单进程）下载，存到 `raw/<site>/<slug>.pdf`，路径写进 `pdf_path`；已下载的不重下（断点续跑）。下载失败把文章标 `failed`（error 以 `pdf:` 开头，HTML 原文保留），重跑 fetch 会重试。没配置 `pdf:` 的站点行为完全不变。
 
 ### 4.3 extract：正文抽取与清洗
 - 站点规则（CSS 选择器）优先，trafilatura 兜底。规则可以按页面模板分多条。
@@ -122,6 +123,7 @@ compliance:
 - 元数据优先从 JSON-LD 和 meta 标签提取。
 - 输出**清洗后的 HTML**，按块级元素切成段落，交给 translate。转 Markdown 放到 export 阶段做（见 4.5）。
 - 自动质检：正文太短、出现噪音关键词、缺少元数据的，标记出来给人看。
+- **PDF 正文**（配置了 `pdf:` 节的站点）：网页正文（抽取后）短于 `pdf.min_chars` 且已下载了站内 PDF 时，用 **pypdf**（BSD-3-Clause；不用 PyMuPDF，因为它是 AGPL，本项目公开仓库不能用）按页取文字，去掉跨页重复的页眉 / 页脚和纯页码、合并连字符断行、切成段落，接在网页摘要后面一起入库（摘要保留为正文开头），和 HTML 正文走同一套下游。公式 / 表格没有可靠的结构化提取，保留 pypdf 给的原文字并在 `qc_issues` 记一条提示；扫描版（无文字层）PDF 抛错标记、不做 OCR。网页正文够长时不读 PDF（忽略已下载的 PDF）。
 
 ### 4.4 filter：价值筛选
 
@@ -274,7 +276,7 @@ contentType 和 tagline 不一致时记质量提示（播客页的 contentType �
 
 表结构以 [`src/qbkb/store/schema.sql`](../src/qbkb/store/schema.sql) 为准，这里只写要点：
 
-- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、last_modified、http_status、raw_path 绝对路径）、正文 hash、正文段落数（body_segments：前多少段是正文，其后是版权声明等附录）、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、抽取质检问题（qc_issues，JSON 数组，和失败原因 error 分开）、输出路径、失败原因和重试次数。
+- `articles`：每篇文章一行，`url` 为主键。记录状态、抓取信息（lastmod、etag、last_modified、http_status、raw_path 绝对路径、pdf_path 站内 PDF 正文路径）、正文 hash、正文段落数（body_segments：前多少段是正文，其后是版权声明等附录）、元数据（含 tags）、打分（value_score、evergreen、score_reason、rubric_version、scored_body_hash）、翻译（translator、translated_at）、抽取质检问题（qc_issues，JSON 数组，和失败原因 error 分开）、输出路径、失败原因和重试次数。
 - 状态（v2）：discovered → fetched → extracted → translated → published；**unselected**（未选栏目：保留记录、不翻译，栏目改成采集后自动回到流程）。filtered / skipped 只由可选的 `qbkb filter` 产生，不再是必经状态。另有 failed（失败，error 写原因）、pdf_pending、**needs_review**（翻译结果有问题，等人工复查）。v1 的说法：discovered → fetched → extracted → filtered / skipped → translated → published；另有 failed（失败，error 写原因）、pdf_pending、**needs_review**（翻译结果有问题，等人工复查）。
 - `segments`：文章由哪些段落组成，**同时存段落 HTML**，translate 直接从这里取要翻的正文。
 - `translation_memory`：段落级翻译记忆，主键 `(src_hash, backend)`，backend 带目标语言（如 `deepl:ZH-HANS`）；**术语表版本不同视为未命中**（版本按段落里实际出现的术语计算）；`quality` 为 `ok` / `rejected`，`tm_get` 只返回 ok，结构校验没过的译文以 rejected 保存、不会被复用。
@@ -348,7 +350,7 @@ quant-blog-kb/
 
 ## 9. 局限性（MVP）
 
-- 不处理 PDF。
+- 扫描版（无文字层）PDF 不做 OCR；PDF 的公式 / 表格没有结构化提取，只保留 pypdf 给的原文字（页眉页脚按"跨页重复的行"去除，是启发式的，少数页面可能漏删或误删）。
 - 图表里的文字不翻译。
 - **iframe / 脚本嵌入的交互图表会被丢掉**：抽取阶段把 `<iframe>`、`<script>` 整个去掉（不抓第三方图表服务），译文里这个位置没有任何提示；有 `<noscript>` 静态缩略图的会保留缩略图。要看图表请打开每篇开头的原文链接。例：通胀那篇（when-inflation-hits）的"图表 1"是 Infogram 的 `<script>` 嵌入，页面里没有静态图片，只剩图注（"Problems loading this infographic?" 那段按 `drop_text` 去掉了）。
 - 脚注上标靠占位链接保住，只覆盖纯数字的 `<sup>N</sup>`；其他上标仍可能被 DeepL 改动，由结构校验拦下后人工复查。新的占位写法（`†`）还没有用真实 DeepL 批量验证过，下一次重翻时看 needs_review 的比例。

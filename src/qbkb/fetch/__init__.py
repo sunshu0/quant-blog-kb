@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from qbkb.config import SiteConfig, ensure_allowed
 from qbkb.fetch.outcome import Kind, Outcome
 from qbkb.fetch.settings import USER_AGENT, build_settings
 from qbkb.models import Status
+from qbkb.pdf import load_pdf_rules
 
 __all__ = [
     "FetchStats",
@@ -25,6 +27,7 @@ __all__ = [
     "USER_AGENT",
     "build_settings",
     "run_fetch",
+    "select_pdf_targets",
     "select_targets",
 ]
 
@@ -38,6 +41,8 @@ class FetchStats:
     stale_tmp_removed: int = 0
     # 整站停止的原因（robots 跨站、Retry-After 太久……）；没有停止就是 None
     stop_reason: str | None = None
+    pdf_downloaded: int = 0
+    pdf_failed: int = 0
 
     @classmethod
     def from_counts(
@@ -45,7 +50,9 @@ class FetchStats:
         counts: Counter[Kind],
         stale_tmp_removed: int = 0,
         stop_reason: str | None = None,
+        pdf_counts: Counter[str] | None = None,
     ) -> FetchStats:
+        pdf_counts = pdf_counts or Counter()
         return cls(
             fetched=counts[Kind.FETCHED],
             not_modified=counts[Kind.NOT_MODIFIED],
@@ -53,6 +60,8 @@ class FetchStats:
             failed=counts[Kind.FAILED],
             stale_tmp_removed=stale_tmp_removed,
             stop_reason=stop_reason,
+            pdf_downloaded=pdf_counts["ok"],
+            pdf_failed=pdf_counts["failed"],
         )
 
 
@@ -75,6 +84,22 @@ def select_targets(
     return targets if limit is None else targets[:limit]
 
 
+def select_pdf_targets(conn: sqlite3.Connection, site: str) -> list[str]:
+    """需要（重新）下载站内 PDF 正文的文章：HTML 已抓、但 PDF 还没下载或文件丢了。
+
+    只挑 fetched / failed 的文章（还在 fetch → extract 窗口里的），不碰已翻译 / 已发布的。
+    """
+    out: list[str] = []
+    for row in store.list_rows(conn, (Status.FETCHED, Status.FAILED), site):
+        if not row["raw_path"]:
+            continue
+        pdf_path = row["pdf_path"]
+        if pdf_path and Path(pdf_path).is_file():
+            continue  # 已下载，不重下
+        out.append(str(row["url"]))
+    return out
+
+
 def run_fetch(
     site: SiteConfig,
     db_path: str | Path,
@@ -92,7 +117,8 @@ def run_fetch(
     if not isinstance(base_url, str):
         raise ValueError(f"站点 {site.name}: 缺少 base_url")
     targets = select_targets(db_path, site.name, urls, limit)
-    if not targets:
+    pdf_rules = load_pdf_rules(site)  # 配置写错在这里尽早报错；没配置返回 None
+    if not targets and pdf_rules is None:
         return FetchStats()
     # 延迟导入：discover、状态统计等只用常量的地方不必加载 Scrapy
     from scrapy.crawler import CrawlerProcess
@@ -103,9 +129,13 @@ def run_fetch(
     raw = Path(raw_dir)
     removed = cleanup_stale_tmp(raw, site.name)
     counts: Counter[Kind] = Counter()
+    pdf_counts: Counter[str] = Counter()
     conn = store.connect(db_path)
     stop_reason: str | None = None
     try:
+        pdf_urls = select_pdf_targets(conn, site.name) if pdf_rules is not None else []
+        if not targets and not pdf_urls:
+            return FetchStats()
         settings = build_settings(
             http_cache=http_cache, log_level=log_level, **(settings_overrides or {})
         )
@@ -120,9 +150,12 @@ def run_fetch(
             allowed_host=urlsplit(base_url).hostname or "",
             allowed_scheme=urlsplit(base_url).scheme or "https",
             counts=counts,
+            pdf_rules=pdf_rules,
+            pdf_urls=pdf_urls,
+            pdf_counts=pdf_counts,
         )
         process.start()
         stop_reason = getattr(crawler.spider, "stop_reason", None)
     finally:
         conn.close()
-    return FetchStats.from_counts(counts, removed, stop_reason)
+    return FetchStats.from_counts(counts, removed, stop_reason, pdf_counts)

@@ -371,11 +371,12 @@ def fetch_in_process(args: argparse.Namespace, site_name: str) -> int:
     )
     print(
         f"[fetch] {site.name}: 抓到 {s.fetched}、没变（304）{s.not_modified}、"
-        f"PDF {s.pdf}、失败 {s.failed}"
+        f"PDF {s.pdf}、失败 {s.failed}、下载 PDF 正文 {s.pdf_downloaded}、"
+        f"PDF 失败 {s.pdf_failed}"
     )
     if s.stop_reason:
         print(f"[fetch] {site.name}: 停止抓取：{s.stop_reason}")
-    return EXIT_ATTENTION if s.failed or s.stop_reason else EXIT_OK
+    return EXIT_ATTENTION if s.failed or s.pdf_failed or s.stop_reason else EXIT_OK
 
 
 def fetch_in_subprocess(args: argparse.Namespace, site_name: str) -> int:

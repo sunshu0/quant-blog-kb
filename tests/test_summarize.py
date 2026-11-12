@@ -209,7 +209,7 @@ def test_v3_schema_upgrades_without_erasing_articles(tmp_path: Path) -> None:
     schema = "\n".join(
         line
         for line in schema.splitlines()
-        if not line.strip().startswith(("summary_", "fetched_at"))
+        if not line.strip().startswith(("summary_", "fetched_at", "pdf_path"))
     )
     conn.executescript(schema)
     conn.execute(
@@ -223,7 +223,8 @@ def test_v3_schema_upgrades_without_erasing_articles(tmp_path: Path) -> None:
     row = store.get_article(conn, "u")
     assert row is not None and row["status"] == Status.PUBLISHED and row["summary_zh"] is None
     assert row["fetched_at"] is None
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert row["pdf_path"] is None
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     conn.close()
 
 

@@ -18,7 +18,7 @@ from qbkb.models import DiscoveredUrl, Segment, Status
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # 改了表结构（加列等）就加 1，并在 _migrate 里补升级步骤
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ UPDATABLE_COLUMNS = frozenset(
         "last_modified",
         "http_status",
         "raw_path",
+        "pdf_path",
         "body_hash",
         "body_segments",
         "title",
@@ -65,6 +66,7 @@ UPDATABLE_COLUMNS = frozenset(
 # (表, 列, 类型定义)。只加列，不删不改，所以可以反复执行。
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("articles", "last_modified", "TEXT"),
+    ("articles", "pdf_path", "TEXT"),  # v5：站内 PDF 正文
     ("articles", "qc_issues", "TEXT"),
     ("articles", "body_segments", "INTEGER"),  # v2（Phase 2）
     ("translation_memory", "quality", "TEXT NOT NULL DEFAULT 'ok'"),

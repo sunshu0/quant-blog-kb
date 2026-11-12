@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS articles (
   last_modified  TEXT,     -- 响应头 Last-Modified，用于 If-Modified-Since
   http_status    INTEGER,
   raw_path       TEXT,
+  pdf_path       TEXT,     -- 站内 PDF 正文的原始文件路径（配置了 pdf 节的站点）；没下载/失败为 NULL
   body_hash      TEXT,
   body_segments  INTEGER,  -- 前多少段是正文，其后是版权声明等附录（keep）；NULL 表示全是正文
   title          TEXT,
