@@ -114,7 +114,18 @@ def _filter_opts(p: argparse.ArgumentParser) -> None:
 
 
 def _translate_opts(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--translator", choices=("deepl", "fake"), default="deepl")
+    p.add_argument(
+        "--translator",
+        choices=("deepl", "fake", "demo"),
+        default="deepl",
+        help="翻译后端（demo：控制台演示模式用，示例文章自带中文，不联网）",
+    )
+    p.add_argument(
+        "--url",
+        action="append",
+        default=[],
+        help="只翻译这篇文章（可以重复；控制台的「重翻」按钮用）",
+    )
     p.add_argument(
         "--retry-rejected",
         action="store_true",
@@ -191,6 +202,10 @@ def build_parser() -> argparse.ArgumentParser:
     _common(p)
     p.add_argument("--file", type=Path, help="评测集（默认 config/eval/<site>.yaml）")
     p.add_argument("--rubric-version", help="只比较这个打分版本（例如 v2@deepseek-flash）")
+    p = sub.add_parser("console", help="启动本地网页控制台（只监听 127.0.0.1），并打开浏览器")
+    p.add_argument("--port", type=int, default=None, help="端口（默认 8790，被占用时自动换）")
+    p.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    p.add_argument("--root", type=Path, help="项目目录（默认这份代码所在的仓库）")
     return parser
 
 
@@ -362,6 +377,10 @@ def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
         return deps.translator
     if args.translator == "fake":
         return FakeTranslator(quota_chars=args.fake_quota)
+    if args.translator == "demo":
+        from qbkb.console.demo import DemoTranslator
+
+        return DemoTranslator.from_env()
     return DeepLTranslator.from_env()
 
 
@@ -465,6 +484,9 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
         if getattr(args, "recheck", False):
             for st in (Status.TRANSLATED, Status.PUBLISHED):
                 urls = sorted(urls + store.list_by_status(conn, st, site.name))
+        only = getattr(args, "url", None)
+        if only:
+            urls = [u for u in urls if u in only]
         if args.limit is not None:
             urls = urls[: args.limit]
         if not urls:
@@ -702,6 +724,10 @@ def main(argv: Sequence[str] | None = None, *, deps: Deps | None = None) -> int:
             return cmd_status(args)
         if args.command == "eval":
             return cmd_eval(args)
+        if args.command == "console":
+            from qbkb.console.server import run_console
+
+            return run_console(root=args.root, port=args.port, open_browser=not args.no_browser)
         return cmd_stages(args, deps)
     except Exception as e:  # 顶层兜底：给出中文错误信息和退出码，-v 时附带堆栈
         if getattr(args, "verbose", False):
