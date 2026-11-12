@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -19,9 +21,10 @@ from qbkb import store
 from qbkb.console import sections_ui, server
 from qbkb.console.server import ApiError, App
 from qbkb.console.workspace import workspace
-from qbkb.models import DiscoveredUrl, Segment, Status
+from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment, Status, segment_hash
 from qbkb.sections import survey
 from qbkb.translate.fake import FakeTranslator
+from qbkb.translate.glossary import Glossary
 
 TOKEN = "test-token-123"
 
@@ -59,7 +62,7 @@ def _add(
         )
 
 
-def _setup(root: Path, translator: FakeTranslator | None = None) -> App:
+def _setup(root: Path, translator: Any = None) -> App:
     ws = workspace(root, "demo")
     ws.base.mkdir(parents=True, exist_ok=True)
     cfg = ws.base / "config"
@@ -111,7 +114,7 @@ def test_mark_roundtrip_and_verdict_bands(tmp_path: Path) -> None:
     app = _setup(tmp_path)
     app.generate_sections({"site": "demo"})
     urls = [r["网址"] for r in survey.read_csv(_csv(tmp_path)) if r["栏目id"] == "article"]
-    # 标两个要、一个不要 → 占比 67%：不到七成
+    # 标两个要、一个不要 → 占比 66.7%：不到七成（保留一位小数，不四舍五入成 70% 引起矛盾）
     app.mark_section({"site": "demo", "url": urls[0], "mark": "要", "note": ""})
     app.mark_section({"site": "demo", "url": urls[1], "mark": "要", "note": "备注1"})
     app.mark_section({"site": "demo", "url": urls[2], "mark": "不要", "note": ""})
@@ -122,13 +125,13 @@ def test_mark_roundtrip_and_verdict_bands(tmp_path: Path) -> None:
     view: Any = app.sections_view("demo")
     summary = {r["栏目id"]: r for r in view["summary"]}
     assert summary["article"]["已标"] == "3" and summary["article"]["要"] == "2"
-    assert summary["article"]["占比"] == "67%"
+    assert summary["article"]["占比"] == "66.7%"
     assert summary["article"]["结论"].startswith("不到七成")
     # 全要 → 超过七成；清除一个标记
     app.mark_section({"site": "demo", "url": urls[2], "mark": "要", "note": ""})
     view = app.sections_view("demo")
     summary = {r["栏目id"]: r for r in view["summary"]}
-    assert summary["article"]["占比"] == "100%" and summary["article"]["结论"].startswith(
+    assert summary["article"]["占比"] == "100.0%" and summary["article"]["结论"].startswith(
         "超过七成"
     )
     app.mark_section({"site": "demo", "url": urls[0], "mark": "", "note": ""})
@@ -179,6 +182,190 @@ def test_translate_section_caches_and_does_not_repeat(tmp_path: Path) -> None:
     app.translate_section({"site": "demo", "section": "article"})
     assert len(translator.calls) == calls
     assert translator.chars_used > 0
+
+
+class GatedTranslator:
+    """翻译时先发 started、再等 release，用来固定并发翻译的交错。"""
+
+    name = "fake"
+
+    def __init__(self) -> None:
+        self._inner = FakeTranslator()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def translate(self, segments: Any, glossary: Any, context: str = "") -> list[str]:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return self._inner.translate(segments, glossary, context)
+
+
+def test_translate_section_rejects_concurrent_same_section(tmp_path: Path) -> None:
+    gated = GatedTranslator()
+    app = _setup(tmp_path, gated)
+    app.generate_sections({"site": "demo"})
+    result: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            result["first"] = app.translate_section({"site": "demo", "section": "article"})
+        except Exception as e:  # noqa: BLE001
+            result["first"] = e
+
+    t = threading.Thread(target=run)
+    t.start()
+    assert gated.started.wait(timeout=5)
+    try:
+        with pytest.raises(ApiError) as info:
+            app.translate_section({"site": "demo", "section": "article"})
+        assert "正在翻译" in info.value.message
+    finally:
+        gated.release.set()
+    t.join(timeout=5)
+    assert "first" in result and not isinstance(result["first"], Exception)
+
+
+def test_concurrent_update_marks_preserves_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _setup(tmp_path)
+    app.generate_sections({"site": "demo"})
+    path = _csv(tmp_path)
+    urls = [r["网址"] for r in survey.read_csv(path)]
+    orig = sections_ui._write_csv
+
+    def slow_write(p: Path, rows: Any, fieldnames: Any) -> None:
+        time.sleep(0.05)
+        orig(p, rows, fieldnames)
+
+    monkeypatch.setattr(sections_ui, "_write_csv", slow_write)
+    result: dict[str, str] = {}
+
+    def mark(url: str, mark: str) -> None:
+        try:
+            sections_ui.update_marks(path, {url: (mark, None)})
+            result[url] = "ok"
+        except Exception as e:  # noqa: BLE001
+            result[url] = type(e).__name__
+
+    t1 = threading.Thread(target=mark, args=(urls[0], "要"))
+    t2 = threading.Thread(target=mark, args=(urls[1], "要"))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert result[urls[0]] == "ok" and result[urls[1]] == "ok"
+    by_url = {r["网址"]: r["要不要"] for r in survey.read_csv(path)}
+    assert by_url[urls[0]] == "要" and by_url[urls[1]] == "要"
+
+
+class FailingAfterTranslator:
+    """第一批成功、之后的批次抛额度用完。"""
+
+    name = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def translate(self, segments: Any, glossary: Any, context: str = "") -> list[str]:
+        self.calls += 1
+        if self.calls >= 2:
+            raise QuotaExceededError("额度用完")
+        return ["<p>译</p>" for _ in segments]
+
+
+def test_translate_units_keeps_earlier_batch_on_later_failure(tmp_path: Path) -> None:
+    conn = store.connect(tmp_path / "state.db")
+    glossary = Glossary("", {}, {})
+    units = [f"<p>unit {i}</p>" for i in range(51)]  # 超过每批 50 条 → 两批
+    translator = FailingAfterTranslator()
+    with pytest.raises(QuotaExceededError):
+        sections_ui.translate_units(conn, units, translator, glossary)
+    assert translator.calls == 2
+    # 第一批 50 条已缓存，第二批 1 条没缓存（重试只补那 1 条）
+    cached = sum(
+        1
+        for u in units[:50]
+        if store.tm_get(conn, segment_hash(u), "fake", glossary.version_for(u)) is not None
+    )
+    assert cached == 50
+    assert (
+        store.tm_get(conn, segment_hash(units[50]), "fake", glossary.version_for(units[50])) is None
+    )
+    conn.close()
+
+
+class BadStructureTranslator:
+    """返回非 <p> 结构，触发结构校验失败。"""
+
+    name = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def translate(self, segments: Any, glossary: Any, context: str = "") -> list[str]:
+        self.calls += 1
+        return ["<div>坏结构</div>" for _ in segments]
+
+
+def test_translate_units_negative_caches_structure_failures(tmp_path: Path) -> None:
+    conn = store.connect(tmp_path / "state.db")
+    glossary = Glossary("", {}, {})
+    units = ["<p>title</p>", "<p>summary</p>"]
+    translator = BadStructureTranslator()
+    done, failed = sections_ui.translate_units(conn, units, translator, glossary)
+    assert done == 0 and len(failed) == 2
+    # 负缓存：再翻不再调用后端、也不报失败（missing_units 跳过 rejected）
+    done2, failed2 = sections_ui.translate_units(conn, units, translator, glossary)
+    assert done2 == 0 and failed2 == []
+    assert translator.calls == 1
+    conn.close()
+
+
+def test_update_marks_preserves_extra_columns_and_order(tmp_path: Path) -> None:
+    app = _setup(tmp_path)
+    app.generate_sections({"site": "demo"})
+    path = _csv(tmp_path)
+    rows = survey.read_csv(path)
+    fieldnames = ["备注", "网址", "要不要", "审批人", "栏目id"]  # 重排 + 加一列
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            row = {k: r.get(k, "") for k in fieldnames}
+            row["审批人"] = "Alice"
+            w.writerow(row)
+    url = rows[0]["网址"]
+    sections_ui.update_marks(path, {url: ("要", "备注X")})
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        new_fieldnames = list(reader.fieldnames or [])
+        new_rows = list(reader)
+    assert new_fieldnames == fieldnames  # 原列顺序保留
+    by_url = {r["网址"]: r for r in new_rows}
+    assert by_url[url]["要不要"] == "要" and by_url[url]["备注"] == "备注X"
+    assert by_url[url]["审批人"] == "Alice"  # 多余列的值没丢
+
+
+def test_saving_key_rebuilds_translator(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def factory(ws: Any) -> FakeTranslator:
+        calls.append(1)
+        return FakeTranslator()
+
+    app = App(tmp_path, token=TOKEN, translator_factory=factory)
+    app.save_keys({"deepl": "0123abcd-1111-2222-3333-444455556666:fx"})
+    t1 = app._translator(app.ws())
+    assert len(calls) == 1
+    # 换 key → 重建翻译器，用新凭据
+    app.save_keys({"deepl": "0123abcd-1111-2222-3333-444455557777:fx"})
+    t2 = app._translator(app.ws())
+    assert len(calls) == 2 and t1 is not t2
+    # 清空 key → 模式回 demo，也重建
+    app.save_keys({"clear": ["deepl"]})
+    app._translator(app.ws())
+    assert len(calls) == 3
 
 
 @pytest.fixture

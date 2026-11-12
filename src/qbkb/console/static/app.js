@@ -253,6 +253,7 @@ async function loadReview() {
 // ---- 栏目抽样 ----
 
 let sectionsSite = null;
+let translatingSection = false;
 const expandedSections = new Set();
 
 async function loadSections() {
@@ -318,11 +319,22 @@ function sectionCard(sec, site) {
     if (hide) expandedSections.delete(sec.id); else expandedSections.add(sec.id);
   });
   head.querySelector(".sec-translate").addEventListener("click", async () => {
+    if (translatingSection) return;
+    translatingSection = true;
+    const btn = head.querySelector(".sec-translate");
+    btn.disabled = true;
+    btn.textContent = "翻译中…";
     try {
       const d = await api("/api/sections/translate", { site, section: sec.id });
       renderSections(d);
-      toast("已翻译这一栏的标题和摘要（命中的不重复计费）。");
+      const failed = d.failed || [];
+      if (failed.length) {
+        toast(`已翻译 ${d.translated || 0} 条；${failed.length} 条没翻成功（已记录，不会重复计费）。`, true);
+      } else {
+        toast("已翻译这一栏的标题和摘要（命中的不重复计费）。");
+      }
     } catch (e) { toast(e.message, true); }
+    finally { translatingSection = false; }
   });
   if (expandedSections.has(sec.id)) { body.hidden = false; toggle.textContent = "收起"; }
   return el("div", { className: "card sec-card" }, head, body);

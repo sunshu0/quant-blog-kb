@@ -68,6 +68,11 @@ from qbkb.translate import DeepLTranslator
 from qbkb.translate.base import TranslatorUnavailableError
 from qbkb.translate.glossary import Glossary, load_glossary
 from qbkb.translate.pipeline import title_unit, translated_title
+from qbkb.translate.structure import plain_text
+
+# DeepLTranslator 默认 target_lang 对应的翻译记忆后端名：真实模式只读查询用这个稳定标识，
+# 不必为读翻译记忆建带凭据的客户端
+REAL_BACKEND = "deepl:ZH-HANS"
 
 DEFAULT_PORT = 8790
 STATIC_DIR = Path(__file__).parent / "static"
@@ -122,6 +127,9 @@ class App:
         self._translator_factory = translator_factory
         self._translator_obj: Translator | None = None
         self._translator_mode: str | None = None
+        self._translator_key: str | None = None
+        self._translating: dict[tuple[str, str], bool] = {}
+        self._translating_lock = threading.Lock()
         kwargs: dict[str, Any] = {}
         if popen is not None:
             kwargs["popen"] = popen
@@ -393,22 +401,38 @@ class App:
         return ws.out / "sections" / f"{site}.csv"
 
     def _translator(self, ws: Workspace) -> Translator:
-        if self._translator_obj is None or self._translator_mode != ws.mode:
+        key = "" if ws.demo else self.keys().get(DEEPL_KEY, "")
+        if (
+            self._translator_obj is None
+            or self._translator_mode != ws.mode
+            or self._translator_key != key
+        ):
             if self._translator_factory is not None:
                 self._translator_obj = self._translator_factory(ws)
             elif ws.demo:
                 self._translator_obj = demo.DemoTranslator(ws.base)
             else:
-                self._translator_obj = DeepLTranslator.from_env(env_file=str(self.root / ".env"))
+                if not key:
+                    raise RuntimeError("没有找到 DEEPL_API_KEY：请在「设置」页填写")
+                import deepl
+
+                # 显式用刚读到的 key 建客户端，不用 load_dotenv（它不覆盖 os.environ 里的旧值）
+                self._translator_obj = DeepLTranslator(deepl.DeepLClient(key, max_retries=0))
             self._translator_mode = ws.mode
+            self._translator_key = key
         return self._translator_obj
 
     def _translator_name(self, ws: Workspace) -> str | None:
-        """只读翻译记忆时用的后端名；后端建不出来（如真实模式没配 key）就返回 None。"""
-        try:
-            return self._translator(ws).name
-        except Exception:
-            return None
+        """只读翻译记忆时用的后端名。
+
+        测试注入后端时用它的真实名字；生产按模式用稳定标识（真实模式不建带凭据的客户端）。
+        """
+        if self._translator_factory is not None:
+            try:
+                return self._translator(ws).name
+            except Exception:
+                return None
+        return "demo" if ws.demo else REAL_BACKEND
 
     def _glossary(self, ws: Workspace) -> Glossary:
         path = (ws.config_dir or CONFIG_DIR) / "glossary.yaml"
@@ -565,8 +589,9 @@ class App:
             if conn is not None:
                 conn.close()
         path = self._csv_path(ws, site)
-        old = survey.read_csv(path) if path.is_file() else []
-        survey.write_samples(path, tallies, survey.DEFAULT_SAMPLE, survey.DEFAULT_SEED, old)
+        with sections_ui.csv_lock(path):
+            old = survey.read_csv(path) if path.is_file() else []
+            survey.write_samples(path, tallies, survey.DEFAULT_SAMPLE, survey.DEFAULT_SEED, old)
         return self.sections_view(site)
 
     def mark_section(self, body: Mapping[str, Any]) -> dict[str, object]:
@@ -588,6 +613,8 @@ class App:
             sections_ui.update_marks(path, {url: (mark, note)})
         except KeyError:
             raise _bad("这个网址不在抽样表里") from None
+        except sections_ui.SamplingCsvFormatError as e:
+            raise _bad(str(e)) from e
         except sections_ui.SamplingCsvError as e:
             raise ApiError(HTTPStatus.CONFLICT, str(e)) from e
         return self.sections_view(site)
@@ -603,42 +630,60 @@ class App:
         sec_rows = [r for r in rows if r.get("栏目id") == section]
         if not sec_rows:
             raise _bad("这个栏目没有抽样的文章")
+        # 互斥：同一站点 / 栏目翻译进行中，拒绝新的（防并发重复计费）
+        key = (site, section)
+        with self._translating_lock:
+            if self._translating.get(key):
+                raise ApiError(HTTPStatus.CONFLICT, "这个栏目正在翻译，等它完成再点")
+            self._translating[key] = True
+        done = 0
+        failed_plain: list[str] = []
         try:
-            translator = self._translator(ws)
-        except Exception as e:
-            raise ApiError(HTTPStatus.BAD_REQUEST, f"翻译后端起不来：{e}") from e
-        glossary = self._glossary(ws)
-        conn = self._conn(ws)
-        if conn is None:
-            raise ApiError(HTTPStatus.NOT_FOUND, "还没有文章")
-        try:
-            units: list[str] = []
-            title_rows: list[tuple[str, str]] = []
-            for r in sec_rows:
-                url = r.get("网址", "")
-                row = store.get_article(conn, url)
-                if row is None:
-                    continue
-                title = str(row["title"] or "")
-                if title and not row["title_zh"]:
-                    units.append(title_unit(title))
-                    title_rows.append((url, title))
-                summary = sections_ui.summary_text(conn, url)
-                if summary:
-                    units.append(sections_ui.summary_unit(summary))
             try:
-                sections_ui.translate_units(conn, units, translator, glossary)
-            except QuotaExceededError as e:
-                raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, f"翻译额度用完，没翻完：{e}") from e
-            except TranslatorUnavailableError as e:
-                raise ApiError(HTTPStatus.BAD_GATEWAY, f"翻译后端暂时不可用：{e}") from e
-            for url, title in title_rows:
-                zh = translated_title(conn, title, translator.name, glossary)
-                if zh:
-                    store.set_fields(conn, url, title_zh=zh)
+                translator = self._translator(ws)
+            except Exception as e:
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"翻译后端起不来：{e}") from e
+            glossary = self._glossary(ws)
+            conn = self._conn(ws)
+            if conn is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "还没有文章")
+            try:
+                units: list[str] = []
+                title_rows: list[tuple[str, str]] = []
+                for r in sec_rows:
+                    url = r.get("网址", "")
+                    row = store.get_article(conn, url)
+                    if row is None:
+                        continue
+                    title = str(row["title"] or "")
+                    if title and not row["title_zh"]:
+                        units.append(title_unit(title))
+                        title_rows.append((url, title))
+                    summary = sections_ui.summary_text(conn, url)
+                    if summary:
+                        units.append(sections_ui.summary_unit(summary))
+                try:
+                    done, failed = sections_ui.translate_units(conn, units, translator, glossary)
+                except QuotaExceededError as e:
+                    raise ApiError(
+                        HTTPStatus.TOO_MANY_REQUESTS, f"翻译额度用完，没翻完：{e}"
+                    ) from e
+                except TranslatorUnavailableError as e:
+                    raise ApiError(HTTPStatus.BAD_GATEWAY, f"翻译后端暂时不可用：{e}") from e
+                for url, title in title_rows:
+                    zh = translated_title(conn, title, translator.name, glossary)
+                    if zh:
+                        store.set_fields(conn, url, title_zh=zh)
+                failed_plain = [plain_text(u) for u in failed]
+            finally:
+                conn.close()
         finally:
-            conn.close()
-        return self.sections_view(site)
+            with self._translating_lock:
+                self._translating.pop(key, None)
+        view = self.sections_view(site)
+        view["translated"] = done
+        view["failed"] = failed_plain
+        return view
 
     # ---- 写 ----
 

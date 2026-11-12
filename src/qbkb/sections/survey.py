@@ -234,7 +234,7 @@ def summary_rows(
     rows: list[list[str]] = []
     for t in tallies:
         v = vs.get(t.id, Verdict(t.id, 0, 0, 0))
-        ratio = "" if v.ratio is None else f"{v.ratio:.0%}"
+        ratio = "" if v.ratio is None else f"{v.ratio:.1%}"
         rows.append(
             [
                 t.id,

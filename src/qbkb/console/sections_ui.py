@@ -14,18 +14,40 @@ import contextlib
 import csv
 import html
 import sqlite3
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from qbkb import store
 from qbkb.models import Translator, segment_hash
-from qbkb.sections import survey
+from qbkb.translate.base import MAX_REQUEST_CHARS, MAX_TEXTS_PER_REQUEST, chunk_texts
 from qbkb.translate.glossary import Glossary
 from qbkb.translate.pipeline import lookup_translation
 from qbkb.translate.structure import plain_text, same_structure
 
 # 摘要长度：正文前约 600 个字符（纯文本）
 SUMMARY_CHARS = 600
+
+# 同一张抽样表（按解析后的路径）一把进程内锁：mark / generate 的读→改→原子写都在锁内，
+# 防止并发标注互相覆盖。
+_csv_locks: dict[str, threading.Lock] = {}
+_csv_locks_guard = threading.Lock()
+
+
+def _csv_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _csv_locks_guard:
+        lock = _csv_locks.get(key)
+        if lock is None:
+            lock = _csv_locks[key] = threading.Lock()
+        return lock
+
+
+@contextlib.contextmanager
+def csv_lock(path: Path) -> Iterator[None]:
+    """对同一张抽样表串行化读写（mark 与 generate 共用同一把锁）。"""
+    with _csv_lock(path):
+        yield
 
 
 def summary_unit(text: str) -> str:
@@ -50,10 +72,18 @@ def summary_text(conn: sqlite3.Connection, url: str) -> str:
 def missing_units(
     conn: sqlite3.Connection, units: Sequence[str], backend: str, glossary: Glossary
 ) -> list[str]:
-    """还没在翻译记忆里（或没有固定译文）的单位，去重、保持顺序。"""
-    return [
-        u for u in dict.fromkeys(units) if lookup_translation(conn, u, backend, glossary) is None
-    ]
+    """还没翻译过（无固定译文、翻译记忆里没有 ok 或 rejected 记录）的单位，去重、保持顺序。
+
+    rejected 也算「翻译过」：结构校验失败的负缓存，避免每次点都重新计费重翻。
+    """
+    out: list[str] = []
+    for u in dict.fromkeys(units):
+        h = segment_hash(u)
+        if h in glossary.fixed:
+            continue
+        if store.tm_lookup(conn, h, backend, glossary.version_for(u)) is None:
+            out.append(u)
+    return out
 
 
 def estimate_units(
@@ -68,30 +98,47 @@ def translate_units(
     units: Sequence[str],
     translator: Translator,
     glossary: Glossary,
-) -> int:
-    """翻译一批单位（标题 / 摘要），命中的跳过，新译且结构校验通过的写进翻译记忆。
+) -> tuple[int, list[str]]:
+    """翻译一批单位（标题 / 摘要），按后端上限分批，每批成功就立即写缓存。
 
-    返回这次新译了几条。额度用完 / 后端不可用的异常原样往上抛，由调用方转成提示。
+    - 命中的（含 rejected 负缓存）跳过；新译且结构校验通过的写进翻译记忆；
+    - 结构校验不过的以 rejected 负缓存，下次不重翻，随返回值报给页面；
+    - 返回 (新译成功的条数, 结构校验失败没翻成功的单元)。
+
+    额度用完 / 后端不可用的异常原样往上抛（已成功的批次已落缓存，重试不会重复计费）。
     """
     pending = missing_units(conn, units, translator.name, glossary)
-    if not pending:
-        return 0
-    out = translator.translate(pending, glossary, context="")
-    if len(out) != len(pending):
-        raise RuntimeError(f"{translator.name} 返回 {len(out)} 条译文，送出 {len(pending)} 条")
     done = 0
-    for unit, tgt in zip(pending, out, strict=True):
-        if same_structure(unit, tgt):
-            store.tm_put(
-                conn,
-                segment_hash(unit),
-                translator.name,
-                unit,
-                tgt,
-                glossary.version_for(unit),
-            )
-            done += 1
-    return done
+    failed: list[str] = []
+    for chunk in chunk_texts(pending, MAX_TEXTS_PER_REQUEST, MAX_REQUEST_CHARS):
+        batch = [pending[i] for i in chunk]
+        out = translator.translate(batch, glossary, context="")
+        if len(out) != len(batch):
+            raise RuntimeError(f"{translator.name} 返回 {len(out)} 条译文，送出 {len(batch)} 条")
+        for unit, tgt in zip(batch, out, strict=True):
+            if same_structure(unit, tgt):
+                store.tm_put(
+                    conn,
+                    segment_hash(unit),
+                    translator.name,
+                    unit,
+                    tgt,
+                    glossary.version_for(unit),
+                )
+                done += 1
+            else:
+                # 结构校验不过：负缓存（rejected），不重复计费，回报给页面
+                store.tm_put(
+                    conn,
+                    segment_hash(unit),
+                    translator.name,
+                    unit,
+                    tgt,
+                    glossary.version_for(unit),
+                    quality=store.TM_REJECTED,
+                )
+                failed.append(unit)
+    return done, failed
 
 
 def translated_summary(
@@ -108,42 +155,59 @@ class SamplingCsvError(OSError):
     """抽样表读不出来 / 写不回去（比如被 Excel 占用）。message 是给用户看的中文。"""
 
 
+class SamplingCsvFormatError(ValueError):
+    """抽样表结构不对（缺必需的列等）。"""
+
+
 def update_marks(
     path: Path, marks: Mapping[str, tuple[str | None, str | None]]
 ) -> list[dict[str, str]]:
-    """把「要不要 / 备注」写回抽样表，保持 UTF-8 BOM 和原列顺序。返回更新后的行。
+    """把「要不要 / 备注」写回抽样表，保持 UTF-8 BOM、原列顺序和 Excel 加的多余列。
 
     每个网址给 (要不要, 备注)，为 None 的那一列不动（只改要改的那一列，互不覆盖）。
-    网址不在抽样表里抛 KeyError；文件读不出来 / 写不进去抛 SamplingCsvError（不丢已有标记）。
+    网址不在抽样表里抛 KeyError；缺必需列抛 SamplingCsvFormatError；
+    文件读不出来 / 写不进去抛 SamplingCsvError（不丢已有标记）。整段读改写都在锁内。
     """
-    try:
-        rows = survey.read_csv(path)
-    except OSError as e:
-        raise SamplingCsvError(
-            f"抽样表打不开，可能被别的程序（比如 Excel）占用了，没改任何标记：{e}"
-        ) from e
-    index = {r.get("网址", ""): i for i, r in enumerate(rows)}
-    for url, (mark, note) in marks.items():
-        if url not in index:
-            raise KeyError(url)
-        i = index[url]
-        if mark is not None:
-            rows[i]["要不要"] = mark
-        if note is not None:
-            rows[i]["备注"] = note
-    _write_csv(path, rows)
+    lock = _csv_lock(path)
+    with lock:
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or [])
+                rows = [dict(r) for r in reader]
+        except OSError as e:
+            raise SamplingCsvError(
+                f"抽样表打不开，可能被别的程序（比如 Excel）占用了，没改任何标记：{e}"
+            ) from e
+        missing_cols = [c for c in ("网址", "要不要", "备注") if c not in fieldnames]
+        if missing_cols:
+            raise SamplingCsvFormatError(
+                f"抽样表缺少必需的列：{'、'.join(missing_cols)}（请用标准抽样表，或至少保留这些列）"
+            )
+        index = {r.get("网址", ""): i for i, r in enumerate(rows)}
+        for url, (mark, note) in marks.items():
+            if url not in index:
+                raise KeyError(url)
+            i = index[url]
+            if mark is not None:
+                rows[i]["要不要"] = mark
+            if note is not None:
+                rows[i]["备注"] = note
+        _write_csv(path, rows, fieldnames)
     return rows
 
 
-def _write_csv(path: Path, rows: Sequence[dict[str, str]]) -> None:
-    """先写临时文件再原子替换；写不进去时清理临时文件、抛 SamplingCsvError（原文不动）。"""
+def _write_csv(path: Path, rows: Sequence[dict[str, str]], fieldnames: Sequence[str]) -> None:
+    """按原列顺序写回（含 Excel 加的多余列）；先写临时文件再原子替换。
+
+    写不进去时清理临时文件、抛 SamplingCsvError（原文不动）。
+    """
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         with tmp.open("w", encoding="utf-8-sig", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(survey.COLUMNS)
-            for r in rows:
-                w.writerow([r.get(c, "") for c in survey.COLUMNS])
+            w = csv.DictWriter(f, fieldnames=list(fieldnames))
+            w.writeheader()
+            w.writerows(rows)
         tmp.replace(path)
     except OSError as e:
         with contextlib.suppress(OSError):
