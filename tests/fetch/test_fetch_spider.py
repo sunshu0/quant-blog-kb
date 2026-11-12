@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import scrapy
+from scrapy.crawler import Crawler
 from scrapy.downloadermiddlewares.redirect import RedirectMiddleware
 from scrapy.exceptions import CloseSpider, IgnoreRequest
 from scrapy.http import HtmlResponse, Request, Response
@@ -320,7 +321,7 @@ def test_spider_counts_store_errors_as_failed(
 
 def _cross_host_spider(
     conn: sqlite3.Connection, raw_dir: Path, url: str
-) -> tuple[ArticleSpider, Request, scrapy.crawler.Crawler]:
+) -> tuple[ArticleSpider, Request, Crawler]:
     """从 start() 取真实请求，再挂到真实中间件链（RedirectMiddleware + 我们的白名单）上。"""
     counts: Counter[Kind] = Counter()
     spider = ArticleSpider(

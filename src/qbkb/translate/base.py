@@ -21,6 +21,18 @@ class SegmentTooLargeError(ValueError):
     """单个段落超过单次请求上限，没法送出去。"""
 
 
+class BackendAuthError(RuntimeError):
+    """后端鉴权失败（key 错、无权限、账号不可用）。整个后端都不可用，停下并退出码 1。"""
+
+
+class ArticleTranslationError(RuntimeError):
+    """这一篇（这一批）的请求有问题：后端 4xx、返回条数不符、返回格式看不懂。
+
+    是这篇文章自身的问题，不是整个后端坏了：上层应对这一篇记录失败（needs_review）后
+    继续下一篇，不要因此停下整轮。
+    """
+
+
 def count_chars(texts: Sequence[str]) -> int:
     """估算计费字符数：按送出去的 HTML 全长算（含标签），是偏保守的上界。"""
     return sum(len(t) for t in texts)

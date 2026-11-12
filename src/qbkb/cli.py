@@ -629,6 +629,13 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             except tr.BackendStopped as e:
                 print(f"[translate] 完成 {done} 篇、需复查 {review} 篇")
                 raise Stopped(EXIT_UNAVAILABLE, f"[translate] 翻译后端暂时不可用：{e}") from e
+            except tr.BackendAuthError as e:
+                raise Stopped(EXIT_ERROR, f"[translate] 翻译后端鉴权失败，停下：{e}") from e
+            except tr.ArticleTranslationError as e:
+                # 这一篇的请求有问题：标 needs_review（写明原因），继续下一篇，别拖垮整轮
+                store.set_status(conn, url, Status.NEEDS_REVIEW, error=f"translate: {e}")
+                review += 1
+                continue
             except ValueError as e:
                 store.record_failure(conn, url, f"translate: {e}")
                 failed += 1
@@ -963,6 +970,8 @@ def cmd_stages(args: argparse.Namespace, deps: Deps) -> int:
                 code = _run_stage(name, args, deps, site)
             except Stopped as e:
                 print(e)
+                if e.code == EXIT_ERROR:
+                    return EXIT_ERROR  # 鉴权失败等硬错误：立刻停下，不再跑后面的站点/阶段
                 seen.add(e.code)
                 continue
             if code == EXIT_ERROR:

@@ -13,6 +13,7 @@ from qbkb.models import QuotaExceededError, Segment, Status, Translator, segment
 from qbkb.translate.base import (
     MAX_REQUEST_CHARS,
     MAX_TEXTS_PER_REQUEST,
+    ArticleTranslationError,
     TranslatorUnavailableError,
     chunk_texts,
     count_chars,
@@ -124,7 +125,9 @@ def _translate_title(
 def _call(translator: Translator, texts: list[str], glossary: Glossary, context: str) -> list[str]:
     out = translator.translate(texts, glossary, context)
     if len(out) != len(texts):
-        raise RuntimeError(f"{translator.name} 返回 {len(out)} 条译文，送出 {len(texts)} 条")
+        raise ArticleTranslationError(
+            f"{translator.name} 返回 {len(out)} 条译文，送出 {len(texts)} 条"
+        )
     return out
 
 

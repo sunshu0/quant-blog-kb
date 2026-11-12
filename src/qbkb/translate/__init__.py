@@ -3,6 +3,8 @@
 from qbkb.translate.base import (
     FREE_MONTHLY_CHARS,
     MAX_REQUEST_CHARS,
+    ArticleTranslationError,
+    BackendAuthError,
     SegmentTooLargeError,
     TranslatorUnavailableError,
     count_chars,
@@ -30,6 +32,8 @@ from qbkb.translate.structure import same_structure
 __all__ = [
     "FREE_MONTHLY_CHARS",
     "MAX_REQUEST_CHARS",
+    "ArticleTranslationError",
+    "BackendAuthError",
     "BackendStopped",
     "DeepLTranslator",
     "FakeTranslator",

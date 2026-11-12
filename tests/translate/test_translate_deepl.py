@@ -10,6 +10,8 @@ import pytest
 from qbkb import store
 from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment
 from qbkb.translate import (
+    ArticleTranslationError,
+    BackendAuthError,
     DeepLTranslator,
     Glossary,
     SegmentTooLargeError,
@@ -342,17 +344,20 @@ def test_default_backoff_is_bounded() -> None:
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected"),
     [
-        deepl.AuthorizationException("bad key", http_status_code=403),
-        deepl.ConnectionException("bad url", should_retry=False),
-        deepl.DeepLException("bad request", http_status_code=400),
+        # 鉴权失败（403）→ 整个后端的问题，映射成 BackendAuthError
+        (deepl.AuthorizationException("bad key", http_status_code=403), BackendAuthError),
+        # 不可重试的连接错误（无状态码）→ 无法归类，原样抛回
+        (deepl.ConnectionException("bad url", should_retry=False), deepl.ConnectionException),
+        # 其余 4xx → 这一篇请求的问题，映射成 ArticleTranslationError
+        (deepl.DeepLException("bad request", http_status_code=400), ArticleTranslationError),
     ],
 )
-def test_permanent_errors_are_not_retried(error: Exception) -> None:
+def test_permanent_errors_are_not_retried(error: Exception, expected: type[Exception]) -> None:
     client = FakeClient([error])
     t, sleeps = _translator(client)
-    with pytest.raises(type(error)):
+    with pytest.raises(expected):
         t.translate(["x"], {})
     assert sleeps == [] and len(client.translate_calls) == 1
 
