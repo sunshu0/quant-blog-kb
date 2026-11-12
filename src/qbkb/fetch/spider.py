@@ -120,8 +120,9 @@ class BackoffRetryMiddleware:
     def _stop_site(self, reason: str, request: Request, retry_after: float, status: int) -> None:
         """让整站停止：Retry-After 太久时，继续抓其他文章同样违背服务器要求。
 
-        先无条件 fast 停站（合规停站不能依赖可失败的落库）；文章请求再把自己记成失败，
-        记成功才标 _RETRY_AFTER_RECORDED 让 parse_article 跳过。robots 之类的内部请求
+        先无条件 fast 停站（合规停站不能依赖可失败的落库）；HTML 文章请求再把自己记成失败，
+        记成功才标 _RETRY_AFTER_RECORDED 让 parse_article 跳过。PDF 请求的失败由 parse_pdf
+        用 _pdf_fail 记（pdf: 前缀、pdf_counts），这里不重复记。robots 之类的内部请求
         没有文章可记，直接停。
         """
         spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
@@ -129,7 +130,11 @@ class BackoffRetryMiddleware:
         if stop is not None:
             stop(reason)
         article_url = request.cb_kwargs.get("article_url")
-        if article_url is not None and spider is not None:
+        if (
+            article_url is not None
+            and spider is not None
+            and not request.meta.get(META_STRICT_HOST)
+        ):
             record = getattr(spider, "record_retry_after_failure", None)
             if record is not None and record(str(article_url), status, retry_after):
                 request.meta[_RETRY_AFTER_RECORDED] = True
