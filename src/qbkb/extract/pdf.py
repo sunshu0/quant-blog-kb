@@ -34,6 +34,17 @@ _PAGE_NUMBER = re.compile(
     re.IGNORECASE,
 )
 
+# 行尾的页码（可选前导分隔符、可选总页数、page/第 N 页）。把 "www.cfm.fr 02" 归一成
+# "www.cfm.fr"，让带页码的页脚能被"跨页重复"检测出来。
+_PAGE_NUMBER_TAIL = re.compile(
+    r"(?:"
+    r"\s*[-–—|/·•]?\s*\d{1,4}\s*(?:/\s*\d{1,4})?"  # " 02"、"- 02"、" 02 / 14"
+    r"|\s*page\s*\d{1,4}"  # "Page 02"
+    r"|\s*第\s*\d{1,4}\s*页"  # "第 02 页"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
 # 连字符断行：上一行以这些字符结尾、下一行以小写字母开头，才合并
 _BREAK_HYPHENS = ("-", "‐", "­")
 
@@ -54,8 +65,13 @@ def _is_page_number(line: str) -> bool:
     return bool(_PAGE_NUMBER.match(line.strip()))
 
 
+def _strip_page_number(line: str) -> str:
+    """去掉行尾的页码（页脚常常是 "www.cfm.fr 02" 这种带页码的形状）。"""
+    return _PAGE_NUMBER_TAIL.sub("", line).strip()
+
+
 def _header_footer_lines(pages: list[list[str]]) -> set[str]:
-    """要删掉的页眉 / 页脚（跨页重复出现的行）。少于两页无法判断，返回空集。"""
+    """要删掉的页眉 / 页脚（跨页重复出现的行，忽略行尾页码）。少于两页无法判断，返回空集。"""
     n = len(pages)
     if n < 2:
         return set()
@@ -63,10 +79,10 @@ def _header_footer_lines(pages: list[list[str]]) -> set[str]:
     footer: Counter[str] = Counter()
     for lines in pages:
         for line in lines[:_EDGE_LINES]:
-            header[_norm(line)] += 1
+            header[_norm(_strip_page_number(line))] += 1
         if len(lines) > _EDGE_LINES:
             for line in lines[-_EDGE_LINES:]:
-                footer[_norm(line)] += 1
+                footer[_norm(_strip_page_number(line))] += 1
     threshold = max(2, int(n * _REPEAT_RATIO))
     return {line for line, count in header.items() if count >= threshold} | {
         line for line, count in footer.items() if count >= threshold
@@ -144,7 +160,7 @@ def extract_pdf_text(pdf_bytes: bytes) -> list[str]:
                 flush()
                 continue
             line = raw_line.strip()
-            if _norm(line) in drop or _is_page_number(line):
+            if _norm(_strip_page_number(line)) in drop or _is_page_number(line):
                 continue
             current.append(line)
         flush()  # 翻页也算一段，避免把相邻页拼成一段

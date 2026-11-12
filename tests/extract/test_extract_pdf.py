@@ -39,6 +39,21 @@ def test_header_and_page_number_removed() -> None:
     assert "References listed" in joined
 
 
+def test_page_numbered_footer_removed() -> None:
+    """页脚常带页码（"www.site.com 02"），去掉页码后按跨页重复检测出来。"""
+    pages = [
+        "Site Report\n\nAbstract text on the first page.\n\nFirst body paragraph.\nwww.site.com 01",
+        "Site Report\n\nSecond body paragraph here.\n\nMore analysis text.\nwww.site.com 02",
+        "Site Report\n\nThird body paragraph.\n\nConclusion of the report.\nwww.site.com 03",
+    ]
+    out = extract_pdf_text(make_pdf(pages))
+    joined = " ".join(out)
+    assert "Site Report" not in joined
+    assert "www.site.com" not in joined
+    assert "First body paragraph" in joined
+    assert "Conclusion of the report" in joined
+
+
 def test_page_boundary_is_paragraph_boundary() -> None:
     pdf = make_pdf(["First page text", "Second page text"])
     assert extract_pdf_text(pdf) == ["First page text", "Second page text"]
