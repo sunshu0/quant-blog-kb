@@ -121,7 +121,7 @@ def test_marks_give_ratio_and_verdict(tmp_path: Path, capsys: pytest.CaptureFixt
     assert cli.main(env.argv("--sample", "5")) == 0  # 已有抽样表：只读标记
     out = capsys.readouterr().out
     assert "读取已有的抽样表" in out
-    assert "超过七成" in out and "不够" in out
+    assert "超过七成" in out and "不到七成" in out
     assert "article: survey: {sampled: 5, wanted: 5, ratio: 1.00" in out
     # 重新抽样时，已标的按网址保留
     assert cli.main(env.argv("--sample", "6", "--resample")) == 0
@@ -133,9 +133,10 @@ def test_verdict_bands() -> None:
     def v(yes: int, no: int) -> str:
         return survey.Verdict("s", yes + no, yes, no).conclusion
 
-    assert v(17, 3).startswith("超过七成")
-    assert v(14, 6).startswith("七成上下") and v(13, 7).startswith("七成上下")
-    assert v(11, 9).startswith("不够")
+    assert v(17, 3).startswith("超过七成")  # 85% > 70%
+    assert v(14, 6).startswith("不到七成")  # 恰好 70%
+    assert v(13, 7).startswith("不到七成")  # 65%
+    assert v(11, 9).startswith("不到七成")  # 55%
     assert v(0, 0) == "还没标"
     assert survey.parse_mark(" Y ") is True and survey.parse_mark("不要") is False
     assert survey.parse_mark("maybe") is None

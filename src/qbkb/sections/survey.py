@@ -21,9 +21,9 @@ DEFAULT_SAMPLE = 20
 DEFAULT_SEED = 2026
 # 成员不超过这么多的栏目看全部，不抽样（design.md 4.4）
 FULL_BELOW = 30
-# 占比结论的分界：高于 HIGH 是"超过七成"，低于 LOW 是"不够"，中间是"七成上下"
-HIGH = 0.8
-LOW = 0.6
+# 占比结论的分界：老板原话是"超过七成整栏采集"，所以高于 0.7 算"超过七成"，
+# 其余（含恰好七成）都算"不到七成"，请老板决定
+HIGH = 0.7
 
 NEW_PREFIX = "new:"
 UNKNOWN_ID = "unclassified"
@@ -84,9 +84,7 @@ class Verdict:
             return "还没标"
         if r > HIGH:
             return "超过七成：可以整栏采集"
-        if r < LOW:
-            return "不够：不整栏采集"
-        return "七成上下：补抽 20–30 篇，或请老板决定"
+        return "不到七成：请老板决定（补抽或不采）"
 
 
 def tally(conn: sqlite3.Connection, site: str, rules: SectionRules) -> list[SectionTally]:

@@ -111,7 +111,7 @@ def test_mark_roundtrip_and_verdict_bands(tmp_path: Path) -> None:
     app = _setup(tmp_path)
     app.generate_sections({"site": "demo"})
     urls = [r["网址"] for r in survey.read_csv(_csv(tmp_path)) if r["栏目id"] == "article"]
-    # 标两个要、一个不要 → 占比 67%：七成上下
+    # 标两个要、一个不要 → 占比 67%：不到七成
     app.mark_section({"site": "demo", "url": urls[0], "mark": "要", "note": ""})
     app.mark_section({"site": "demo", "url": urls[1], "mark": "要", "note": "备注1"})
     app.mark_section({"site": "demo", "url": urls[2], "mark": "不要", "note": ""})
@@ -123,7 +123,7 @@ def test_mark_roundtrip_and_verdict_bands(tmp_path: Path) -> None:
     summary = {r["栏目id"]: r for r in view["summary"]}
     assert summary["article"]["已标"] == "3" and summary["article"]["要"] == "2"
     assert summary["article"]["占比"] == "67%"
-    assert summary["article"]["结论"].startswith("七成上下")
+    assert summary["article"]["结论"].startswith("不到七成")
     # 全要 → 超过七成；清除一个标记
     app.mark_section({"site": "demo", "url": urls[2], "mark": "要", "note": ""})
     view = app.sections_view("demo")

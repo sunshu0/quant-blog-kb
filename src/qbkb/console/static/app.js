@@ -292,8 +292,7 @@ function renderSections(d) {
 function summaryCard(row) {
   const conclusion = row["结论"] || "";
   const cls = conclusion.includes("超过七成") ? "ok"
-    : conclusion.includes("不够") ? "bad"
-    : conclusion.includes("七成上下") ? "attention" : "";
+    : conclusion.includes("不到七成") ? "attention" : "";
   const collect = row["是否采集"] === "是" ? "已选采集" : row["是否采集"] === "否" ? "未选" : "—";
   return el("div", { className: "sec-summary" },
     el("div", { className: "sec-summary-name", textContent: `${row["栏目"]}（${collect}）` }),
