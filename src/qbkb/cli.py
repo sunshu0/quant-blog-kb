@@ -31,6 +31,9 @@ EXIT_UNAVAILABLE = 4
 EXIT_ATTENTION = 5
 # 同时出现多种情况时，按这个顺序取第一个（先告诉用户"要等一会儿 / 等额度再跑"）
 _STOP_PRIORITY = (EXIT_UNAVAILABLE, EXIT_QUOTA, EXIT_ATTENTION)
+# 连续这么多篇被后端以同样原因（ArticleTranslationError）拒绝，就当是系统性的配置问题
+# （术语表被删、目标语言配置错等），停下让用户查配置，而不是把整个队列逐篇标成 needs_review。
+MAX_CONSECUTIVE_ARTICLE_ERRORS = 3
 
 EXIT_CODES_HELP = """退出码：
   0  正常完成
@@ -622,7 +625,14 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             print(f"错误：固定译文和原文结构不一致，请检查 config/{tr.FIXED_FILE}", file=sys.stderr)
             return EXIT_ERROR
         done = review = chars = free = 0
+        consecutive: list[
+            tuple[str, Status, str | None]
+        ] = []  # 连续同类请求错误的 (url, 原状态, 原 error)
+        last_error: str | None = None
         for url in urls:
+            before = store.get_article(conn, url)
+            orig_status = Status(before["status"]) if before is not None else Status.EXTRACTED
+            orig_error = before["error"] if before is not None else None
             try:
                 st = tr.translate_article(
                     conn, url, translator, glossary, retry_rejected=args.retry_rejected
@@ -639,8 +649,26 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 raise Stopped(EXIT_ERROR, f"[translate] 翻译后端鉴权失败，停下：{e}") from e
             except tr.ArticleTranslationError as e:
                 # 这一篇的请求有问题：标 needs_review（写明原因），继续下一篇，别拖垮整轮
+                msg = str(e)
                 store.set_status(conn, url, Status.NEEDS_REVIEW, error=f"translate: {e}")
                 review += 1
+                if msg == last_error:
+                    consecutive.append((url, orig_status, orig_error))
+                else:
+                    consecutive = [(url, orig_status, orig_error)]
+                last_error = msg
+                if len(consecutive) >= MAX_CONSECUTIVE_ARTICLE_ERRORS:
+                    # 连续 N 篇被后端以同样原因拒绝：多半是系统性的配置问题（术语表被删、目标语言
+                    # 配置错），不是这几篇自己的问题。把这批文章恢复原状态、不留一堆 needs_review，
+                    # 停下让用户查配置。4xx 不是"过一会儿就好"（那才是退出码 4），按配置错误退出 1。
+                    for u, st0, err0 in consecutive:
+                        store.set_status(conn, u, st0, error=err0)
+                    raise Stopped(
+                        EXIT_ERROR,
+                        f"[translate] 连续 {len(consecutive)} 篇被后端以同样原因拒绝（{msg}），"
+                        "疑似配置问题（术语表被删、目标语言写错等）。已把这批文章恢复原状态，"
+                        "请检查配置后重跑",
+                    ) from e
                 continue
             except tr.FixedTranslationError as e:
                 # 理论上预检已经拦下；这里再兜一次底，同样整体报错而不是逐篇标 failed
@@ -649,7 +677,12 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 # 没有段落、单段超长等这一篇的问题：标 needs_review，继续下一篇
                 store.set_status(conn, url, Status.NEEDS_REVIEW, error=f"translate: {e}")
                 review += 1
+                consecutive = []
+                last_error = None
                 continue
+            # 这一篇正常翻完：连续同类错误从头数
+            consecutive = []
+            last_error = None
             chars += st.chars
             free += st.fixed + st.speaker_labels + st.revalidated
             if st.needs_review:
