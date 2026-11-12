@@ -18,10 +18,10 @@ from qbkb.sections import (
 )
 
 
-def test_cfm_sections_only_edge_selected() -> None:
+def test_cfm_sections_collect_papers_and_whitepaper() -> None:
     rules = load_section_rules(config.load_site("cfm"))
     assert rules.enabled and len(rules.sections) == 4
-    assert [s.id for s in rules.sections if s.collect] == ["the-edge-a-cfm-blog"]
+    assert [s.id for s in rules.sections if s.collect] == ["academic-papers", "whitepaper"]
 
 
 def test_cfm_selection_and_new_section(tmp_path: Path) -> None:
@@ -77,7 +77,7 @@ def test_local_cfm_pages_have_recognized_sections() -> None:
         found = page_section(document_fromstring(raw), raw, url, rules)
         section = rules.classify(url, found.key)
         assert not found.issues and section is not None, path.name
-        assert section.collect == (section.id == "the-edge-a-cfm-blog")
+        assert section.collect == (section.id in {"academic-papers", "whitepaper"})
         counts[section.id] += 1
     assert len(SAMPLES) == 12
     assert counts == {

@@ -76,8 +76,10 @@ extract:
         - ".sidebar ul.file-list"
 
 
-# 栏目来自页面的 Type 标题。用户首批仅选择 The Edge；识别不了的新栏目只提醒，不翻译。
-# 论文、白皮书目前只抽网页摘要，PDF 正文不在本次范围。
+# 栏目来自页面的 Type 标题；识别不了的新栏目只提醒，不翻译。
+# 用户 2026-11-13 看完抽样表后选定：Academic Papers、Whitepaper 整栏采集；The Edge 由
+# 上次的"已选择"改回不采集，Commentary & Insights 不采集（抽样占比见各栏目 survey）。
+# 论文、白皮书全文是 PDF：正文 PDF 支持见 v2-pdf，本文件只抽网页摘要、把 PDF 链接附在正文后。
 sections:
   page_key:
     selector: ".thinking-type-container h5"
@@ -85,20 +87,24 @@ sections:
     - id: the-edge-a-cfm-blog
       name: The Edge a CFM blog
       key: The Edge a CFM blog
-      collect: true
-      status: 已选择
+      collect: false
+      status: 已调研
+      survey: {sampled: 20, wanted: 8, ratio: 0.40, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
     - id: commentary-insights
       name: Commentary & Insights
       key: Commentary & Insights
       collect: false
-      status: 待选择
+      status: 已调研
+      survey: {sampled: 20, wanted: 7, ratio: 0.35, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
     - id: academic-papers
       name: Academic Papers
       key: Academic Papers
-      collect: false
-      status: 待选择
+      collect: true
+      status: 已选择
+      survey: {sampled: 20, wanted: 20, ratio: 1.00, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
     - id: whitepaper
       name: Whitepaper
       key: Whitepaper
-      collect: false
-      status: 待选择
+      collect: true
+      status: 已选择
+      survey: {sampled: 20, wanted: 16, ratio: 0.80, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
