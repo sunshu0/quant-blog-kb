@@ -161,6 +161,24 @@ def test_stale_metadata_file_does_not_block_acquire(tmp_path: Path) -> None:
     assert lock.holder()["who"] == "新任务"  # type: ignore[index]
 
 
+def test_metadata_write_failure_releases_os_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = jobs.RunLock(tmp_path)
+
+    def boom(fd: int, data: dict[str, Any]) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lock, "_write_info", boom)
+    with pytest.raises(OSError):
+        lock.acquire("控制台")
+    assert not lock.held and lock._fd is None
+    # 锁已经释放：另一个锁能立刻拿到，不会一直 Busy 到重启
+    other = jobs.RunLock(tmp_path)
+    other.acquire("定时任务")
+    other.release()
+
+
 def test_holder_reads_metadata_and_release_clears_it(tmp_path: Path) -> None:
     _write_lock(tmp_path, {"who": "旧任务", "pid": 1, "started": 1.0, "since": "x", "token": "t"})
     assert jobs.RunLock(tmp_path).holder()["who"] == "旧任务"  # type: ignore[index]

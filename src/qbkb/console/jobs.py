@@ -262,18 +262,27 @@ class RunLock:
             raise Busy(
                 f"已经有任务在运行（{h.get('who', '未知')}，{h.get('since', '?')} 开始）"
             ) from e
-        pid, started = self._me()
-        token = f"{pid}-{time.time_ns()}"
-        self._write_info(
-            fd,
-            {
-                "who": who,
-                "pid": pid,
-                "started": started,
-                "since": datetime.now().isoformat(timespec="seconds"),
-                "token": token,
-            },
-        )
+        try:
+            pid, started = self._me()
+            token = f"{pid}-{time.time_ns()}"
+            self._write_info(
+                fd,
+                {
+                    "who": who,
+                    "pid": pid,
+                    "started": started,
+                    "since": datetime.now().isoformat(timespec="seconds"),
+                    "token": token,
+                },
+            )
+        except BaseException:
+            # 取锁成功但写元数据失败：必须释放锁并关句柄，否则内核锁仍被本进程持有，
+            # 之后所有新任务一直 Busy，直到重启控制台 / 进程
+            with contextlib.suppress(OSError):
+                _unlock(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
         self._fd = fd
         self._token = token
         self.held = True
