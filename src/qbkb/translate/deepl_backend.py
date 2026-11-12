@@ -271,6 +271,12 @@ class DeepLTranslator:
             except deepl.DeepLException as e:
                 if "too many glossaries" in str(e).lower():
                     raise GlossaryLimitError(f"{GLOSSARY_LIMIT_HINT}（DeepL：{e}）") from e
+                status = e.http_status_code
+                if status in (401, 403):
+                    # 术语表同步（list/create）的鉴权失败也要走同一条提示，别等 main() 兜底
+                    raise BackendAuthError(
+                        f"DeepL 鉴权失败（HTTP {status}），请检查 .env 里的 DEEPL_API_KEY"
+                    ) from e
                 if not _retryable(e):
                     raise
                 if attempt >= self.retries:

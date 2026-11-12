@@ -399,6 +399,17 @@ def test_wrong_result_count_is_an_error() -> None:
         t.translate(["a", "b"], {})
 
 
+def test_sync_glossary_auth_error_is_mapped() -> None:
+    class Unauthorized(FakeClient):
+        def list_glossaries(self) -> list[deepl.GlossaryInfo]:
+            raise deepl.AuthorizationException("bad key", http_status_code=403)
+
+    t, sleeps = _translator(Unauthorized())
+    with pytest.raises(BackendAuthError):
+        t.sync_glossary(GLOSSARY)
+    assert sleeps == []  # 鉴权错误不可重试，直接报
+
+
 def test_usage() -> None:
     t, _ = _translator(FakeClient())
     assert t.usage() == (1234, 500000)
