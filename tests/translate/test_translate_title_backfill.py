@@ -50,10 +50,10 @@ def add(conn: sqlite3.Connection, slug: str, title: str | None, status: Status) 
 def test_estimate_includes_titles(conn: sqlite3.Connection) -> None:
     a = add(conn, "a", "Momentum basics", Status.FILTERED)
     b = add(conn, "b", "Momentum basics", Status.FILTERED)  # 同样的标题只算一次
-    need = estimate_chars(conn, [a, b], "fake", GLOSSARY)
+    need = estimate_chars(conn, [a, b], FakeTranslator(), GLOSSARY)
     assert need == len(BODY) + len(title_unit("Momentum basics"))
     translate_article(conn, a, FakeTranslator(), GLOSSARY)
-    assert estimate_chars(conn, [a, b], "fake", GLOSSARY) == 0
+    assert estimate_chars(conn, [a, b], FakeTranslator(), GLOSSARY) == 0
 
 
 def test_backfill_only_titles(conn: sqlite3.Connection) -> None:

@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from qbkb import store
-from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment
+from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment, Status
 from qbkb.translate import (
     ArticleTranslationError,
     AzureTranslator,
@@ -20,6 +20,7 @@ from qbkb.translate import (
     Glossary,
     SegmentTooLargeError,
     TranslatorUnavailableError,
+    estimate_chars,
     load_glossary,
     translate_article,
 )
@@ -549,4 +550,27 @@ def test_pipeline_batches_by_azure_request_units(tmp_path: Path) -> None:
     stats = translate_article(conn, url, translator, GLOSSARY_OBJ, max_batch_chars=limit)
     assert stats.translated == 2 and not stats.oversized
     assert len(fake.requests) == 2  # 每段一个请求，而不是合成一个再被后端切开
+    conn.close()
+
+
+def test_estimate_equals_actual_sent_for_term_dense_article(tmp_path: Path) -> None:
+    """M1：术语密集文章的预估字符数 = 实际送出的总长（含术语标记），不是原文长度。"""
+    conn = store.connect(tmp_path / "state.db")
+    url = "https://example.test/estimate"
+    store.upsert_discovered(conn, DiscoveredUrl(url=url, site="example", slug="estimate"))
+    segs = [
+        Segment(0, "<p>" + "drawdown momentum " * 30 + "</p>"),
+        Segment(1, "<p>" + "trend following factor " * 30 + "</p>"),
+    ]
+    store.replace_segments(conn, url, segs)
+    store.set_status(conn, url, Status.EXTRACTED)
+    fake = FakeAzure()
+    translator = _translator(fake)
+    expected = sum(translator.request_units(seg.html, GLOSSARY_OBJ)[1] for seg in segs)
+    # 术语标记让送出的文本明显长于原文，否则这个测试测不出「预估按实际发送长度算」
+    assert expected > sum(len(seg.html) for seg in segs)
+    assert estimate_chars(conn, [url], translator, GLOSSARY_OBJ) == expected
+    stats = translate_article(conn, url, translator, GLOSSARY_OBJ)
+    assert stats.chars == expected
+    assert translator.chars_sent == expected
     conn.close()

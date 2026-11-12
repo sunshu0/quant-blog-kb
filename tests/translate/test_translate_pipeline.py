@@ -148,7 +148,7 @@ def test_glossary_change_only_retranslates_affected_segments(
     # 改了 momentum（只出现在第 2 段），新增一个文中没有的词条，version 也递增了
     new = Glossary("2", {**glossary, "momentum": "动能", "carry": "套息"})
     assert glossary_upgrade_cost(conn, urls, "fake", glossary, new) == len(PARAS[2])
-    assert estimate_chars(conn, urls, "fake", new) == len(PARAS[2])
+    assert estimate_chars(conn, urls, FakeTranslator(), new) == len(PARAS[2])
     t = FakeTranslator()
     stats = translate_article(conn, URL, t, new)
     assert (stats.tm_hits, stats.translated) == (4, 1)
@@ -364,9 +364,9 @@ def test_estimate_chars(
     a = add_article()
     b = add_article([PARAS[0], "<p>New.</p>"], url="https://example.test/b")
     # 跨文章去重：PARAS[0] 只算一次
-    assert estimate_chars(conn, [a, b], "fake", glossary) == TOTAL + len("<p>New.</p>")
+    assert estimate_chars(conn, [a, b], FakeTranslator(), glossary) == TOTAL + len("<p>New.</p>")
     translate_article(conn, a, FakeTranslator(), glossary)
-    assert estimate_chars(conn, [a, b], "fake", glossary) == len("<p>New.</p>")
+    assert estimate_chars(conn, [a, b], FakeTranslator(), glossary) == len("<p>New.</p>")
 
 
 def _sup_segments() -> list[str]:

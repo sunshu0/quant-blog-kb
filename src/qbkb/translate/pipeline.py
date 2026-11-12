@@ -21,7 +21,6 @@ from qbkb.translate.base import (
     ArticleTranslationError,
     TranslatorUnavailableError,
     chunk_units,
-    count_chars,
 )
 from qbkb.translate.fixed import FIXED_FILE, is_interview, untranslated_units
 from qbkb.translate.footnotes import repair_marks, sent_length
@@ -43,6 +42,22 @@ def _unit_info(translator: Translator, html: str, glossary: Mapping[str, str]) -
     if callable(fn):
         return cast("Callable[[str, Mapping[str, str]], tuple[int, int]]", fn)(html, glossary)
     return 1, sent_length(html)
+
+
+def _sent_chars(translator: Translator, texts: Sequence[str], glossary: Mapping[str, str]) -> int:
+    """这批文本实际送出去的总长度（后端加词典标记 / 脚注占位 / 行拆分后求和）。
+
+    Azure 的 request_units 含术语标记、DeepL 的是脚注占位展开后的长度；没有这个方法
+    的后端（假后端等，计费按原文长度）退回原文 HTML 长度。stats.chars 和 estimate_chars
+    都用它，让「送出 N 字符」「预计约 N 字符」和后端真实计费一致。
+    """
+    fn = getattr(translator, "request_units", None)
+    if callable(fn):
+        return sum(
+            cast("Callable[[str, Mapping[str, str]], tuple[int, int]]", fn)(t, glossary)[1]
+            for t in texts
+        )
+    return sum(len(t) for t in texts)
 
 
 @dataclass(slots=True)
@@ -162,7 +177,7 @@ def _translate_title(
     if found is not None:
         return found
     (tgt,) = _call(translator, [unit], glossary, context)
-    stats.chars += len(unit)
+    stats.chars += _sent_chars(translator, [unit], glossary)
     if not same_structure(unit, tgt):
         return None
     store.tm_put(conn, segment_hash(unit), translator.name, unit, tgt, glossary.version_for(unit))
@@ -198,18 +213,6 @@ def _context(segments: Sequence[Segment], batch: list[int], limit: int) -> str:
         text = plain_text(segments[p].html)
         pieces.append(text[:per] if p in after else text[-per:])
     return "\n".join(t for t in pieces if t)[:limit]
-
-
-def _batch_length(translator: Translator, segment: str, glossary: Glossary) -> int:
-    """pipeline 分批用：这一段实际送出去的总长度（后端加词典标记/脚注占位/行拆分后求和）。
-
-    Azure 用 sent_total（含动态词典标记展开后的长度），DeepL 用 footnotes.sent_length
-    （只含脚注占位展开）。pipeline 按它累加才能保证一批只对应一个请求。
-    """
-    fn = getattr(translator, "sent_total", None)
-    if callable(fn):
-        return cast(int, fn(segment, glossary))
-    return sent_length(segment)
 
 
 def translate_article(
@@ -326,7 +329,7 @@ def translate_article(
             batch = [pending[i] for i in chunk]
             batch_texts = [texts[i] for i in chunk]
             out = _call(translator, batch_texts, glossary, _context(segments, batch, context_chars))
-            stats.chars += count_chars(batch_texts)
+            stats.chars += _sent_chars(translator, batch_texts, glossary)
             bad: list[int] = []
             # 先把好段落存下来，再重翻坏的：重翻时额度用完，已计费的好段落也不会丢
             for pos, tgt in zip(batch, out, strict=True):
@@ -338,7 +341,7 @@ def translate_article(
                 seg = segments[pos]
                 stats.retried += 1
                 (tgt,) = _call(translator, [seg.html], glossary, "")
-                stats.chars += len(seg.html)
+                stats.chars += _sent_chars(translator, [seg.html], glossary)
                 if same_structure(seg.html, tgt):
                     save(pos, tgt)
                 else:
@@ -386,7 +389,10 @@ def translate_article(
         if stats.rejected:
             parts.append("结构校验未通过的段落 " + ", ".join(map(str, stats.rejected)))
         if stats.oversized:
-            parts.append("超过单次请求上限的段落 " + ", ".join(map(str, stats.oversized)))
+            parts.append(
+                f"超过单次请求上限（{request_limit} 字符）的段落 "
+                + ", ".join(map(str, stats.oversized))
+            )
         error = "；".join(parts)
         store.set_status(
             conn,
@@ -444,7 +450,7 @@ def _title_units(conn: sqlite3.Connection, urls: Iterable[str]) -> list[str]:
 def estimate_chars(
     conn: sqlite3.Connection,
     urls: Iterable[str],
-    backend: str,
+    translator: Translator,
     glossary: Glossary,
     *,
     retry_rejected: bool = True,
@@ -453,8 +459,10 @@ def estimate_chars(
 
     和 base.FREE_MONTHLY_CHARS 比较，就知道这个月的额度够不够。
     retry_rejected=False 时不算同一术语版本下已有 rejected 译文的段落（translate 不会重翻它们）。
-    按送出去的 HTML 长度算，是上界。
+    按后端实际送出的长度算（Azure 含术语标记、DeepL 含脚注占位），不是原文长度，
+    这样「预计约 N 字符」和后端真实计费一致。
     """
+    backend = translator.name
     urls = list(urls)
     units = [seg.html for seg in _unique_segments(conn, urls, glossary)] + _title_units(conn, urls)
     total = 0
@@ -465,7 +473,7 @@ def estimate_chars(
             entry = store.tm_lookup(conn, segment_hash(unit), backend, glossary.version_for(unit))
             if entry is not None:
                 continue
-        total += len(unit)
+        total += _sent_chars(translator, [unit], glossary)
     return total
 
 

@@ -322,7 +322,7 @@ def test_fixed_translation_is_not_sent(conn: sqlite3.Connection, tmp_path: Path)
     store.replace_segments(conn, URL, [Segment(0, BODY), Segment(1, NOTICE)])
     # 以前 DeepL 的译文还在翻译记忆里：固定译文优先
     store.tm_put(conn, segment_hash(NOTICE), "fake", NOTICE, "<p>旧译文</p>", g.version_for(NOTICE))
-    assert estimate_chars(conn, [URL], "fake", g) == len(BODY)
+    assert estimate_chars(conn, [URL], FakeTranslator(), g) == len(BODY)
     t = FakeTranslator()
     stats = translate_article(conn, URL, t, g)
     assert t.calls == [[BODY]] and stats.fixed == 1 and stats.chars == len(BODY)
