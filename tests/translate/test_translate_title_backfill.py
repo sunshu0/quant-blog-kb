@@ -58,18 +58,28 @@ def test_backfill_only_titles(conn: sqlite3.Connection) -> None:
     pub = add(conn, "p", "Momentum A", Status.PUBLISHED)
     tr = add(conn, "t", "Momentum B", Status.TRANSLATED)
     add(conn, "n", None, Status.TRANSLATED)  # 没有英文标题的不算
-    add(conn, "f", "Momentum C", Status.FILTERED)  # 还没翻译的不归这里管
-    assert missing_titles(conn, "example") == [pub, tr]
+    f = add(conn, "f", "Momentum C", Status.FILTERED)  # 还没翻全文的也归这里管（分层翻译）
+    assert missing_titles(conn, "example") == [f, pub, tr]
 
     t = FakeTranslator()
-    assert backfill_titles(conn, missing_titles(conn), t, GLOSSARY) == 2
+    assert backfill_titles(conn, missing_titles(conn), t, GLOSSARY) == 3
     # 只翻标题，正文一段都不送
-    assert t.calls == [[title_unit("Momentum A")], [title_unit("Momentum B")]]
-    p_row, t_row = store.get_article(conn, pub), store.get_article(conn, tr)
-    assert p_row is not None and t_row is not None
+    assert t.calls == [
+        [title_unit("Momentum C")],
+        [title_unit("Momentum A")],
+        [title_unit("Momentum B")],
+    ]
+    p_row, t_row, f_row = (
+        store.get_article(conn, pub),
+        store.get_article(conn, tr),
+        store.get_article(conn, f),
+    )
+    assert p_row is not None and t_row is not None and f_row is not None
     assert p_row["title_zh"] == "【译】动量 A"
     assert p_row["status"] == Status.TRANSLATED  # 已发布的退回，下次 export 重新生成
     assert t_row["status"] == Status.TRANSLATED
+    assert f_row["title_zh"] == "【译】动量 C"
+    assert f_row["status"] == Status.FILTERED  # 只翻标题，不改状态
     assert missing_titles(conn) == []
 
 

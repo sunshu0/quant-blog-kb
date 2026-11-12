@@ -45,16 +45,17 @@ EXIT_MESSAGES: dict[int, str] = {
     EXIT_ATTENTION: "跑完了，但有文章需要处理：看「待复查」页（失败的原因、需要重翻的文章）。",
     EXIT_STOPPED: "已停止：进度已经保存，下次运行会接着跑。",
 }
-# 和 cli.STAGES 一致（v2 默认流程没有打分）
-STAGES = ("discover", "fetch", "extract", "translate", "export")
+# 和 cli.STAGES 一致（v2 默认流程：分层翻译，只翻标题 + 摘要，不翻全文）
+STAGES = ("discover", "fetch", "extract", "titles", "summarize", "export")
 STAGE_NAMES = {
     "discover": "发现新文章",
     "fetch": "抓取",
     "extract": "抽取正文、判定栏目",
-    "translate": "翻译",
+    "titles": "翻译标题",
+    "summarize": "生成中文摘要",
     "export": "导出 Markdown",
 }
-_STAGE_LINE = re.compile(r"^\[(discover|fetch|extract|translate|export)\]")
+_STAGE_LINE = re.compile(r"^\[(discover|fetch|extract|titles|translate|summarize|export)\]")
 _QUOTA_LINE = re.compile(r"本月额度：已用 (\d+) / 上限 (\d+) 字符（剩余 (\d+)）")
 _PUBLISHED_LINE = re.compile(r"^\[export\] \S+: 发布 (\d+)（内容没变 (\d+)）")
 MAX_LINES = 5000
@@ -102,11 +103,15 @@ def backend_args(ws: Workspace) -> list[str]:
 
 
 def run_command(ws: Workspace, limit: int, python: str = sys.executable) -> list[str]:
-    """点「运行」：qbkb run，每个阶段最多处理 limit 篇。"""
+    """点「运行」：qbkb run，每个阶段最多处理 limit 篇。
+
+    真实模式默认只翻标题 + 摘要，不翻全文（分层翻译）；演示模式要展示"翻译成中文知识库"，
+    所以翻全文（DemoTranslator 自带中文），但没有 LLM key，跳过摘要。
+    """
     cmd = [python, "-m", "qbkb.cli", "run", *base_args(ws), "--limit", str(limit)]
     cmd += ["--raw-dir", str(ws.raw), "--out", str(ws.out), *backend_args(ws)]
     if ws.demo:
-        cmd += ["--fetch-delay", "0"]  # 本机示例站点，允许不等待
+        cmd += ["--fetch-delay", "0", "--full-translate", "--skip", "summarize"]
     return cmd
 
 

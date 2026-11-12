@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO, cast
+from typing import Any, TextIO, cast
 
 import httpx
 
@@ -45,9 +45,14 @@ EXIT_CODES_HELP = """退出码：
      因缺译文退回重翻、sitemap 部分失败、发现了配置里没有的新栏目（qbkb status 查看）
 同时出现多种情况时按 4、3、5 的顺序取第一个。"""
 
-# 默认流程（v2，design.md 2）：采集阶段只有确定性规则，不调用 LLM。
+# 默认流程（v2 分层翻译）：采集阶段只有确定性规则，不调用 LLM；全文翻译不在默认流程里，
+# 入库只翻标题 + 生成中文摘要。`--full-translate` 恢复旧的"入库即翻全文"。
 # filter（L2 打分）保留为可选的加工命令 `qbkb filter`，不在 run / 控制台 / 每天自动更新里。
-STAGES = ("discover", "fetch", "extract", "translate", "export")
+STAGES = ("discover", "fetch", "extract", "titles", "summarize", "export")
+# --full-translate 时的流程：用 translate（翻全文）替换 titles（只翻标题）
+FULL_STAGES = ("discover", "fetch", "extract", "translate", "summarize", "export")
+# --skip 可选的所有阶段：titles 和 translate 是"翻标题"/"翻全文"两个互斥阶段，都列出来
+SKIP_STAGES = ("discover", "fetch", "extract", "titles", "translate", "summarize", "export")
 # 查翻译额度（只用来显示）最多等这么久
 USAGE_TIMEOUT_S = 5.0
 RESUME_HINT = "进度已保存在状态库里，下次运行同一条命令会从中断处接着跑。"
@@ -71,6 +76,7 @@ class Deps:
     fetch_runner: Callable[[argparse.Namespace, str], int] | None = None
     scorer: Scorer | None = None
     translator: Translator | None = None
+    summarizer: object | None = None
     image_transport: httpx.BaseTransport | None = None
     sleep: Callable[[float], None] | None = None
 
@@ -156,7 +162,10 @@ def _translate_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--titles",
         action="store_true",
-        help="只补翻标题：已翻译 / 已发布但还没有中文标题的文章（走翻译记忆），补完重新导出",
+        help=(
+            "只翻标题，不翻正文：extracted / filtered / translated / published 里还没有中文标题的"
+            "文章（走翻译记忆）。只翻标题不改文章状态（标题有了不等于全文翻了）"
+        ),
     )
 
 
@@ -197,18 +206,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _common(p)
     _filter_opts(p)
-    p = stage("translate", "翻译 extracted 的文章（只翻采集栏目里的）")
+    p = stage("translate", "翻全文（默认翻采集栏目里还没翻的；--url / --url-file 按清单翻）")
     _common(p)
     _translate_opts(p)
+    p.add_argument(
+        "--url-file",
+        type=Path,
+        help="只翻译这个文件里列出的网址（每行一个；和 --url 合在一起）",
+    )
     p = stage("export", "把 translated 的文章输出成 Markdown")
     _common(p)
     _export_opts(p)
-    p = stage("run", "按顺序跑完全部阶段：" + " → ".join(STAGES))
+    p = stage("run", "按顺序跑完全部阶段（默认只翻标题）")
     _common(p)
     _fetch_opts(p)
     _translate_opts(p)
     _export_opts(p)
-    p.add_argument("--skip", action="append", choices=STAGES, default=[], help="跳过某个阶段")
+    p.add_argument("--skip", action="append", choices=SKIP_STAGES, default=[], help="跳过某个阶段")
+    p.add_argument(
+        "--full-translate",
+        action="store_true",
+        help="入库时就翻全文（恢复旧的默认流程）；不加时只翻标题，全文以后按清单翻",
+    )
+    p.add_argument(
+        "--input-chars", type=int, default=24000, help="摘要的正文输入字符上限，超出会截取并提示"
+    )
     p = stage("summarize", "独立生成中文摘要（调用 LLM，不在默认run流程中）")
     _common(p)
     p.add_argument(
@@ -484,6 +506,15 @@ def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
     return DeepLTranslator.from_env()
 
 
+def _make_summarizer(args: argparse.Namespace, deps: Deps) -> Any:
+    """摘要后端（DeepSeek）。deps.summarizer 供测试注入假实现；正常从 .env 创建。"""
+    if deps.summarizer is not None:
+        return deps.summarizer
+    from qbkb.summarize import DeepSeekSummarizer
+
+    return DeepSeekSummarizer.from_env(max_input_chars=getattr(args, "input_chars", 24000))
+
+
 def translator_quota(translator: object) -> tuple[int | None, int, bool] | None:
     """翻译后端本月的 (已用字符, 上限, 上限是不是实测的)；后端没有额度概念就返回 None。
 
@@ -543,7 +574,7 @@ def _print_quota(translator: object, when: str) -> None:
 
 
 def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
-    """translate --titles：只补翻缺中文标题的文章。"""
+    """translate --titles：只补翻缺中文标题的文章（不翻正文、不改状态）。"""
     from qbkb import translate as tr
 
     conn = store.connect(args.db)
@@ -552,22 +583,19 @@ def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
         if args.limit is not None:
             urls = urls[: args.limit]
         if not urls:
-            print(f"[translate] {site.name}: 没有缺中文标题的文章")
+            print(f"[titles] {site.name}: 没有缺中文标题的文章")
             return EXIT_OK
         translator = _make_translator(args, deps)
         glossary = tr.load_glossary(_cfg(args) / "glossary.yaml")
         try:
             n = tr.backfill_titles(conn, urls, translator, glossary)
         except tr.QuotaStopped as e:
-            raise Stopped(EXIT_QUOTA, f"[translate] 补翻标题时额度用完，停下：{e}") from e
+            raise Stopped(EXIT_QUOTA, f"[titles] 补翻标题时额度用完，停下：{e}") from e
         except tr.BackendStopped as e:
-            raise Stopped(EXIT_UNAVAILABLE, f"[translate] 翻译后端暂时不可用：{e}") from e
+            raise Stopped(EXIT_UNAVAILABLE, f"[titles] 翻译后端暂时不可用：{e}") from e
         except tr.BackendAuthError as e:
-            raise Stopped(EXIT_ERROR, f"[translate] 翻译后端鉴权失败，停下：{e}") from e
-        print(
-            f"[translate] {site.name}: 补翻标题 {n} / {len(urls)} 篇"
-            "（已发布的退回 translated，下次 export 重新生成）"
-        )
+            raise Stopped(EXIT_ERROR, f"[titles] 翻译后端鉴权失败，停下：{e}") from e
+        print(f"[titles] {site.name}: 补翻标题 {n} / {len(urls)} 篇（只翻标题，不翻正文）")
         return EXIT_OK if n == len(urls) else EXIT_ATTENTION
     finally:
         conn.close()
@@ -584,22 +612,37 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
     try:
         rules = sections.load_section_rules(site)
         sections.apply_sections(conn, site, rules)
-        urls = sections.translatable(conn, site, rules)
-        if rules.enabled and not any(s.collect for s in rules.sections):
-            print(
-                f"[translate] {site.name}: 还没有勾选任何采集栏目"
-                "（sections 的 collect 都是 false），"
-                f"不翻译新文章。用 qbkb sections --site {site.name} 调研后在 "
-                f"config/sites/{site.name}.yaml 里勾选"
-            )
-        if args.retry_rejected or getattr(args, "recheck", False):
-            urls = sorted(urls + store.list_by_status(conn, Status.NEEDS_REVIEW, site.name))
-        if getattr(args, "recheck", False):
-            for st in (Status.TRANSLATED, Status.PUBLISHED):
-                urls = sorted(urls + store.list_by_status(conn, st, site.name))
-        only = getattr(args, "url", None)
+        only = set(getattr(args, "url", None) or [])
+        # --url-file 只在独立的 translate 命令里有；run 里的 --url-file 是 fetch 的，不能混用
+        url_file = getattr(args, "url_file", None) if args.command == "translate" else None
+        if url_file is not None:
+            only |= {
+                u.strip() for u in url_file.read_text(encoding="utf-8").splitlines() if u.strip()
+            }
         if only:
-            urls = [u for u in urls if u in only]
+            # 按清单翻全文：直接翻译列出的网址，不管它当前是什么状态（含只翻过标题的 published）
+            urls = sorted(u for u in only if store.get_article(conn, u) is not None)
+        else:
+            urls = sections.translatable(conn, site, rules)
+            # 只翻过标题、已经导出的文章（translator 为空）也选进来：--full-translate 续跑、
+            # 或先入库再补翻全文时，能从标题-only 状态接着翻
+            urls += [
+                str(r["url"])
+                for r in store.list_rows(conn, [Status.PUBLISHED], site.name)
+                if r["translator"] is None
+            ]
+            if rules.enabled and not any(s.collect for s in rules.sections):
+                print(
+                    f"[translate] {site.name}: 还没有勾选任何采集栏目"
+                    "（sections 的 collect 都是 false），"
+                    f"不翻译新文章。用 qbkb sections --site {site.name} 调研后在 "
+                    f"config/sites/{site.name}.yaml 里勾选"
+                )
+            if args.retry_rejected or getattr(args, "recheck", False):
+                urls = sorted(urls + store.list_by_status(conn, Status.NEEDS_REVIEW, site.name))
+            if getattr(args, "recheck", False):
+                for st in (Status.TRANSLATED, Status.PUBLISHED):
+                    urls = sorted(urls + store.list_by_status(conn, st, site.name))
         if args.limit is not None:
             urls = urls[: args.limit]
         if not urls:
@@ -765,29 +808,42 @@ def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
 # ---- 汇总命令 ----------------------------------------------------------------
 
 
-def cmd_summarize(args: argparse.Namespace) -> int:
-    from qbkb.summarize import DeepSeekSummarizer, run
+def stage_summarize(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
+    """summarize 阶段：给一个站点生成中文摘要（不占翻译额度）。额度/不可用抛 Stopped。"""
+    from qbkb.summarize import run as summarize_run
 
-    backend = DeepSeekSummarizer.from_env(max_input_chars=args.input_chars)
+    backend = _make_summarizer(args, deps)
+    own_backend = deps.summarizer is None
     conn = store.connect(args.db)
-    attention = False
     try:
-        for site in _sites(args):
-            st = run(conn, site, backend, limit=args.limit)
-            print(
-                f"[summarize] {site.name}: 新生成 {st.generated}、复用 {st.reused}、"
-                f"输入截取 {st.truncated}"
-            )
-            for error in st.errors:
-                print(f"  ! {error}")
-            if st.stopped == "quota":
-                return EXIT_QUOTA
-            if st.stopped == "unavailable":
-                return EXIT_UNAVAILABLE
-            attention = attention or bool(st.errors)
+        st = summarize_run(conn, site, backend, limit=args.limit)
     finally:
         conn.close()
-        backend.close()
+        if own_backend:
+            close = getattr(backend, "close", None)
+            if callable(close):
+                close()
+    print(
+        f"[summarize] {site.name}: 新生成 {st.generated}、复用 {st.reused}、输入截取 {st.truncated}"
+    )
+    for error in st.errors:
+        print(f"  ! {error}")
+    if st.stopped == "quota":
+        raise Stopped(EXIT_QUOTA, "[summarize] 摘要额度用完，停下")
+    if st.stopped == "unavailable":
+        raise Stopped(EXIT_UNAVAILABLE, "[summarize] 摘要后端暂时不可用，停下")
+    return EXIT_ATTENTION if st.errors else EXIT_OK
+
+
+def cmd_summarize(args: argparse.Namespace, deps: Deps) -> int:
+    attention = False
+    for site in _sites(args):
+        try:
+            code = stage_summarize(args, deps, site)
+        except Stopped as e:
+            print(e)
+            return e.code
+        attention = attention or code == EXIT_ATTENTION
     return EXIT_ATTENTION if attention else EXIT_OK
 
 
@@ -998,8 +1054,12 @@ def _run_stage(name: str, args: argparse.Namespace, deps: Deps, site: config.Sit
         return stage_extract(args, site)
     if name == "filter":
         return stage_filter(args, deps, site)
+    if name == "titles":
+        return stage_titles(args, deps, site)
     if name == "translate":
         return stage_translate(args, deps, site)
+    if name == "summarize":
+        return stage_summarize(args, deps, site)
     if name == "export":
         return stage_export(args, deps, site)
     raise ValueError(f"未知阶段 {name}")
@@ -1011,7 +1071,11 @@ def cmd_stages(args: argparse.Namespace, deps: Deps) -> int:
     run 里某个阶段因为额度 / 后端不可用停下时，后面的阶段照常处理已经就绪的文章
     （比如翻译额度用完，已经翻好的文章照样导出），最后用对应的退出码结束。
     """
-    stages = [s for s in STAGES if s not in args.skip] if args.command == "run" else [args.command]
+    if args.command == "run":
+        flow = FULL_STAGES if getattr(args, "full_translate", False) else STAGES
+        stages = [s for s in flow if s not in args.skip]
+    else:
+        stages = [args.command]
     seen: set[int] = set()
     for site in _sites(args):
         for name in stages:
@@ -1054,7 +1118,7 @@ def main(argv: Sequence[str] | None = None, *, deps: Deps | None = None) -> int:
                 print(f"{name}\t{site.compliance_decision}")
             return EXIT_OK
         if args.command == "summarize":
-            return cmd_summarize(args)
+            return cmd_summarize(args, deps)
         if args.command == "table":
             return cmd_table(args)
         if args.command == "status":

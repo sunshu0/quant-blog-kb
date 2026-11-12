@@ -246,8 +246,9 @@ def _manager(tmp_path: Path, popen: FakePopen, **kw: Any) -> jobs.JobManager:
 
 LINES = [
     "[discover] demo: 新 7、更新 0",
-    "[translate] demo: 待翻译 4 篇",
-    "[translate] 翻译后本月额度：已用 1200 / 上限 1000000 字符（剩余 998800）",
+    "[titles] demo: 补翻标题 4 / 4 篇（只翻标题，不翻正文）",
+    "[summarize] demo: 新生成 4、复用 0、输入截取 0",
+    "[titles] 翻译后本月额度：已用 1200 / 上限 1000000 字符（剩余 998800）",
     "[export] demo: 发布 3（内容没变 1）、退回重翻 0",
     "错误：key sk-abcdefghijklmnop9876 不对",
 ]
@@ -265,7 +266,7 @@ def test_job_manager_collects_output_and_result(tmp_path: Path) -> None:
     assert job.exit_code == 5 and done == [job]
     s = job.summary()
     assert s["running"] is False and "待复查" in str(s["result"])
-    assert s["stage"] == "export" and s["progress"] == {"done": 5, "total": 5}
+    assert s["stage"] == "export" and s["progress"] == {"done": 6, "total": 6}
     assert job.quota == {"used": 1200, "limit": 1000000, "remaining": 998800}
     assert job.published == 2
     assert "sk-abcdefghijklmnop9876" not in "\n".join(job.lines)  # key 被换成 ***

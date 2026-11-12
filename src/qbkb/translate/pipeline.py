@@ -447,8 +447,14 @@ def estimate_chars(
 
 
 def missing_titles(conn: sqlite3.Connection, site: str | None = None) -> list[str]:
-    """已经 translated / published、有英文标题但没有中文标题的文章（PR #7 之前翻的）。"""
-    rows = store.list_rows(conn, [Status.TRANSLATED, Status.PUBLISHED], site)
+    """有英文标题、还没有中文标题的文章。
+
+    v2 分层翻译：入库时只翻标题，所以 extracted / filtered（还没翻全文的）也在这里；
+    已 translated / published 的是 PR #7 之前翻的、当时没翻标题。
+    """
+    rows = store.list_rows(
+        conn, [Status.EXTRACTED, Status.FILTERED, Status.TRANSLATED, Status.PUBLISHED], site
+    )
     return [
         str(r["url"]) for r in rows if r["title"] and str(r["title"]).strip() and not r["title_zh"]
     ]
