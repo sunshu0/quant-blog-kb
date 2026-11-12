@@ -71,15 +71,14 @@ extract:
       remove:
         - h1 # 标题已经在元数据里
       body:
-        # 论文、白皮书的全文是 PDF：网页只有摘要；侧栏的 "Download PDF" 链接不进正文，
-        # 正文 PDF 支持见 v2-pdf
+        # 论文、白皮书的全文是 PDF：网页只有摘要；侧栏的 "Download PDF" 链接不进正文（见 pdf 节）
         - ".content-blocks-container .col-80"
 
 
 # 栏目来自页面的 Type 标题；识别不了的新栏目只提醒，不翻译。
 # 用户 2026-11-13 看完抽样表后选定：Academic Papers、Whitepaper 整栏采集；The Edge 由
 # 上次的"已选择"改回不采集，Commentary & Insights 不采集（抽样占比见各栏目 survey）。
-# 论文、白皮书全文是 PDF：正文 PDF 支持见 v2-pdf，本文件只抽网页摘要，PDF 链接不进正文。
+# 论文、白皮书全文是 PDF：本文件只抽网页摘要，PDF 链接不进正文（全文见 pdf 节）。
 sections:
   page_key:
     selector: ".thinking-type-container h5"
@@ -108,3 +107,10 @@ sections:
       collect: true
       status: 已选择
       survey: {sampled: 20, wanted: 16, ratio: 0.80, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
+
+
+# PDF 正文支持（v2-pdf）：网页正文（抽取后）少于 min_chars 字符时，用站内 PDF 的全文。
+# 论文、白皮书页面只有摘要，全文在侧栏 "Download PDF" 指向的 PDF 里。
+pdf:
+  selector: ".sidebar ul.file-list a"
+  min_chars: 3000

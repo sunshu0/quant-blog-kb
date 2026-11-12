@@ -14,9 +14,9 @@ import pytest
 from scrapy.exceptions import IgnoreRequest
 from scrapy.http import HtmlResponse, Request, TextResponse
 
-from qbkb import store
+from qbkb import config, store
 from qbkb.config import SiteConfig
-from qbkb.extract.rules import ExtractRules
+from qbkb.extract.rules import ExtractRules, load_rules
 from qbkb.fetch import run_fetch, select_pdf_targets
 from qbkb.fetch.outcome import Kind
 from qbkb.fetch.process import META_RETRY_AFTER_REFUSED, process_response
@@ -641,3 +641,50 @@ def test_run_fetch_shares_limit_budget(tmp_path: Path, monkeypatch: pytest.Monke
     run_fetch(site, db, tmp_path / "raw", limit=1)
     assert seen["urls"] == [discovered]
     assert seen["pdf_urls"] == []
+
+
+# ---- CFM：真实站点配置启用 PDF（侧栏 Download PDF + 正文 < 3000 排 PDF） ----
+
+
+def test_cfm_pdf_config_reads_sidebar_selector_and_min_chars() -> None:
+    site = config.load_site("cfm")
+    rules = load_pdf_rules(site)
+    assert rules is not None
+    assert rules.selector == ".sidebar ul.file-list a"
+    assert rules.min_chars == 3000
+
+
+CFM_PAPER_HTML = (
+    b'<html><body class="single-post">'
+    b'<section class="content-blocks-container"><div class="row">'
+    b'<div class="col-80">'
+    b'<div class="content-block"><h1 class="appear">Toy Funds</h1></div>'
+    b'<div class="content-block text-content appear">'
+    b"<p><strong>Abstract</strong></p>"
+    b"<p>Short abstract because the full paper is a PDF.</p>"
+    b"</div></div>"
+    b'<div class="col-20 sidebar">'
+    b'<ul class="file-list">'
+    b'<li class="appear"><a href="/wp-content/uploads/2020/09/Toy_Funds.pdf">Download PDF</a></li>'
+    b"</ul>"
+    b"</div></div></section>"
+    b"</body></html>"
+)
+
+
+def test_cfm_short_body_schedules_sidebar_pdf(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    """CFM 论文页：正文只有摘要（< 3000 字符）时，排侧栏 "Download PDF" 的 PDF。"""
+    url = "https://www.cfm.com/toy-funds/"
+    store.upsert_discovered(conn, DiscoveredUrl(url=url, site="cfm", slug="toy-funds"))
+    site = config.load_site("cfm")
+    spider = _spider(
+        conn,
+        tmp_path,
+        pdf_rules=load_pdf_rules(site),
+        extract_rules=load_rules(site),
+    )
+    request = Request(url, cb_kwargs={"article_url": url})
+    resp = TextResponse(request.url, status=200, body=CFM_PAPER_HTML, request=request)
+    scheduled = spider.parse_article(resp, article_url=url)
+    assert isinstance(scheduled, Request)
+    assert scheduled.url == "https://www.cfm.com/wp-content/uploads/2020/09/Toy_Funds.pdf"
