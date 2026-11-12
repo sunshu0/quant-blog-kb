@@ -182,13 +182,34 @@ def test_translation_memory_none_glossary(conn: sqlite3.Connection) -> None:
     assert store.tm_get(conn, h, "fake", None) == "<p>叉</p>"
 
 
-# ---- 并发：busy_timeout + WAL ----
+# ---- 并发：busy_timeout ----
 
 
-def test_connect_sets_busy_timeout_and_wal(tmp_path: Path) -> None:
+def test_connect_sets_busy_timeout_and_delete_journal(tmp_path: Path) -> None:
     c = store.connect(tmp_path / "state.db")
     assert c.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
-    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    c.close()
+
+
+def test_connect_switches_existing_wal_back_to_delete(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute(
+        "CREATE TABLE articles (url TEXT PRIMARY KEY, site TEXT, slug TEXT, status TEXT,"
+        " updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO articles (url, site, slug, status, updated_at)"
+        " VALUES ('https://a.test/1', 'x', '1', 'discovered', 'now')"
+    )
+    conn.commit()
+    conn.close()
+    # 已是 WAL 的库在 connect 时切回 DELETE（先 checkpoint，把 -wal 里的数据并回主库）
+    c = store.connect(db)
+    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    assert c.execute("SELECT COUNT(*) FROM articles").fetchone()[0] == 1
     c.close()
 
 
