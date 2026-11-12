@@ -560,6 +560,8 @@ def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
             raise Stopped(EXIT_QUOTA, f"[translate] 补翻标题时额度用完，停下：{e}") from e
         except tr.BackendStopped as e:
             raise Stopped(EXIT_UNAVAILABLE, f"[translate] 翻译后端暂时不可用：{e}") from e
+        except tr.BackendAuthError as e:
+            raise Stopped(EXIT_ERROR, f"[translate] 翻译后端鉴权失败，停下：{e}") from e
         print(
             f"[translate] {site.name}: 补翻标题 {n} / {len(urls)} 篇"
             "（已发布的退回 translated，下次 export 重新生成）"
@@ -818,6 +820,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"{label}（{st.value}，{len(rows)} 篇）：")
             for r in rows:
                 print(f"  {r['url']}\n    {r['error'] or ''}")
+            if st is Status.NEEDS_REVIEW:
+                print("  重试：qbkb translate --retry-rejected（重翻结构校验没过的段落）")
     finally:
         conn.close()
     return EXIT_OK

@@ -9,6 +9,7 @@ import pytest
 from qbkb import store
 from qbkb.models import DiscoveredUrl, Segment, Status
 from qbkb.translate import (
+    ArticleTranslationError,
     FakeTranslator,
     Glossary,
     QuotaStopped,
@@ -70,6 +71,27 @@ def test_backfill_only_titles(conn: sqlite3.Connection) -> None:
     assert p_row["status"] == Status.TRANSLATED  # 已发布的退回，下次 export 重新生成
     assert t_row["status"] == Status.TRANSLATED
     assert missing_titles(conn) == []
+
+
+def test_backfill_skips_article_translation_error(conn: sqlite3.Connection) -> None:
+    from collections.abc import Mapping, Sequence
+
+    a = add(conn, "a", "Momentum A", Status.TRANSLATED)
+    b = add(conn, "b", "Momentum B", Status.TRANSLATED)
+
+    class RejectA(FakeTranslator):
+        def translate(
+            self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
+        ) -> list[str]:
+            if any("Momentum A" in s for s in segments):
+                raise ArticleTranslationError("DeepL 拒绝这次请求（HTTP 400）")
+            return super().translate(segments, glossary, context)
+
+    done = backfill_titles(conn, [a, b], RejectA(), GLOSSARY)
+    assert done == 1  # a 这一篇跳过，不中断后面的
+    assert store.get_article(conn, b)["title_zh"] == "【译】动量 B"  # type: ignore[index]
+    assert store.get_article(conn, a)["title_zh"] is None  # type: ignore[index]
+    assert missing_titles(conn) == [a]
 
 
 def test_backfill_reuses_memory_and_stops_on_quota(conn: sqlite3.Connection) -> None:

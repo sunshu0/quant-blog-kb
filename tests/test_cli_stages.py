@@ -34,6 +34,7 @@ def test_status_counts_and_lists(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "共 3 篇（站点 man）" in out
     assert "discovered        1" in out and "needs_review      1" in out
     assert "需要人工复查（needs_review，1 篇）" in out and "结构校验未通过的段落 3" in out
+    assert "重试：qbkb translate --retry-rejected" in out
     assert "失败（failed，1 篇）" in out and "HTTP 404" in out
 
 

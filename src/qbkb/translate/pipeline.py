@@ -476,6 +476,9 @@ def backfill_titles(
             raise QuotaStopped(stats, f"额度用完（{e}）") from e
         except TranslatorUnavailableError as e:
             raise BackendStopped(stats, str(e)) from e
+        except ArticleTranslationError:
+            # 这一篇标题的请求有问题：跳过这一篇（下一轮再试），别拖垮整轮补标题
+            continue
         if title_zh is None:
             continue
         status = Status(row["status"])
