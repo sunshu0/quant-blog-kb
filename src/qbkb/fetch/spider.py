@@ -165,14 +165,26 @@ class HostAllowlistMiddleware:
         parts = urlsplit(url)
         if (parts.scheme or "").lower() != self.allowed_scheme:
             return False
-        host = (parts.hostname or "").lower().rstrip(".")
+        return self._host_allowed(url)
+
+    def _host_allowed(self, url: str) -> bool:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
         return host == self.allowed_host or host.endswith("." + self.allowed_host)
 
     def process_request(self, request: Request, spider: scrapy.Spider) -> None:
         if self.is_allowed(request.url):
             return
-        article_url = str(request.cb_kwargs.get("article_url", request.url))
-        spider.fail_cross_host(article_url, request.url)  # type: ignore[attr-defined]
+        article_url = request.cb_kwargs.get("article_url")
+        if article_url is None:
+            # 内部请求（robots.txt 之类）：没有 article_url，不是文章，不能当文章记失败。
+            # 同 host（scheme 可以不同，比如 http 站点把 robots 规范重定向到 https）放行；
+            # 真跨 host 就停掉整站，不能放任 Scrapy 对 robots 失败默认放行、继续抓文章。
+            if self._host_allowed(request.url):
+                return
+            raise CloseSpider(
+                f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则，停止抓取"
+            )
+        spider.fail_cross_host(str(article_url), request.url)  # type: ignore[attr-defined]
         raise IgnoreRequest(f"请求目标 {request.url} 不在许可站点 {self.allowed_host} 内")
 
 

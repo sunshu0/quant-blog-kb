@@ -398,6 +398,35 @@ def test_same_host_redirect_is_allowed(db: tuple[Path, sqlite3.Connection], tmp_
     assert store.get_article(conn, url)["status"] == Status.DISCOVERED  # type: ignore[index]
 
 
+def test_robots_request_without_article_url_is_not_recorded_as_article(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    _, conn = db
+    mw = HostAllowlistMiddleware("https", "www.example.test")
+    # robots 请求没有 article_url：跨 host 被拦时不能当文章记失败（之前会 KeyError），而是停掉整站
+    with pytest.raises(CloseSpider):
+        mw.process_request(
+            Request("https://unapproved.test/robots.txt"), _spider(conn, tmp_path, Counter())
+        )
+    # 没有文章被误标失败
+    for slug in ("alpha", "beta"):
+        assert store.get_article(conn, BASE + slug)["status"] == Status.DISCOVERED  # type: ignore[index]
+
+
+def test_robots_same_host_scheme_change_is_allowed(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    _, conn = db
+    mw = HostAllowlistMiddleware("http", "www.example.test")
+    # http 站点把 robots.txt 规范重定向到 https（同 host 换 scheme）：对 robots 放行
+    assert (
+        mw.process_request(
+            Request("https://www.example.test/robots.txt"), _spider(conn, tmp_path, Counter())
+        )
+        is None
+    )
+
+
 def test_run_fetch_removes_stale_tmp_before_crawling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
