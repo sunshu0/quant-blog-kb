@@ -213,8 +213,28 @@ class TermAnnotator:
     译文和原文相同的词条（alpha、CTA）不标；代码、公式、链接文字里不标。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, all_terms: Mapping[str, str] | None = None) -> None:
         self.done: set[str] = set()
+        # 整份术语表的译文：短译文落在更长的术语译文里面时（"波动率"在"隐含波动率"里）不标，
+        # 否则会出现"隐含波动率（volatility）"——英文注释挂到了长短语里的短词上
+        self._all_zh = sorted({zh for zh in (all_terms or {}).values()}, key=len, reverse=True)
+
+    def _find(self, part: str, zh: str) -> int:
+        """zh 在 part 里第一次"独立"出现的位置：不在任何更长的术语译文里面。找不到返回 -1。"""
+        longer = [z for z in self._all_zh if len(z) > len(zh) and zh in z]
+        covered: list[tuple[int, int]] = []
+        for z in longer:
+            start = part.find(z)
+            while start >= 0:
+                covered.append((start, start + len(z)))
+                start = part.find(z, start + 1)
+        pos = part.find(zh)
+        while pos >= 0:
+            end = pos + len(zh)
+            if not any(a <= pos and end <= b for a, b in covered):
+                return pos
+            pos = part.find(zh, pos + 1)
+        return -1
 
     def annotate(self, zh_html: str, terms: Mapping[str, str]) -> str:
         todo = {
@@ -242,7 +262,7 @@ class TermAnnotator:
             for en, zh in sorted(todo.items(), key=lambda t: len(t[1]), reverse=True):
                 if en in self.done or zh in self.done:
                     continue
-                pos = part.find(zh)
+                pos = self._find(part, zh)
                 if pos < 0:
                     continue
                 end = pos + len(zh)

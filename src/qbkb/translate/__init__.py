@@ -7,7 +7,7 @@ from qbkb.translate.base import (
     TranslatorUnavailableError,
     count_chars,
 )
-from qbkb.translate.deepl_backend import DeepLTranslator
+from qbkb.translate.deepl_backend import DeepLTranslator, GlossaryLimitError
 from qbkb.translate.fake import FakeTranslator
 from qbkb.translate.glossary import Glossary, load_glossary
 from qbkb.translate.pipeline import (
@@ -33,6 +33,7 @@ __all__ = [
     "BackendStopped",
     "DeepLTranslator",
     "FakeTranslator",
+    "GlossaryLimitError",
     "Glossary",
     "QuotaStopped",
     "SegmentTooLargeError",

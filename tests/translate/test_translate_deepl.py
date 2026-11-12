@@ -28,6 +28,7 @@ class FakeClient:
         self.translate_calls: list[dict[str, Any]] = []
         self.glossaries: list[deepl.GlossaryInfo] = []
         self.created: list[tuple[str, str, str, dict[str, str]]] = []
+        self.deleted: list[str] = []
 
     def translate_text(self, text: Any, **kwargs: Any) -> Any:
         self.translate_calls.append({"text": list(text), **kwargs})
@@ -42,9 +43,14 @@ class FakeClient:
         self, name: str, source_lang: Any, target_lang: Any, entries: dict[str, str]
     ) -> deepl.GlossaryInfo:
         self.created.append((name, source_lang, target_lang, entries))
-        info = _info(f"id-{len(self.glossaries)}", name, len(entries))
+        # id 按"建过几次"编号（删掉的也算），和 DeepL 一样不复用 id
+        info = _info(f"id-{len(self.glossaries) + len(self.deleted)}", name, len(entries))
         self.glossaries.append(info)
         return info
+
+    def delete_glossary(self, glossary: Any) -> None:
+        self.deleted.append(str(glossary))
+        self.glossaries = [g for g in self.glossaries if g.glossary_id != glossary]
 
     def get_usage(self) -> deepl.Usage:
         return deepl.Usage({"character_count": 1234, "character_limit": 500000})
@@ -163,14 +169,100 @@ def test_glossary_with_wrong_entry_count_is_not_reused() -> None:
     client = FakeClient()
     client.glossaries.append(_info("stale", glossary_name(GLOSSARY), len(GLOSSARY)))
     t, _ = _translator(client)
-    # 词条数是展开变体后的数量，旧的（没展开）不复用
+    # 词条数是展开变体后的数量，旧的（没展开）不复用；同名但不能复用的也是我们的旧表，先删掉
     assert t.sync_glossary(GLOSSARY) == "id-1"
+    assert client.deleted == ["stale"]
+
+
+def test_glossary_upgrade_deletes_only_our_old_versions() -> None:
+    """DeepL Free 同时只能保留 1 份术语表：换版本时先删 qbkb-v* 的旧表，别人的不动。"""
+    client = FakeClient()
+    client.glossaries += [
+        _info("old-v1", "qbkb-v1-aaaaaaaa", 3),
+        _info("old-v2", "qbkb-v2-bbbbbbbb", 3),
+        _info("theirs", "my-own-glossary", 3),
+        _info("plain", "qbkb-cccccccc", 3),  # 不带版本号的名字（测试用 Mapping 起的）不删
+    ]
+    t, _ = _translator(client)
+    new = Glossary("3", {"drawdown": "回撤"})
+    t.sync_glossary(new)
+    assert client.deleted == ["old-v1", "old-v2"]
+    assert t.deleted_glossaries == ["qbkb-v1-aaaaaaaa", "qbkb-v2-bbbbbbbb"]
+    assert {g.name for g in client.glossaries} == {
+        "my-own-glossary",
+        "qbkb-cccccccc",
+        glossary_name(new),
+    }
+
+
+def test_current_glossary_is_reused_without_deleting() -> None:
+    client = FakeClient()
+    t, _ = _translator(client)
+    gid = t.sync_glossary(GLOSSARY)
+    t2, _ = _translator(client)
+    assert t2.sync_glossary(GLOSSARY) == gid
+    assert client.deleted == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # SDK 把 456 一律报成"额度用完"，消息里带着 DeepL 的说明
+        deepl.QuotaExceededException(
+            "Quota for this billing period has been exceeded, message: Too many glossaries",
+            http_status_code=456,
+        ),
+        deepl.DeepLException("Bad request, message: Too many glossaries", http_status_code=400),
+    ],
+)
+def test_too_many_glossaries_is_not_reported_as_quota(error: Exception) -> None:
+    from qbkb.translate import GlossaryLimitError
+
+    class Full(FakeClient):
+        def create_glossary(
+            self, name: str, source_lang: Any, target_lang: Any, entries: dict[str, str]
+        ) -> deepl.GlossaryInfo:
+            raise error
+
+    t, sleeps = _translator(Full())
+    with pytest.raises(GlossaryLimitError) as info:
+        t.translate(["x"], GLOSSARY)
+    assert not isinstance(info.value, QuotaExceededError)
+    msg = str(info.value)
+    assert "术语表数量到上限" in msg and "不是翻译额度用完" in msg and "删掉不用的术语表" in msg
+    assert sleeps == []
+
+
+def test_too_many_glossaries_exit_code_is_error_not_quota(tmp_path: Path) -> None:
+    """CLI：术语表上限报成普通错误（退出码 1），提示里没有"额度用完、下个月再跑"。"""
+    from qbkb import cli
+    from qbkb.translate import GlossaryLimitError
+
+    class Boom:
+        name = "deepl:ZH-HANS"
+
+        def translate(self, segments: Any, glossary: Any, context: str = "") -> list[str]:
+            raise GlossaryLimitError("DeepL 账户里的术语表数量到上限了")
+
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    url = "https://example.test/a"
+    store.upsert_discovered(conn, DiscoveredUrl(url=url, site="man", slug="a"))
+    store.replace_segments(conn, url, [Segment(idx=0, html="<p>Hello drawdown.</p>")])
+    from qbkb.models import Status
+
+    store.set_status(conn, url, Status.FILTERED)
+    conn.close()
+    code = cli.main(
+        ["translate", "--site", "man", "--db", str(db)], deps=cli.Deps(translator=Boom())
+    )
+    assert code == cli.EXIT_ERROR
 
 
 def test_plain_mapping_glossary_named_by_fingerprint() -> None:
     assert glossary_name({"a": "甲"}).startswith("qbkb-")
     assert glossary_name({"a": "甲"}) != glossary_name({"a": "乙"})
-    assert glossary_name(load_glossary()).startswith("qbkb-v2-")
+    assert glossary_name(load_glossary()).startswith("qbkb-v3-")
 
 
 def test_quota_exceeded_is_translated() -> None:

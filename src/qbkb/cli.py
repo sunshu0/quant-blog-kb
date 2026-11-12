@@ -555,10 +555,13 @@ def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
     print(
         f"[export] {site.name}: 发布 {s.published}（内容没变 {s.unchanged}）、"
         f"退回重翻 {len(s.requeued)}、失败 {len(s.failed)}、"
-        f"下载图片 {s.images_downloaded}、图片失败 {len(s.image_failures)}"
+        f"下载图片 {s.images_downloaded}、图片失败 {len(s.image_failures)}、"
+        f"外站图片（保留原链接）{len(s.external_images)}"
     )
     for f in s.image_failures:
         print(f"  ! 图片 {f.image_url}：{f.reason}（保留原链接）")
+    for f in s.external_images:
+        print(f"  · 外站图片 {f.image_url}（保留原链接）")
     for e in s.failed:
         print(f"  ! {e}")
     for url in s.requeued:

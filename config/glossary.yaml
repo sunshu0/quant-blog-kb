@@ -1,5 +1,6 @@
 # 术语表（design.md 4.5）。英文 → 中文，同步到 DeepL glossary。
 # 改动后递增 version（只用于 DeepL 术语表的名字 qbkb-v<version>-<指纹>，内容变了才新建）。
+# v3（2026-11-12）：加 realized / realised volatility。
 # 翻译记忆按段落记录"这段用到的术语"的指纹：改一个词条，只有含这个词的段落会重翻。
 # 改之前可以用 translate.glossary_upgrade_cost() 看要重翻多少字符。
 # 句首大写（Drawdown）、标题大写（Trend Following）的变体会自动补上，不用手写。
@@ -8,7 +9,7 @@
 # 被译成"套息"、一般意义的 factors 被译成"因子"）。所以有歧义的词只收完整短语。
 # 原文和译文相同的词条（ROE: ROE）用来让 DeepL 保留原文，不乱译。
 
-version: 2
+version: 3
 terms:
   drawdown: 回撤
   trend following: 趋势跟踪
@@ -18,6 +19,10 @@ terms:
   beta: beta
   volatility: 波动率
   implied volatility: 隐含波动率
+  # 2026-11-12：长短语要整条收进来，否则导出时"波动率（volatility）"的注释会挂到长短语里的短词上
+  # （TermAnnotator 只在短译文不落在更长的术语译文里面时才标注）
+  realized volatility: 已实现波动率
+  realised volatility: 已实现波动率
   backtest: 回测
   mean reversion: 均值回归
   risk parity: 风险平价

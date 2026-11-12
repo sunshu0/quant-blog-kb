@@ -24,6 +24,29 @@ from qbkb.translate.glossary import Glossary, case_variants, terms_fingerprint
 from qbkb.translate.lines import LineSplit, split_lines
 
 GLOSSARY_PREFIX = "qbkb-"
+# 带版本号的术语表名字的前缀（glossary_name）。换版本时只删这种名字的旧术语表：
+# DeepL Free 账户同时只能保留 1 份术语表（2026-11-12 实测），不删旧的就建不了新的
+VERSIONED_PREFIX = f"{GLOSSARY_PREFIX}v"
+
+
+class GlossaryLimitError(RuntimeError):
+    """DeepL 账户里的术语表数量到上限了（不是翻译额度用完）。
+
+    DeepL 对这种情况也返回 456，SDK 报成 QuotaExceededException（"Quota ... exceeded,
+    message: Too many glossaries"），不能按"额度用完、下个月再跑"处理。
+    """
+
+
+def _is_glossary_limit(e: deepl.DeepLException) -> bool:
+    return "glossar" in str(e).lower()
+
+
+GLOSSARY_LIMIT_HINT = (
+    "DeepL 账户里的术语表数量到上限了（Free 账户同时只能保留 1 份），这不是翻译额度用完。"
+    "qbkb 已经删掉了自己的旧版本术语表（名字以 qbkb-v 开头）；剩下的是别的程序或手工建的。"
+    "建议：在 DeepL 账户里删掉不用的术语表，或者确认没有另一份 qbkb 正在同时运行，"
+    "然后重跑同一条命令"
+)
 # 这些标签连同里面的内容原样保留、不送去翻译（DeepL 的 ignore_tags）。
 # 光靠它保不住脚注上标（真实请求验证过，仍会丢标签），纯数字的上标另有占位链接
 # （footnotes.py）；这里管剩下的上标（"20<sup>th</sup>" 之类），内容本来也不该翻译。
@@ -50,6 +73,9 @@ class DeepLApi(Protocol):
     def create_glossary(
         self, name: str, source_lang: Any, target_lang: Any, entries: dict[str, str]
     ) -> deepl.GlossaryInfo: ...
+
+    # delete_glossary(glossary_id) 也会用到，但不放进协议：只翻译、不建术语表的测试替身不用实现它
+    # （sync_glossary 用 getattr 取，没有就不删）
 
     def get_usage(self) -> deepl.Usage: ...
 
@@ -111,6 +137,7 @@ class DeepLTranslator:
         self.max_backoff_s = max_backoff_s
         self._sleep = sleep
         self._glossary_ids: dict[str, str] = {}
+        self.deleted_glossaries: list[str] = []  # 这次删掉的旧术语表名字
         self.chars_sent = 0
         self.requests = 0
 
@@ -164,7 +191,9 @@ class DeepLTranslator:
         """确保 DeepL 上有和本地内容一致的术语表，返回它的 id。空术语表返回 None。
 
         按名字查找：已有同名、语言对一致、词条数一致的就复用，否则新建。
-        旧版本的术语表不删除（DeepL 上的东西由用户自己清理）。
+        新建之前先删掉我们自己的旧术语表（名字以 qbkb-v 开头、但不是可以复用的这一份）：
+        DeepL Free 账户同时只能保留 1 份术语表。别人的术语表（其他名字）不动。
+        术语表数量到上限时抛 GlossaryLimitError（不是额度用完）。
         """
         if not glossary:
             return None
@@ -173,10 +202,11 @@ class DeepLTranslator:
             return self._glossary_ids[name]
         entries = glossary_entries(glossary)
         target = self.glossary_target_lang.lower()
+        existing = self._with_retry(self._client.list_glossaries)
         found = next(
             (
                 g
-                for g in self._with_retry(self._client.list_glossaries)
+                for g in existing
                 if g.name == name
                 and g.source_lang.lower() == self.source_lang.lower()
                 and g.target_lang.lower() == target
@@ -184,7 +214,13 @@ class DeepLTranslator:
             ),
             None,
         )
+        delete: Callable[[str], object] | None = getattr(self._client, "delete_glossary", None)
         if found is None:
+            for old in existing:
+                if delete is not None and old.name.startswith(VERSIONED_PREFIX):
+                    gid = old.glossary_id
+                    self._with_retry(lambda gid=gid: delete(gid))
+                    self.deleted_glossaries.append(old.name)
             found = self._with_retry(
                 lambda: self._client.create_glossary(
                     name, self.source_lang, self.glossary_target_lang, entries
@@ -208,8 +244,13 @@ class DeepLTranslator:
             try:
                 return fn()
             except deepl.QuotaExceededException as e:
+                # 456 也用来表示"术语表太多"：那不是额度问题，下个月再跑也没用
+                if _is_glossary_limit(e):
+                    raise GlossaryLimitError(f"{GLOSSARY_LIMIT_HINT}（DeepL：{e}）") from e
                 raise QuotaExceededError(f"DeepL 额度用完：{e}") from e
             except deepl.DeepLException as e:
+                if "too many glossaries" in str(e).lower():
+                    raise GlossaryLimitError(f"{GLOSSARY_LIMIT_HINT}（DeepL：{e}）") from e
                 if not _retryable(e):
                     raise
                 if attempt >= self.retries:
