@@ -99,6 +99,11 @@ class ImageFetcher:
                         self._known.setdefault(p.stem, p.name)
         return self._known.get(image_stem(url))
 
+    def is_external(self, src: str) -> bool:
+        """http(s) 图片，但不在允许下载的 host 里（例如 Flourish 的缩略图）：保留原链接、不下载。"""
+        parts = urlsplit(html.unescape(src).strip())
+        return parts.scheme in ("http", "https") and parts.netloc.lower() not in self.hosts
+
     def get(self, src: str) -> str:
         """src 是 HTML 里的地址（可能带 &amp;）。返回 images_dir 下的文件名。"""
         url = html.unescape(src).strip()

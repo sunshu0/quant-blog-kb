@@ -30,3 +30,6 @@ build/
 
 # 固定译文（man.com 免责声明的译文，属于原文衍生内容；格式见 config/fixed_translations.example.yaml）
 config/fixed_translations.yaml
+
+# 控制台的设置、锁、演示模式的全部数据（.qbkb/demo/）
+.qbkb/

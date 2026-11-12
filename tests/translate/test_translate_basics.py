@@ -17,7 +17,7 @@ from qbkb.translate.structure import plain_text
 
 def test_repo_glossary_loads() -> None:
     g = load_glossary()
-    assert g.version == "2"
+    assert g.version == "3"
     assert g["drawdown"] == "回撤"
     # 2026-11-12 验收：有歧义的单词只收短语
     assert "carry" not in g and "factor" not in g

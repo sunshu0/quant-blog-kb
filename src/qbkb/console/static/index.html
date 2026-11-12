@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="qbkb-token" content="{{TOKEN}}">
+<title>qbkb 量化博客中文知识库</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">qbkb <span>量化博客中文知识库</span></div>
+  <nav class="tabs" role="tablist">
+    <button type="button" data-tab="browse" class="active">浏览文章</button>
+    <button type="button" data-tab="run">运行</button>
+    <button type="button" data-tab="review">待复查 <span id="review-count" class="count"></span></button>
+    <button type="button" data-tab="settings">设置</button>
+  </nav>
+  <div class="right">
+    <span id="mode-badge" class="badge"></span>
+    <button type="button" id="quit" class="ghost" title="停止控制台服务">退出</button>
+  </div>
+</header>
+<div id="demo-banner" class="banner" hidden>
+  演示模式：使用自带的示例文章，不联网、不需要 API key。示例文章是为演示自己写的，不是真实文章。
+  在「设置」里填好两个 key 后会切到真实模式。
+</div>
+<div id="toast" class="toast" hidden></div>
+
+<section id="tab-browse" class="tab">
+  <aside id="toc" class="toc"></aside>
+  <article class="reader">
+    <div id="reader-meta" class="meta" hidden>
+      <div class="meta-row">
+        <a id="meta-source" target="_blank" rel="noopener noreferrer">原文链接</a>
+        <span id="meta-score"></span>
+        <span id="meta-category"></span>
+        <span id="meta-translated"></span>
+      </div>
+      <div class="views" role="group" aria-label="显示方式">
+        <button type="button" data-view="zh" class="active">中文</button>
+        <button type="button" data-view="bi">中英对照</button>
+      </div>
+    </div>
+    <div id="reader-body" class="doc">
+      <p class="empty">从左边选一篇文章。</p>
+    </div>
+  </article>
+</section>
+
+<section id="tab-run" class="tab" hidden>
+  <div class="card">
+    <h2>运行一次更新</h2>
+    <p class="hint">发现新文章 → 抓取 → 抽取正文 → 筛选打分 → 翻译 → 导出 Markdown。
+      已经处理过的文章不会重复花额度；中途停下，下次运行会从中断处接着跑。</p>
+    <div class="row">
+      <label>这次最多处理 <input id="run-limit" type="number" min="1" max="50" value="5"> 篇</label>
+      <button type="button" id="run-start" class="primary">运行</button>
+      <button type="button" id="run-stop" class="ghost" disabled>停止</button>
+    </div>
+    <div id="run-status" class="status"></div>
+    <div class="progress"><div id="run-bar" class="bar"></div></div>
+    <div id="run-result" class="result" hidden></div>
+    <div id="run-quota" class="hint"></div>
+  </div>
+  <div class="card">
+    <h3>日志</h3>
+    <pre id="run-log" class="log"></pre>
+  </div>
+</section>
+
+<section id="tab-review" class="tab" hidden>
+  <div class="card">
+    <h2>待复查</h2>
+    <p class="hint"><b>需复查</b>：翻译的结构校验没通过（比如脚注、图片、表格对不上），可以点「重翻」再试一次。
+      <b>失败</b>：抓取、抽取、翻译或导出出错，原因写在旁边；重新运行时会按规则重试。</p>
+    <div id="review-list"></div>
+  </div>
+</section>
+
+<section id="tab-settings" class="tab" hidden>
+  <div class="card">
+    <h2>API key</h2>
+    <p class="hint">key 只保存在这台电脑的 <code>.env</code> 文件里，页面上只显示是否已配置和后 4 位。
+      「测试连接」只查询额度 / 模型列表，不花钱。</p>
+    <div class="key-row">
+      <label for="key-deepl">DeepL（翻译）</label>
+      <input id="key-deepl" type="password" autocomplete="off" spellcheck="false" placeholder="xxxxxxxx-xxxx-…:fx">
+      <span id="key-deepl-state" class="keystate"></span>
+      <button type="button" data-test="deepl">测试连接</button>
+    </div>
+    <div class="key-row">
+      <label for="key-llm">DeepSeek（打分）</label>
+      <input id="key-llm" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+      <span id="key-llm-state" class="keystate"></span>
+      <button type="button" data-test="llm">测试连接</button>
+    </div>
+    <div class="row">
+      <button type="button" id="keys-save" class="primary">保存 key</button>
+      <span id="keys-msg" class="hint"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>模式</h2>
+    <div class="row radios">
+      <label><input type="radio" name="mode" value="auto"> 自动（两个 key 都填了就是真实模式）</label>
+      <label><input type="radio" name="mode" value="demo"> 演示模式</label>
+      <label><input type="radio" name="mode" value="real"> 真实模式</label>
+    </div>
+    <p class="hint">演示模式和真实模式的数据完全分开：演示数据在 <code>.qbkb/demo/</code>，不会碰真实的知识库。</p>
+    <div class="row">
+      <button type="button" id="demo-reset" class="ghost">清空演示数据</button>
+      <span id="data-dir" class="hint"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>每天自动更新</h2>
+    <p class="hint">打开后用 Windows 任务计划每天运行一次；电脑在那个时间没开机，开机后会尽快补跑。</p>
+    <div class="row">
+      <label class="switch"><input id="sched-enabled" type="checkbox"> 打开</label>
+      <label>时间 <input id="sched-time" type="time" value="09:00"></label>
+      <label>每次最多 <input id="sched-limit" type="number" min="1" max="50" value="5"> 篇</label>
+      <button type="button" id="sched-save" class="primary">保存</button>
+    </div>
+    <div id="sched-state" class="hint"></div>
+    <div id="sched-last" class="hint"></div>
+  </div>
+</section>
+</body>
+</html>

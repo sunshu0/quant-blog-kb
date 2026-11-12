@@ -56,6 +56,8 @@ class ExportStats:
     failed: list[str] = field(default_factory=list)
     images_downloaded: int = 0
     image_failures: list[ImageFailure] = field(default_factory=list)
+    # 外站图片（不在站点 host / export.image_hosts 里）：保留原链接，不算失败、不写 failed.tsv
+    external_images: list[ImageFailure] = field(default_factory=list)
 
 
 def firm_name(site: SiteConfig) -> str:
@@ -112,6 +114,12 @@ def _localize(
     def replace(src: str) -> str:
         if not url_allowed(src, "image"):
             return src  # 协议不在白名单里：不下载，to_markdown 会把它去掉
+        if images.is_external(src):
+            # 外站图片按规则本来就不下载：保留原链接，单独统计，不算"图片失败"
+            if src not in seen:
+                seen.add(src)
+                stats.external_images.append(ImageFailure(url, src, "外站图片，保留原链接"))
+            return src
         before = images.requests
         try:
             name = images.get(src)
@@ -167,7 +175,7 @@ def export_article(
     n_body = len(segments) if n_body is None else min(int(n_body), len(segments))
 
     seen: set[str] = set()
-    annotator = TermAnnotator()
+    annotator = TermAnnotator(glossary)
     # 主文件在 output/<site>/，图片路径 images/x；对照版在 output/bilingual/<site>/，
     # 图片路径 ../../<site>/images/x（同一份图片，不重复下载）
     bi_prefix = f"../../{row['site']}/"
