@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize("scenario", ["robots", "robots_retry", "retry_after", "queue"])
+@pytest.mark.parametrize(
+    "scenario", ["robots", "robots_retry", "retry_after", "queue", "retry_after_store_error"]
+)
 def test_fetch_stop_channel(scenario: str, tmp_path: Path) -> None:
     script = Path(__file__).with_name("crawl_stop_channel.py")
     result = subprocess.run(
@@ -35,6 +37,12 @@ def test_fetch_stop_channel(scenario: str, tmp_path: Path) -> None:
         assert data["rows"] == {"a": "discovered", "b": "discovered", "c": "discovered"}
         assert "Retry-After 3600" in data["stop_reason"]
         assert data["failed"] == 0 and data["fetched"] == 0
+    elif scenario == "retry_after_store_error":
+        # 落库抛异常也不能阻止整站停止：/b /c 不被请求，stop_reason 非空
+        assert data["article_hits"] == ["/a"]
+        assert data["stop_reason"] and "Retry-After 3600" in data["stop_reason"]
+        assert data["rows"]["b"] == "discovered"
+        assert data["rows"]["c"] == "discovered"
     else:
         # 第一篇 429 + Retry-After 3600（retry_after 单并发 / queue 并发 3）：
         # 只有 /a 被请求；/a 记失败，/b /c 不被请求、保持 discovered。

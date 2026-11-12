@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +23,17 @@ from qbkb.models import DiscoveredUrl
 def main() -> None:
     scenario, work = sys.argv[1], Path(sys.argv[2])
     hits: list[str] = []
+
+    if scenario == "retry_after_store_error":
+        # 故障注入：只在写 Retry-After 失败原因时让落库抛异常，验证停站不被可失败的落库阻止。
+        original_record_failure = store.record_failure
+
+        def failing_record_failure(conn: object, url: str, error: str, **kwargs: object) -> int:
+            if "Retry-After" in error:
+                raise sqlite3.OperationalError("injected database is locked")
+            return original_record_failure(conn, url, error, **kwargs)  # type: ignore[arg-type]
+
+        store.record_failure = failing_record_failure  # type: ignore[assignment]
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
@@ -45,7 +57,11 @@ def main() -> None:
                 else:
                     body = b"User-agent: *\nDisallow:\n"
                     headers = {"Content-Type": "text/plain"}
-            elif self.path == "/a" and scenario in ("retry_after", "queue"):
+            elif self.path == "/a" and scenario in (
+                "retry_after",
+                "queue",
+                "retry_after_store_error",
+            ):
                 status, body, headers = 429, b"busy", {"Retry-After": "3600"}
             self.send_response(status)
             for name, value in headers.items():

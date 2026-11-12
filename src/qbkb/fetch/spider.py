@@ -115,19 +115,19 @@ class BackoffRetryMiddleware:
     def _stop_site(self, reason: str, request: Request, retry_after: float, status: int) -> None:
         """让整站停止：Retry-After 太久时，继续抓其他文章同样违背服务器要求。
 
-        文章请求先把它自己记成失败，再 fast 停掉整站（fast 会取消下载器里还没发出去的请求，
-        这一篇的响应可能到不了 parse_article）；robots 之类的内部请求没有文章可记，直接停。
+        先无条件 fast 停站（合规停站不能依赖可失败的落库）；文章请求再把自己记成失败，
+        记成功才标 _RETRY_AFTER_RECORDED 让 parse_article 跳过。robots 之类的内部请求
+        没有文章可记，直接停。
         """
         spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
-        article_url = request.cb_kwargs.get("article_url")
-        if article_url is not None and spider is not None:
-            record = getattr(spider, "record_retry_after_failure", None)
-            if record is not None:
-                record(str(article_url), status, retry_after)
-                request.meta[_RETRY_AFTER_RECORDED] = True
         stop = getattr(spider, "request_stop", None) if spider is not None else None
         if stop is not None:
             stop(reason)
+        article_url = request.cb_kwargs.get("article_url")
+        if article_url is not None and spider is not None:
+            record = getattr(spider, "record_retry_after_failure", None)
+            if record is not None and record(str(article_url), status, retry_after):
+                request.meta[_RETRY_AFTER_RECORDED] = True
 
     async def process_request(self, request: Request) -> None:
         wait = self.resume_at - self._clock()
@@ -299,17 +299,21 @@ class ArticleSpider(scrapy.Spider):
                 dont_filter=True,
             )
 
-    def record_retry_after_failure(self, article_url: str, status: int, retry_after: float) -> None:
-        """长 Retry-After：先把当前文章记成失败，再让整站 fast 停止。
+    def record_retry_after_failure(self, article_url: str, status: int, retry_after: float) -> bool:
+        """长 Retry-After：把当前文章记成失败，返回是否记成功。
 
-        fast 会取消下载器里还没发出去的请求，这一篇的响应可能到不了 parse_article；所以
-        BackoffRetryMiddleware 先在这里把失败记好（不经过 classify_response——那时
-        response.request 还没被引擎补上），并在 request.meta 里标 _RETRY_AFTER_RECORDED，
-        parse_article 看到就跳过，避免重复记。
+        不经过 classify_response（那时 response.request 还没被引擎补上），直接用已知的
+        status 和 Retry-After 秒数拼原因。落库失败只记日志、返回 False——不能因此阻止
+        整站 fast 停站；失败计数留给 errback / parse_article 的兜底。
         """
         outcome = Outcome(Kind.FAILED, status, retry_after_refused_reason(status, retry_after))
-        apply_outcome(self.conn, article_url, outcome, b"", self.raw_dir)
+        try:
+            apply_outcome(self.conn, article_url, outcome, b"", self.raw_dir)
+        except (OSError, sqlite3.Error, ValueError, KeyError) as e:
+            self.logger.error("记录 Retry-After 失败时出错（整站停止已触发）：%s", e)
+            return False
         self.counts[Kind.FAILED] += 1
+        return True
 
     def parse_article(self, response: Response, article_url: str) -> None:
         request = response.request

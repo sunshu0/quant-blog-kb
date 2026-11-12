@@ -555,6 +555,22 @@ def test_backoff_retry_after_over_limit_records_article_failure(
     assert counts == Counter({Kind.FAILED: 1})
 
 
+def test_record_retry_after_failure_survives_store_error(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """落库抛异常时 record_retry_after_failure 不抛、返回 False，失败计数留给兜底。"""
+    _, conn = db
+    counts: Counter[Kind] = Counter()
+    spider = _spider(conn, tmp_path, counts)
+
+    def boom(conn: sqlite3.Connection, url: str, error: str, **kw: object) -> int:
+        raise sqlite3.OperationalError("injected database is locked")
+
+    monkeypatch.setattr(store, "record_failure", boom)
+    assert spider.record_retry_after_failure(BASE + "alpha", 429, 3600.0) is False
+    assert counts == Counter()  # 没记成功，不在这里加失败计数
+
+
 def test_run_fetch_removes_stale_tmp_before_crawling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
