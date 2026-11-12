@@ -206,6 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
     _translate_opts(p)
     _export_opts(p)
     p.add_argument("--skip", action="append", choices=STAGES, default=[], help="跳过某个阶段")
+    p = stage("table", "从现有状态库输出 CSV 和 JSONL（不调用外部服务）")
+    _common(p)
+    p.add_argument("--out", default="output", help="输出目录（默认 output）")
     p = stage("status", "各状态的文章数、各栏目的篇数、新栏目提醒，列出 needs_review 和 failed")
     _common(p)
     p = stage(
@@ -687,11 +690,35 @@ def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
     for url in s.requeued:
         print(f"  ! {url}：缺译文，已退回 extracted，下次 translate 重翻")
     print(f"  索引：{out / export.INDEX_NAME}")
+    from qbkb.export.tables import write_tables
+
+    conn = store.connect(args.db)
+    try:
+        table = write_tables(conn, site, load_glossary(_cfg(args) / "glossary.yaml"), out)
+    finally:
+        conn.close()
+    print(f"  表格：{table.rows} 篇，{table.csv}、{table.jsonl}")
+
     # 图片失败不算：原链接保留了，外站图片按规则本来就不下载
     return EXIT_ATTENTION if s.failed or s.requeued else EXIT_OK
 
 
 # ---- 汇总命令 ----------------------------------------------------------------
+
+
+def cmd_table(args: argparse.Namespace) -> int:
+    from qbkb.export.tables import write_tables
+    from qbkb.translate import load_glossary
+
+    conn = store.connect(args.db)
+    try:
+        glossary = load_glossary(_cfg(args) / "glossary.yaml")
+        for site in _sites(args):
+            table = write_tables(conn, site, glossary, Path(args.out))
+            print(f"[table] {site.name}: {table.rows} 篇，{table.csv}、{table.jsonl}")
+    finally:
+        conn.close()
+    return EXIT_OK
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -937,6 +964,8 @@ def main(argv: Sequence[str] | None = None, *, deps: Deps | None = None) -> int:
                 site = config.load_site(name)
                 print(f"{name}\t{site.compliance_decision}")
             return EXIT_OK
+        if args.command == "table":
+            return cmd_table(args)
         if args.command == "status":
             return cmd_status(args)
         if args.command == "eval":
