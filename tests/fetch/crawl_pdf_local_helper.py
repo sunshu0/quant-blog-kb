@@ -1,9 +1,13 @@
-"""PDF 抓取的真实通道集成测试子进程：本机 HTTP 服务 + 子域 DNS 映射。
+"""PDF 抓取的真实通道集成测试子进程：本机 HTTP 服务（子域场景再加 DNS 映射）。
 
-验证 PDF 请求的严格同 host 边界：example.test 的 /a.pdf 302 到 child.example.test/outside.pdf
-时，子域的 PDF 正文必须没有被请求。Twisted reactor 一个进程只能启动一次，所以每个场景单独起
-一个子进程。用法：python crawl_pdf_local_helper.py <scenario> <workdir>；结果写到
-<workdir>/result.json。不访问外网：example.test / child.example.test 都映射到 127.0.0.1。
+两个场景：
+- subdomain：example.test 的 /a.pdf 302 到 child.example.test/outside.pdf，验证子域 PDF 正文
+  没有被请求（严格同 host 边界）。
+- retry_after：/a.pdf 429 + Retry-After: 3600，验证整站停止后 /b.pdf 没有被请求。
+
+Twisted reactor 一个进程只能启动一次，所以每个场景单独起一个子进程。
+用法：python crawl_pdf_local_helper.py <scenario> <workdir>；结果写到 <workdir>/result.json。
+不访问外网：example.test / child.example.test 都映射到 127.0.0.1。
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ socket.gethostbyname = _local_gethostbyname  # type: ignore[assignment]
 HITS: list[dict[str, str]] = []
 
 
-def _make_handler() -> type[BaseHTTPRequestHandler]:
+def _make_handler(scenario: str) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             HITS.append({"path": self.path, "host": self.headers.get("Host") or ""})
@@ -54,12 +58,14 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
             status, body, headers = 200, b"%PDF-1.7 offline data", {}
             if self.path == "/robots.txt":
                 body = b"User-agent: *\nDisallow:\n"
-            elif self.path == "/a.pdf":
+            elif self.path == "/a.pdf" and scenario == "subdomain":
                 status, body, headers = (
                     302,
                     b"",
                     {"Location": f"http://child.example.test:{server.server_port}/outside.pdf"},
                 )
+            elif self.path == "/a.pdf" and scenario == "retry_after":
+                status, body, headers = 429, b"busy", {"Retry-After": "3600"}
             self.send_response(status)
             self.send_header(
                 "Content-Type", "text/plain" if self.path == "/robots.txt" else "application/pdf"
@@ -78,17 +84,22 @@ def _make_handler() -> type[BaseHTTPRequestHandler]:
 
 def main() -> None:
     scenario, work = sys.argv[1], Path(sys.argv[2])
-    del scenario  # 当前只有一个子域场景，保留参数以对齐其它 helper 的调用方式
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler())
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(scenario))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    base = f"http://example.test:{srv.server_address[1]}"
+    base = (
+        f"http://example.test:{srv.server_address[1]}"
+        if scenario == "subdomain"
+        else f"http://127.0.0.1:{srv.server_address[1]}"
+    )
     db = work / "state.db"
     conn = store.connect(db)
-    url = base + "/a"
-    raw = work / "a.html"
-    raw.write_text('<html><a class="pdf" href="/a.pdf">Download</a></html>')
-    store.upsert_discovered(conn, DiscoveredUrl(url, "local", "a"))
-    store.set_status(conn, url, Status.FETCHED, raw_path=str(raw))
+    slugs = ["a", "b"] if scenario == "retry_after" else ["a"]
+    for slug in slugs:
+        url = base + "/" + slug
+        raw = work / f"{slug}.html"
+        raw.write_text(f'<html><a class="pdf" href="/{slug}.pdf">Download</a></html>')
+        store.upsert_discovered(conn, DiscoveredUrl(url, "local", slug))
+        store.set_status(conn, url, Status.FETCHED, raw_path=str(raw))
     conn.close()
     try:
         stats = run_fetch(

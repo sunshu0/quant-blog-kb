@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from scrapy.exceptions import CloseSpider, IgnoreRequest
+from scrapy.exceptions import IgnoreRequest
 from scrapy.http import HtmlResponse, Request, TextResponse
 
 from qbkb import store
@@ -311,7 +311,9 @@ def test_parse_pdf_rejects_cross_site_response(conn: sqlite3.Connection, tmp_pat
 # ---- P2：PDF 长 Retry-After 也要停止整站 ----
 
 
-def test_parse_pdf_long_retry_after_closes_spider(conn: sqlite3.Connection, tmp_path: Path) -> None:
+def test_parse_pdf_long_retry_after_records_failure(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
     store.upsert_discovered(conn, DiscoveredUrl(url=BASE, site="example", slug="alpha"))
     store.set_status(conn, BASE, Status.FETCHED, raw_path="raw/example/alpha.html")
     spider = _spider(conn, tmp_path)
@@ -325,8 +327,8 @@ def test_parse_pdf_long_retry_after_closes_spider(conn: sqlite3.Connection, tmp_
         headers={"Content-Type": "application/pdf"},
         request=request,
     )
-    with pytest.raises(CloseSpider):
-        spider.parse_pdf(resp, article_url=BASE)
+    # 整站停止由 BackoffRetryMiddleware 的 request_stop 处理，parse_pdf 只记这篇失败
+    spider.parse_pdf(resp, article_url=BASE)
     row = store.get_article(conn, BASE)
     assert row is not None
     assert row["status"] == Status.FAILED
@@ -404,11 +406,20 @@ def test_run_fetch_respects_urls_and_dedups_pdf(
 
     seen: dict[str, object] = {}
 
+    class _FakeSpider:
+        stop_reason: str | None = None
+
+    class _FakeCrawler:
+        spider = _FakeSpider()
+
     class Crawler:
         def __init__(self, **kwargs: object) -> None:
             pass
 
-        def crawl(self, spider: object, **kwargs: object) -> None:
+        def create_crawler(self, spidercls: object) -> _FakeCrawler:
+            return _FakeCrawler()
+
+        def crawl(self, crawler: object, **kwargs: object) -> None:
             seen.update(kwargs)
 
         def start(self) -> None:
@@ -566,6 +577,26 @@ def test_pdf_subdomain_redirect_not_requested(tmp_path: Path) -> None:
     assert row["pdf_path"] is None
 
 
+def test_pdf_retry_after_stops_site(tmp_path: Path) -> None:
+    """真实通道：/a.pdf 429 + Retry-After: 3600 → 整站停止，/b.pdf 没被请求。"""
+    helper = Path(__file__).with_name("crawl_pdf_local_helper.py")
+    proc = subprocess.run(
+        [sys.executable, str(helper), "retry_after", str(tmp_path)],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-3000:]
+    result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    paths = [h["path"] for h in result["hits"]]
+    assert "/a.pdf" in paths  # 第一篇 PDF 请求确实发出
+    assert "/b.pdf" not in paths  # 整站已停，第二篇没被请求
+    rows = {r["slug"]: r for r in result["rows"]}
+    assert rows["a"]["status"] == "failed"
+    assert "Retry-After 3600" in (rows["a"]["error"] or "")
+    assert rows["b"]["status"] == "fetched"
+
+
 def test_run_fetch_shares_limit_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import scrapy.crawler
 
@@ -584,11 +615,20 @@ def test_run_fetch_shares_limit_budget(tmp_path: Path, monkeypatch: pytest.Monke
 
     seen: dict[str, object] = {}
 
+    class _FakeSpider:
+        stop_reason: str | None = None
+
+    class _FakeCrawler:
+        spider = _FakeSpider()
+
     class Crawler:
         def __init__(self, **kwargs: object) -> None:
             pass
 
-        def crawl(self, spider: object, **kwargs: object) -> None:
+        def create_crawler(self, spidercls: object) -> _FakeCrawler:
+            return _FakeCrawler()
+
+        def crawl(self, crawler: object, **kwargs: object) -> None:
             seen.update(kwargs)
 
         def start(self) -> None:

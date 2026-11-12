@@ -408,12 +408,13 @@ class ArticleSpider(scrapy.Spider):
             return
         refused = response.meta.get(META_RETRY_AFTER_REFUSED)
         if refused is not None:
-            # 服务器要求等很久：和 HTML 回调一样，不只是这篇不重试，整个站点这次都不再请求
+            # 服务器要求等很久：这篇记失败；整站停止已由 BackoffRetryMiddleware 的 request_stop
+            # 处理（HostAllowlistMiddleware 会在后续请求发出前拦下它们）。
             self._pdf_fail(
                 article_url,
                 f"服务器要求 Retry-After {refused:.0f} 秒，超过上限，不重试并停止本次抓取",
             )
-            raise CloseSpider("retry_after_too_long")
+            return
         if not same_site(article_url, response.url):
             self._pdf_fail(article_url, f"PDF 跨站（最终响应 {response.url}）")
             return
@@ -455,6 +456,8 @@ class ArticleSpider(scrapy.Spider):
         request: Request = failure.request  # type: ignore[attr-defined]
         if request.meta.get(_CROSS_HOST_BLOCKED):
             return  # 白名单中间件已经记过失败，别重复计数 / 累加 retries
+        if self.stop_reason is not None:
+            return  # 整站停止（robots 跨站 / Retry-After），不是这一篇的失败，不记
         url = str(request.cb_kwargs["article_url"])
         exc = failure.value
         if not isinstance(exc, BaseException):
