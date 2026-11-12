@@ -18,7 +18,7 @@ from qbkb.models import DiscoveredUrl, Segment, Status
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # 改了表结构（加列等）就加 1，并在 _migrate 里补升级步骤
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +49,13 @@ UPDATABLE_COLUMNS = frozenset(
         "qc_issues",
         "section_key",
         "section",
+        "summary_zh",
+        "summary_body_hash",
+        "summary_version",
+        "summary_error",
+        "summary_at",
+        "fetched_at",
+        "summary_truncated",
         "error",
         "retries",
     }
@@ -63,6 +70,13 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("translation_memory", "quality", "TEXT NOT NULL DEFAULT 'ok'"),
     ("articles", "section_key", "TEXT"),  # v3（按栏目采集）
     ("articles", "section", "TEXT"),
+    ("articles", "summary_zh", "TEXT"),
+    ("articles", "summary_body_hash", "TEXT"),
+    ("articles", "summary_version", "TEXT"),
+    ("articles", "summary_error", "TEXT"),
+    ("articles", "summary_at", "TEXT"),
+    ("articles", "fetched_at", "TEXT"),
+    ("articles", "summary_truncated", "INTEGER"),
 )
 # PR #3 时期用 backend 名加这个后缀隔离坏译文；升级时改成 quality = 'rejected'。
 _LEGACY_REJECTED_SUFFIX = "#rejected"

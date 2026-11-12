@@ -16,6 +16,7 @@ from qbkb.export.markdown import tidy_zh_spacing, to_markdown
 from qbkb.export.pipeline import firm_name, write_if_changed
 from qbkb.models import Status
 from qbkb.sections import load_section_rules
+from qbkb.summarize import valid_summary
 from qbkb.translate import Glossary, lookup_translation, translated_title
 
 COLUMNS: tuple[str, ...] = (
@@ -90,6 +91,10 @@ def records(conn: sqlite3.Connection, site: SiteConfig, glossary: Glossary) -> l
             translated_title(conn, row["title"], str(backend), glossary) if backend else None
         )
         section = rules.name_of(row["section"]) or row["section"] or ""
+        summary = valid_summary(conn, row)
+        issues = _array(row["qc_issues"])
+        if summary and row["summary_truncated"]:
+            issues.append("摘要仅基于截取的正文")
         result.append(
             dict(
                 zip(
@@ -101,13 +106,13 @@ def records(conn: sqlite3.Connection, site: SiteConfig, glossary: Glossary) -> l
                         en,
                         zh,
                         row["published"] or "",
-                        "",
+                        summary,
                         row["author"] or "",
                         _array(row["tags"]),
                         firm_name(site),
                         section,
-                        "",
-                        _array(row["qc_issues"]),
+                        row["fetched_at"] or "",
+                        issues,
                         "incomplete" if backend and not complete else str(row["status"]),
                     ),
                     strict=True,

@@ -414,3 +414,25 @@ def test_304_refreshes_validators(conn: sqlite3.Connection, tmp_path: Path) -> N
     assert row is not None
     assert (row["status"], row["etag"]) == ("fetched", '"v2"')
     assert Path(row["raw_path"]).read_bytes() == ARTICLE
+
+
+def test_successful_fetch_records_reliable_utc_time(
+    conn: sqlite3.Connection, tmp_path: Path
+) -> None:
+    from datetime import UTC, datetime
+
+    before = datetime.now(UTC).replace(microsecond=0)
+    process_response(conn, URL, _resp(), tmp_path / "raw")
+    row = store.get_article(conn, URL)
+    assert row is not None and row["fetched_at"]
+    fetched = datetime.fromisoformat(row["fetched_at"])
+    assert fetched.utcoffset() == UTC.utcoffset(None)
+    assert before <= fetched <= datetime.now(UTC)
+
+
+def test_not_modified_keeps_original_fetch_time(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    process_response(conn, URL, _resp(), tmp_path / "raw")
+    store.set_fields(conn, URL, fetched_at="2026-01-01T00:00:00+00:00")
+    process_response(conn, URL, _resp(304, b"", headers={"ETag": '"fresh"'}), tmp_path / "raw")
+    row = store.get_article(conn, URL)
+    assert row is not None and row["fetched_at"] == "2026-01-01T00:00:00+00:00"

@@ -331,6 +331,12 @@ class DeepSeekScorer:
         assert last is not None
         raise ScoreFormatError(f"重问 {asked} 次后输出仍不合格：{last}") from last
 
+    def complete_json(self, messages: list[dict[str, str]], max_tokens: int | None = None) -> str:
+        """复用 JSON chat 运输接口，不执行评分解析。供独立加工命令复用限流与额度处理。"""
+        if not self._api_key:
+            raise RuntimeError("没有找到 LLM_API_KEY：请在 .env 里设置")
+        return self._complete(messages, max_tokens or self.max_tokens)
+
     def _complete(self, messages: list[dict[str, str]], max_tokens: int) -> str:
         payload = {
             "model": self.model,

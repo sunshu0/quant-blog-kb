@@ -206,6 +206,11 @@ def build_parser() -> argparse.ArgumentParser:
     _translate_opts(p)
     _export_opts(p)
     p.add_argument("--skip", action="append", choices=STAGES, default=[], help="跳过某个阶段")
+    p = stage("summarize", "独立生成中文摘要（调用 LLM，不在默认run流程中）")
+    _common(p)
+    p.add_argument(
+        "--input-chars", type=int, default=24000, help="正文输入字符上限，超出会截取并提示"
+    )
     p = stage("table", "从现有状态库输出 CSV 和 JSONL（不调用外部服务）")
     _common(p)
     p.add_argument("--out", default="output", help="输出目录（默认 output）")
@@ -706,6 +711,32 @@ def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
 # ---- 汇总命令 ----------------------------------------------------------------
 
 
+def cmd_summarize(args: argparse.Namespace) -> int:
+    from qbkb.summarize import DeepSeekSummarizer, run
+
+    backend = DeepSeekSummarizer.from_env(max_input_chars=args.input_chars)
+    conn = store.connect(args.db)
+    attention = False
+    try:
+        for site in _sites(args):
+            st = run(conn, site, backend, limit=args.limit)
+            print(
+                f"[summarize] {site.name}: 新生成 {st.generated}、复用 {st.reused}、"
+                f"输入截取 {st.truncated}"
+            )
+            for error in st.errors:
+                print(f"  ! {error}")
+            if st.stopped == "quota":
+                return EXIT_QUOTA
+            if st.stopped == "unavailable":
+                return EXIT_UNAVAILABLE
+            attention = attention or bool(st.errors)
+    finally:
+        conn.close()
+        backend.close()
+    return EXIT_ATTENTION if attention else EXIT_OK
+
+
 def cmd_table(args: argparse.Namespace) -> int:
     from qbkb.export.tables import write_tables
     from qbkb.translate import load_glossary
@@ -964,6 +995,8 @@ def main(argv: Sequence[str] | None = None, *, deps: Deps | None = None) -> int:
                 site = config.load_site(name)
                 print(f"{name}\t{site.compliance_decision}")
             return EXIT_OK
+        if args.command == "summarize":
+            return cmd_summarize(args)
         if args.command == "table":
             return cmd_table(args)
         if args.command == "status":

@@ -181,3 +181,18 @@ def test_rejected_translation_does_not_leak_into_table(tmp_path: Path) -> None:
     row = json.loads(stats.jsonl.read_text(encoding="utf-8"))
     assert row["中文正文"] == "" and row["翻译状态"] == "incomplete"
     conn.close()
+
+
+def test_table_uses_fetch_time_without_falling_back_to_update_time(tmp_path: Path) -> None:
+    conn = store.connect(tmp_path / "db")
+    add(conn)
+    out = tmp_path / "out"
+    stats = write_tables(conn, SITE, GLOSSARY, out)
+    assert json.loads(stats.jsonl.read_text(encoding="utf-8"))["抓取时间"] == ""
+    store.set_fields(conn, URL, fetched_at="2026-01-01T00:00:00+00:00")
+    write_tables(conn, SITE, GLOSSARY, out)
+    assert (
+        json.loads(stats.jsonl.read_text(encoding="utf-8"))["抓取时间"]
+        == "2026-01-01T00:00:00+00:00"
+    )
+    conn.close()
