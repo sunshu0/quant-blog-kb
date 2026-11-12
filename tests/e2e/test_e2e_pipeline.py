@@ -9,6 +9,9 @@ FakeTranslator，不花任何额度；默认流程不打分（注入的 FakeScor
 from __future__ import annotations
 
 import argparse
+import csv
+import io
+import json
 import sqlite3
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -224,10 +227,30 @@ def test_resume_after_translation_quota(tmp_path: Path, capsys: pytest.CaptureFi
     assert first.chars_used + second.chars_used == full.chars_used
     ref_files = {k: v[0] for k, v in reference.snapshot().items()}
     got_files = {k: v[0] for k, v in env.snapshot().items()}
-    # translated_at 不同，比较去掉这一行后的内容
-    strip = lambda b: b"\n".join(x for x in b.split(b"\n") if not x.startswith(b"translated_at"))  # noqa: E731
-    assert {k: strip(v) for k, v in got_files.items()} == {
-        k: strip(v) for k, v in ref_files.items()
+
+    def comparable(name: str, data: bytes) -> object:
+        # 两次独立抓取的时刻不同；结构化表格只规范化抓取时间，其余字段严格比较。
+        if name.endswith(".csv"):
+            rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig"), newline="")))
+            for row in rows:
+                assert "抓取时间" in row
+                row["抓取时间"] = "<抓取时间>"
+            return rows
+        if name.endswith(".jsonl"):
+            rows = [json.loads(line) for line in data.decode("utf-8").splitlines()]
+            for row in rows:
+                assert "抓取时间" in row
+                row["抓取时间"] = "<抓取时间>"
+            return rows
+        if name.endswith(".md"):
+            # Markdown 仍仅排除 translated_at；图片等其他文件按原始字节比较。
+            return b"\n".join(
+                line for line in data.split(b"\n") if not line.startswith(b"translated_at")
+            )
+        return data
+
+    assert {k: comparable(k, v) for k, v in got_files.items()} == {
+        k: comparable(k, v) for k, v in ref_files.items()
     }
 
 

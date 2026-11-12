@@ -10,6 +10,7 @@ import contextlib
 import os
 import re
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -234,6 +235,7 @@ def apply_outcome(
                 Status.FETCHED,
                 http_status=outcome.http_status,
                 raw_path=path.as_posix(),
+                fetched_at=datetime.now(UTC).isoformat(timespec="seconds"),
                 etag=outcome.etag,
                 last_modified=outcome.last_modified,
                 error=None,
