@@ -47,11 +47,14 @@ EXIT_MESSAGES: dict[int, str] = {
 }
 # 和 cli.STAGES 一致（v2 默认流程：分层翻译，只翻标题 + 摘要，不翻全文）
 STAGES = ("discover", "fetch", "extract", "titles", "summarize", "export")
+# --full-translate 时的流程：translate 替换 titles（和 cli.FULL_STAGES 一致）
+FULL_STAGES = ("discover", "fetch", "extract", "translate", "summarize", "export")
 STAGE_NAMES = {
     "discover": "发现新文章",
     "fetch": "抓取",
     "extract": "抽取正文、判定栏目",
     "titles": "翻译标题",
+    "translate": "翻译全文",
     "summarize": "生成中文摘要",
     "export": "导出 Markdown",
 }
@@ -373,10 +376,22 @@ class Job:
         if pub:
             self.published += int(pub.group(1)) - int(pub.group(2))
 
+    def _stages(self) -> tuple[str, ...]:
+        """这次 run 实际会跑哪些阶段（full-translate 换 translate，--skip 去掉跳过项）。"""
+        cmd = self.commands[0] if self.commands else []
+        skip = {cmd[i + 1] for i, a in enumerate(cmd) if a == "--skip" and i + 1 < len(cmd)}
+        flow = FULL_STAGES if "--full-translate" in cmd else STAGES
+        return tuple(s for s in flow if s not in skip)
+
     def summary(self, since: int = 0) -> dict[str, object]:
         """给页面的 JSON。since 是页面已经拿到的行数（含丢掉的），只返回之后的新行。"""
         start = max(since - self.dropped, 0)
-        stage_idx = STAGES.index(self.stage) + 1 if self.stage in STAGES else 0
+        if self.kind == "run":
+            stages = self._stages()
+            stage_idx = stages.index(self.stage) + 1 if self.stage in stages else 0
+            progress = {"done": stage_idx, "total": len(stages)}
+        else:
+            progress = None
         return {
             "id": self.id,
             "kind": self.kind,
@@ -389,7 +404,7 @@ class Job:
             "result": describe_exit(self.exit_code),
             "stage": self.stage,
             "stage_name": STAGE_NAMES.get(self.stage or "", ""),
-            "progress": {"done": stage_idx, "total": len(STAGES)} if self.kind == "run" else None,
+            "progress": progress,
             "quota": self.quota,
             "published": self.published,
             "lines": self.lines[start:],

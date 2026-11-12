@@ -430,3 +430,18 @@ def test_job_summary_is_json_serialisable(tmp_path: Path) -> None:
     job = m.start(workspace(tmp_path, "demo"), "run", "运行", [["a"]], {})
     m.wait(5)
     json.dumps(job.summary(), ensure_ascii=False)
+
+
+def test_full_translate_stage_name_and_progress(tmp_path: Path) -> None:
+    """ds-1：--full-translate 时 translate 阶段有名字，进度按 full 阶段序列算（--skip 也去掉）。"""
+    ws = workspace(tmp_path, "demo")
+    lines = ["[discover] demo: 新 1", "[translate] demo: 完成 1 篇、需复查 0 篇"]
+    popen = FakePopen(FakeProc(lines, 5))
+    done: list[jobs.Job] = []
+    m = _manager(tmp_path, popen, on_finish=done.append)
+    cmd = [PY, "-m", "qbkb.cli", "run", "--full-translate", "--skip", "summarize"]
+    job = m.start(ws, "run", "运行", [cmd], {})
+    m.wait(5)
+    s = job.summary()
+    assert s["stage_name"] == "翻译全文"
+    assert s["progress"] == {"done": 4, "total": 5}  # discover/fetch/extract/translate/export

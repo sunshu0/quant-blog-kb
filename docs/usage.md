@@ -139,6 +139,8 @@ qbkb 会把量化机构博客上有价值的文章抓下来、打分筛选、翻
 
 `qbkb translate --titles` 单独只翻标题（不翻正文、不把文章标成"已翻译"）；`qbkb summarize` 单独补跑摘要。
 
+`run` 里 `--url` 和 `--url-file` 是两回事：`run --url 网址`（配合 `--full-translate`）只影响翻译阶段——把这些文章按清单翻全文，不影响抓取；`run --url-file 文件` 只限制**抓取**（fetch 阶段）——按清单翻全文必须用 `translate --url-file 文件`，不能指望 `run --url-file` 去翻。
+
 ### 怎么看没翻全文的文章
 
 没翻全文的文章在导出/表格里照常有：英文原文 + 中文标题 + 中文摘要，中文正文留空并写明"尚未翻译"；文章状态是 `extracted`（有中文标题）或 `published`（已经导出），而不是 `translated`。只有真正翻了全文的文章才是 `translated`。

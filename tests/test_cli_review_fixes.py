@@ -113,6 +113,7 @@ def test_is_local_host(host: str | None, local: bool) -> None:
     assert config.is_local_host(host) is local
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_translate_titles_option(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     db = tmp_path / "s.db"
     conn = store.connect(db)

@@ -34,6 +34,14 @@ _STOP_PRIORITY = (EXIT_UNAVAILABLE, EXIT_QUOTA, EXIT_ATTENTION)
 # 连续这么多篇被后端以同样原因（ArticleTranslationError）拒绝，就当是系统性的配置问题
 # （术语表被删、目标语言配置错等），停下让用户查配置，而不是把整个队列逐篇标成 needs_review。
 MAX_CONSECUTIVE_ARTICLE_ERRORS = 3
+# --url / --url-file 点名翻译时，只有这些状态、且有段落的文章才翻；其余跳过并提示，不打成 failed
+_URL_ELIGIBLE = (
+    Status.EXTRACTED,
+    Status.FILTERED,
+    Status.NEEDS_REVIEW,
+    Status.TRANSLATED,
+    Status.PUBLISHED,
+)
 
 EXIT_CODES_HELP = """退出码：
   0  正常完成
@@ -155,7 +163,7 @@ def _translate_opts(p: argparse.ArgumentParser) -> None:
             "已翻译 / 已发布 / 需复查的文章也按现在的校验规则、术语表和固定译文重新过一遍："
             "术语没变、校验合格的段落直接复用（不花额度）；含改过的术语的段落会重翻（花额度，"
             "开始前打印预计字符数）；校验不合格的进 needs_review（配合 --retry-rejected 重翻）。"
-            "没有段落变化的文章保持原状态"
+            "没有段落变化的文章保持原状态。不能和 --url / --url-file 一起用"
         ),
     )
     p.add_argument("--fake-quota", type=int, help="假翻译后端的字符额度（测试断点续跑用）")
@@ -552,34 +560,42 @@ def translator_quota(translator: object) -> tuple[int | None, int, bool] | None:
     return used, limit, True
 
 
-def quota_line(translator: object, when: str) -> str | None:
-    """ "本月额度：已用 / 上限"这一行；后端没有额度概念就返回 None。"""
+def quota_line(translator: object, when: str, prefix: str = "[translate]") -> str | None:
+    """ "本月额度：已用 / 上限"这一行；后端没有额度概念就返回 None。
+
+    prefix 是这一行的阶段前缀（titles 阶段用 [titles] 打印，控制台好区分阶段）。
+    """
     quota = translator_quota(translator)
     if quota is None:
         return None
     used, limit, measured = quota
     source = "" if measured else "（取不到真实上限，按 API Free 的默认值）"
     if used is None:
-        return f"[translate] {when}本月额度：已用未知 / 上限 {limit} 字符{source}"
+        return f"{prefix} {when}本月额度：已用未知 / 上限 {limit} 字符{source}"
     return (
-        f"[translate] {when}本月额度：已用 {used} / 上限 {limit} 字符"
+        f"{prefix} {when}本月额度：已用 {used} / 上限 {limit} 字符"
         f"（剩余 {max(limit - used, 0)}）{source}"
     )
 
 
-def _print_quota(translator: object, when: str) -> None:
-    line = quota_line(translator, when)
+def _print_quota(translator: object, when: str, prefix: str = "[translate]") -> None:
+    line = quota_line(translator, when, prefix)
     if line:
         print(line)
 
 
 def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
-    """translate --titles：只补翻缺中文标题的文章（不翻正文、不改状态）。"""
+    """translate --titles：只补翻缺中文标题的文章（不翻正文、不改状态）。
+
+    只翻采集栏目里的文章（和 export / translate 的栏目过滤一致），未选栏目的标题不花额度。
+    """
+    from qbkb import sections
     from qbkb import translate as tr
 
     conn = store.connect(args.db)
     try:
-        urls = tr.missing_titles(conn, site.name)
+        rules = sections.load_section_rules(site)
+        urls = tr.missing_titles(conn, site.name, rules)
         if args.limit is not None:
             urls = urls[: args.limit]
         if not urls:
@@ -596,6 +612,7 @@ def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
         except tr.BackendAuthError as e:
             raise Stopped(EXIT_ERROR, f"[titles] 翻译后端鉴权失败，停下：{e}") from e
         print(f"[titles] {site.name}: 补翻标题 {n} / {len(urls)} 篇（只翻标题，不翻正文）")
+        _print_quota(translator, "翻译后", prefix="[titles]")
         return EXIT_OK if n == len(urls) else EXIT_ATTENTION
     finally:
         conn.close()
@@ -612,25 +629,63 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
     try:
         rules = sections.load_section_rules(site)
         sections.apply_sections(conn, site, rules)
-        only = set(getattr(args, "url", None) or [])
+        only = list(getattr(args, "url", None) or [])
         # --url-file 只在独立的 translate 命令里有；run 里的 --url-file 是 fetch 的，不能混用
         url_file = getattr(args, "url_file", None) if args.command == "translate" else None
         if url_file is not None:
-            only |= {
-                u.strip() for u in url_file.read_text(encoding="utf-8").splitlines() if u.strip()
-            }
+            # utf-8-sig 兼容记事本带 BOM 的清单；# 开头是注释行
+            only += [
+                u.strip()
+                for u in url_file.read_text(encoding="utf-8-sig").splitlines()
+                if u.strip() and not u.strip().startswith("#")
+            ]
+        # 去重、保持清单顺序（用户通常按重要性排序，额度不够时先翻前面的）
+        only = list(dict.fromkeys(only))
+        if only and getattr(args, "recheck", False):
+            print(
+                "错误：--url / --url-file 不能和 --recheck 一起用"
+                "（--recheck 是对已翻文章按新规则重过一遍，按清单翻用 --url/--url-file）",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+        notice = False  # 清单里有跳过 / 找不到的网址
         if only:
-            # 按清单翻全文：直接翻译列出的网址，不管它当前是什么状态（含只翻过标题的 published）
-            urls = sorted(u for u in only if store.get_article(conn, u) is not None)
+            # 按清单翻全文：直接翻译列出的网址，不管它当前是什么状态（含只翻过标题的 published）。
+            # 只收本站点、状态可翻、有段落的；其余打印原因、不打成 failed。
+            urls = []
+            skipped: list[tuple[str, str]] = []
+            missing: list[str] = []
+            for u in only:
+                row = store.get_article(conn, u)
+                if row is None:
+                    missing.append(u)
+                    continue
+                if row["site"] != site.name:
+                    continue  # 别的站点的网址：在那个站点的循环里处理
+                st = Status(row["status"])
+                if st not in _URL_ELIGIBLE or not store.get_segments(conn, u):
+                    skipped.append((u, st.value))
+                    continue
+                urls.append(u)
+            for u, st in skipped:
+                print(f"[translate] 跳过：{u}（状态 {st}，没有可翻的段落）")
+                notice = True
+            for u in missing:
+                print(f"[translate] 清单里找不到：{u}")
+                notice = True
+            if not urls:
+                print(f"[translate] {site.name}: 没有待翻译的文章")
+                return EXIT_ATTENTION if notice else EXIT_OK
         else:
             urls = sections.translatable(conn, site, rules)
-            # 只翻过标题、已经导出的文章（translator 为空）也选进来：--full-translate 续跑、
-            # 或先入库再补翻全文时，能从标题-only 状态接着翻
-            urls += [
-                str(r["url"])
-                for r in store.list_rows(conn, [Status.PUBLISHED], site.name)
-                if r["translator"] is None
-            ]
+            # 只翻过标题、已经导出的文章（translator 为空）也选进来，但只在 `run --full-translate`
+            # 时：裸 translate、--retry-rejected（控制台「重翻」）都不扫这些积压，避免一次烧光额度。
+            if args.command == "run" and getattr(args, "full_translate", False):
+                urls += [
+                    str(r["url"])
+                    for r in store.list_rows(conn, [Status.PUBLISHED, Status.TRANSLATED], site.name)
+                    if r["translator"] is None and rules.collects(str(r["url"]), r["section_key"])
+                ]
             if rules.enabled and not any(s.collect for s in rules.sections):
                 print(
                     f"[translate] {site.name}: 还没有勾选任何采集栏目"
@@ -665,6 +720,15 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 + "），其余按新规则复用，不花额度"
             )
         _print_quota(translator, "翻译前")
+        quota = translator_quota(translator)
+        if quota is not None:
+            used, limit, _measured = quota
+            if used is not None and limit is not None and need > max(limit - used, 0):
+                print(
+                    f"[translate] 提醒：预计 {need} 字符超过本月剩余额度 {max(limit - used, 0)}，"
+                    "可能翻到一半停下（已翻的会保存）",
+                    file=sys.stderr,
+                )
         problems = tr.fixed_translation_errors(conn, urls, glossary)
         if problems:
             for p in problems:
@@ -741,7 +805,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             f"送出 {chars} 字符；固定译文 / 说话人标签 / 按新规则复用 {free} 段（不计费）"
         )
         _print_quota(translator, "翻译后")
-        return EXIT_ATTENTION if review else EXIT_OK
+        return EXIT_ATTENTION if review or notice else EXIT_OK
     finally:
         conn.close()
 
@@ -816,7 +880,15 @@ def stage_summarize(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
     own_backend = deps.summarizer is None
     conn = store.connect(args.db)
     try:
-        st = summarize_run(conn, site, backend, limit=args.limit)
+        try:
+            st = summarize_run(conn, site, backend, limit=args.limit)
+        except RuntimeError as e:
+            # 没配 LLM_API_KEY：默认 run 里跳过摘要（export 照常跑，退出码按"部分完成"），
+            # 独立 `qbkb summarize` 保持报错（退出码 1）。
+            if "LLM_API_KEY" in str(e) and args.command != "summarize":
+                print("[summarize] 没配 LLM_API_KEY，跳过中文摘要")
+                return EXIT_ATTENTION
+            raise
     finally:
         conn.close()
         if own_backend:

@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from qbkb import store
+from qbkb.config import SiteConfig
 from qbkb.models import DiscoveredUrl, Segment, Status
+from qbkb.sections import load_section_rules
 from qbkb.translate import (
     ArticleTranslationError,
     FakeTranslator,
@@ -116,3 +118,60 @@ def test_backfill_reuses_memory_and_stops_on_quota(conn: sqlite3.Connection) -> 
     store.set_status(conn, a, Status.TRANSLATED, title_zh=None)
     assert backfill_titles(conn, [a, b], again, GLOSSARY) == 2
     assert again.calls == [[title_unit("Momentum B")]]  # a 的标题命中翻译记忆
+
+
+def test_missing_titles_filters_by_collect(conn: sqlite3.Connection) -> None:
+    """M1：只翻采集栏目里的标题；未选栏目不花额度。"""
+    keep = "https://ex.test/keep/x"
+    drop = "https://ex.test/drop/y"
+    for url, slug in [(keep, "x"), (drop, "y")]:
+        store.upsert_discovered(conn, DiscoveredUrl(url, "ex", slug))
+        store.replace_segments(conn, url, [Segment(0, BODY)])
+        store.set_status(conn, url, Status.EXTRACTED, title=f"Title {slug}")
+    site = SiteConfig(
+        "ex",
+        "allowed",
+        {
+            "base_url": "https://ex.test",
+            "sections": {
+                "list": [
+                    {"id": "keep", "url_prefix": "/keep", "collect": True},
+                    {"id": "drop", "url_prefix": "/drop", "collect": False},
+                ]
+            },
+        },
+    )
+    rules = load_section_rules(site)
+    assert missing_titles(conn, "ex", rules) == [keep]
+    assert missing_titles(conn, "ex") == sorted([keep, drop])  # 不给 rules 就全量
+
+
+def test_backfill_title_validation_failure_recorded_once(conn: sqlite3.Connection) -> None:
+    """M1：标题结构校验失败记一次（needs_review），不再每次重送、永远退出码 5。"""
+    url = "https://example.test/insights/bad"
+    store.upsert_discovered(conn, DiscoveredUrl(url, "example", "bad"))
+    store.replace_segments(conn, url, [Segment(0, BODY)])
+    store.set_status(conn, url, Status.EXTRACTED, title="Bad title")
+
+    class BadTitle(FakeTranslator):
+        def translate(self, segments, glossary, context: str = ""):  # type: ignore[override]
+            # 标题译文结构不对（<div> 不是 <p>），结构校验失败
+            return ["<div>坏了</div>" for _ in segments]
+
+    assert backfill_titles(conn, [url], BadTitle(), GLOSSARY) == 0
+    row = store.get_article(conn, url)
+    assert row is not None and row["status"] == Status.NEEDS_REVIEW
+    assert "标题翻译失败" in str(row["error"])
+    assert missing_titles(conn) == []  # 不再被选中重送
+
+
+def test_backfill_keeps_title_only_published(conn: sqlite3.Connection) -> None:
+    """M2：只翻过标题的 published（translator 为空）补标题后保持 published，不降成 translated。"""
+    url = "https://example.test/insights/tp"
+    store.upsert_discovered(conn, DiscoveredUrl(url, "example", "tp"))
+    store.replace_segments(conn, url, [Segment(0, BODY)])
+    store.set_status(conn, url, Status.PUBLISHED, title="Momentum D", title_zh=None)
+    assert backfill_titles(conn, [url], FakeTranslator(), GLOSSARY) == 1
+    row = store.get_article(conn, url)
+    assert row is not None and row["status"] == Status.PUBLISHED
+    assert row["title_zh"] == "【译】动量 D"
