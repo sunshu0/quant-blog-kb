@@ -1,0 +1,76 @@
+# Capital Fund Management（CFM）Our thinking。字段说明见 docs/design.md 3.1、4.1、4.3。
+# WordPress 站：文章网址平铺 https://www.cfm.com/<slug>/，服务端渲染，全站一个文章模板。
+# 栏目（The Edge / Commentary & Insights / Academic Papers / Whitepaper）从 JSON-LD
+# articleSection 读进 tags；按栏目选择采集（sections 节）等 PR C 合并后再接。
+
+compliance:
+  robots_txt: "Yoast 生成：User-agent: * 全部放行（Disallow 为空）；Crawl-delay: 10（写在 User-agent 行之前，照样遵守，见下面 crawl_delay）"
+  terms_url: https://www.cfm.com/terms-of-use/
+  terms_summary: >-
+    第 2、6 节：只允许个人存储（"for your sole personal use"）；禁止复制、分发、发布；
+    使用数据需 CFM 事先书面同意。没有专门提到爬虫。
+    媒体转载类文章（Pensions & Investments、FT、Business Insider 等）的版权可能属于原媒体，许可未必覆盖。
+  permission: "公司已获得书面许可（2026-11-12）；许可不含公开再分发"
+  checked_at: 2026-11-12
+  decision: allowed
+
+base_url: https://www.cfm.com
+# 输出 frontmatter 的 firm 字段和来源说明里用的机构名
+firm: Capital Fund Management (CFM)
+# 两次请求的最小间隔（秒）。robots.txt 写了 Crawl-delay: 10，多留 0.5 秒余量。
+# discover、fetch、图片下载都不会低于它（命令行 --fetch-delay 调小也不行）
+crawl_delay: 10.5
+
+discover:
+  # 只读文章 sitemap：公司页面在 page-sitemap.xml、奖项在 award-sitemap.xml，自然排除。
+  # 不写 sitemap_index.xml：展开它要多发好几次请求。
+  # 注意：这份 sitemap 比网站滞后几天（最新几篇可能还不在里面）
+  sitemap: https://www.cfm.com/post-sitemap.xml
+  max_sitemaps: 1
+  # 文章网址都是 /<slug>/，新闻、访谈、通讯也是文章，网址区分不了，只能按栏目（tags）区分
+  include_prefixes:
+    - /
+
+extract:
+  # 正文少于这么多字符就标记"正文太短"：论文、白皮书、季度通讯只有摘要（全文是 PDF），视频页只有一两句
+  min_chars: 1000
+  # 出现在正文里就标记出来给人看（不自动删除）。按整词、不分大小写匹配
+  noise_keywords:
+    - Listen to this blog
+    - Share this article
+    - accept cookies
+    - Cookie policy
+    - Accept analytics cookies
+    - Manage settings
+    - Type to search
+  # <title> 带站名后缀（JSON-LD headline 没有后缀，优先用它）
+  title_strip: '\s*-\s*CFM\s*$'
+  # 全站噪音（在默认的 script/iframe/form/button/nav/audio 等之外）
+  remove:
+    - .audio-player-container # "Listen to this blog" 朗读音频
+    - .play-container # 视频封面上的播放按钮
+    - .video-container
+    - section.rrss-container # "Share this article"
+    - section.our-thinking-container # 页底相关文章
+    - .cookie-message
+  # 免责声明在正文最后一块，没有专门的 class，每篇文字都不一样，不做固定译文（keep），随正文翻译
+  templates:
+    # 全站一个 WordPress 文章模板（body.single-post），没有 main / article
+    - name: post
+      require: ".content-blocks-container .col-80"
+      title: ".content-blocks-container .col-80 h1"
+      # 日期用 JSON-LD datePublished / article:published_time。页面上的 "30th Oct 2026"
+      # 带序数后缀，strptime 解析不了，不配
+      # 每个 li 是"姓名<br>职位或单位"，只取 <br> 前的姓名；空 li 自动跳过。
+      # JSON-LD 和 meta 的 author 是机构名 "CFM" 或主题开发者网址，会被当作没有作者而跳过
+      author:
+        selector: ".sidebar ul.author-list li"
+        pattern: '^([^\n]+)'
+      # JSON-LD 有 articleSection（栏目）时优先用它；没有时用页面上的栏目名和标签
+      tags: ".thinking-type-container h5, .sidebar .tags li"
+      remove:
+        - h1 # 标题已经在元数据里
+      body:
+        - ".content-blocks-container .col-80"
+        # 论文、白皮书的全文是 PDF：把侧栏的 "Download PDF" 链接附在正文后面
+        - ".sidebar ul.file-list"

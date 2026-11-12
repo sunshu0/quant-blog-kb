@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 USER_AGENT = "qbkb/0.1 (+https://github.com/sunshu0/quant-blog-kb)"
@@ -19,6 +20,33 @@ RETRY_BACKOFF_MAX_SECONDS = 60.0
 # 服务器给的 Retry-After 不超过这个值就照做；超过就不重试、标失败并停止本次抓取。
 RETRY_AFTER_MAX_SECONDS = 300.0
 DOWNLOAD_MAXSIZE_BYTES = 20 * 1024 * 1024
+
+
+def site_crawl_delay(site_raw: Mapping[str, Any]) -> float | None:
+    """站点配置顶层的 crawl_delay（秒）：站点要求的最小请求间隔（比如 robots.txt 的 Crawl-delay）。
+
+    discover 拉 sitemap、fetch 抓文章、export 下载图片都取它和各自默认值中较大的一个；
+    命令行 --fetch-delay 调得再小也不会低于它。没写返回 None。
+    """
+    value = site_raw.get("crawl_delay")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ValueError(f"crawl_delay 必须是正数（秒），现在是 {value!r}")
+    return float(value)
+
+
+def apply_crawl_delay(overrides: Mapping[str, Any], crawl_delay: float | None) -> dict[str, Any]:
+    """把站点的 crawl_delay 合进 Scrapy 设置：间隔取 overrides（或默认值）和它的较大者。"""
+    out = dict(overrides)
+    if crawl_delay is None:
+        return out
+    current = float(out.get("DOWNLOAD_DELAY", DOWNLOAD_DELAY_SECONDS))
+    if current < crawl_delay:
+        out["DOWNLOAD_DELAY"] = crawl_delay
+        out["AUTOTHROTTLE_START_DELAY"] = crawl_delay
+        out["AUTOTHROTTLE_ENABLED"] = True
+    return out
 
 
 def build_settings(
@@ -37,6 +65,9 @@ def build_settings(
         "CONCURRENT_REQUESTS": 1,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 1,
         "DOWNLOAD_DELAY": DOWNLOAD_DELAY_SECONDS,
+        # Scrapy 默认在 DOWNLOAD_DELAY 上加 ±50% 随机，实际间隔可能只有一半；
+        # 关掉它，DOWNLOAD_DELAY 才是真正的最小间隔（站点的 crawl_delay 靠它保证）
+        "DOWNLOAD_DELAY_JITTER": 0.0,
         "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_START_DELAY": DOWNLOAD_DELAY_SECONDS,
         "AUTOTHROTTLE_MAX_DELAY": RETRY_BACKOFF_MAX_SECONDS,

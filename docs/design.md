@@ -110,7 +110,8 @@ compliance:
 
 ### 4.2 fetch：抓取
 - 用 Scrapy，从状态库读取待抓取的 URL。
-- 配置：`ROBOTSTXT_OBEY=True`、`AutoThrottle`（同一站点并发 1，间隔约 2 秒）、超时 30 秒、指数退避重试 3 次、明确的 User-Agent。
+- 配置：`ROBOTSTXT_OBEY=True`、`AutoThrottle`（同一站点并发 1，间隔约 2 秒）、超时 30 秒、指数退避重试 3 次、明确的 User-Agent。关掉 Scrapy 默认的 ±50% 间隔随机（`DOWNLOAD_DELAY_JITTER=0`），设定的间隔就是最小间隔。
+- 站点级最小间隔：站点配置顶层的 `crawl_delay`（秒，对应 robots.txt 的 `Crawl-delay`；Scrapy 遵守 robots.txt 的 Disallow，但不执行 Crawl-delay）。discover 拉 sitemap、fetch、图片下载都取它和各自默认值中较大的一个，`--fetch-delay` 调小也不会低于它。例：CFM 写 `crawl_delay: 10.5`。
 - **原始 HTML 由我们自己存到** `raw/<site>/<slug>.html`。这是对讨论时"用 HTTPCACHE"的细化：HTTPCACHE 的存储格式是 Scrapy 内部的，extract 阶段不方便直接读，所以只在开发调试时打开它。
 - 支持条件请求（ETag / If-Modified-Since），对方返回 304 就跳过。
 - 遇到 403 或人机验证页面：标记 `failed`，写明原因，**不绕过**。

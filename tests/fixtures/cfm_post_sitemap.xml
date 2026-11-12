@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?><?xml-stylesheet type="text/xsl" href="//www.cfm.com/wp-content/plugins/wordpress-seo/css/main-sitemap.xsl"?>
+<urlset xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1" xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd http://www.google.com/schemas/sitemap-image/1.1 http://www.google.com/schemas/sitemap-image/1.1/sitemap-image.xsd" xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+	<url>
+		<loc>https://www.cfm.com/sample-post-one/</loc>
+		<lastmod>2023-01-05T15:44:48+00:00</lastmod>
+		<image:image>
+			<image:loc>https://www.cfm.com/wp-content/uploads/2022/08/sample-thumb.jpg</image:loc>
+		</image:image>
+	</url>
+	<url>
+		<loc>https://www.cfm.com/sample-post-one-2/</loc>
+		<lastmod>2024-06-27T09:52:18+00:00</lastmod>
+	</url>
+	<url>
+		<loc>https://www.cfm.com/caf%C3%A9-sample-post/</loc>
+		<lastmod>2026-10-23T10:00:00+00:00</lastmod>
+		<image:image>
+			<image:loc>https://www.cfm.com/wp-content/uploads/2026/10/another-thumb.png</image:loc>
+		</image:image>
+	</url>
+	<url>
+		<loc>https://elsewhere.example/not-ours/</loc>
+		<lastmod>2026-10-23T10:00:00+00:00</lastmod>
+	</url>
+</urlset>

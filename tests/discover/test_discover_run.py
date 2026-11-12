@@ -297,6 +297,40 @@ def test_discover_site_walks_index(conn: sqlite3.Connection) -> None:
     assert beta["slug"].startswith("beta-carry-")
 
 
+def test_discover_waits_site_crawl_delay(conn: sqlite3.Connection) -> None:
+    """站点配置了 crawl_delay（robots.txt 的 Crawl-delay）时，sitemap 之间按它等。"""
+    site = _site()
+    site.raw["crawl_delay"] = 10.5
+    sleep = FakeSleep()
+    discover_site(site, conn, fetch=FakeFetch(), sleep=sleep)
+    assert sleep.calls == [10.5, 10.5]
+
+
+def test_rules_from_repo_cfm_config() -> None:
+    rules = DiscoverRules.from_site(config.load_site("cfm"))
+    # 只读文章 sitemap，一次请求；文章网址都是 /<slug>/
+    assert rules.sitemaps == ("https://www.cfm.com/post-sitemap.xml",)
+    assert rules.max_sitemaps == 1
+    assert rules.include_prefixes == ("/",)
+    assert rules.exclude_prefixes == ()
+
+
+def test_cfm_post_sitemap(conn: sqlite3.Connection) -> None:
+    """构造的 Yoast post-sitemap：图片扩展、-2 后缀、百分号编码的 slug 都正常入库。"""
+    url = "https://www.cfm.com/post-sitemap.xml"
+    fetch = FakeFetch({url: "cfm_post_sitemap.xml"})
+    stats = discover_site(config.load_site("cfm"), conn, fetch=fetch, sleep=FakeSleep())
+    assert fetch.calls == [url]
+    assert stats.errors == []
+    assert (stats.new, stats.filtered) == (3, 1)  # 站外网址被过滤
+    urls = sorted(store.list_by_status(conn, Status.DISCOVERED, "cfm"))
+    assert urls == [
+        "https://www.cfm.com/caf%C3%A9-sample-post/",
+        "https://www.cfm.com/sample-post-one-2/",
+        "https://www.cfm.com/sample-post-one/",
+    ]
+
+
 def test_rerun_is_idempotent(conn: sqlite3.Connection) -> None:
     _run(_site(), conn)
     stats = _run(_site(), conn)
