@@ -12,6 +12,7 @@ from scrapy.downloadermiddlewares.redirect import RedirectMiddleware
 from scrapy.exceptions import CloseSpider, IgnoreRequest
 from scrapy.http import HtmlResponse, Request, Response
 from scrapy.utils.test import get_crawler
+from twisted.python.failure import Failure
 
 from qbkb import config, store
 from qbkb.config import ComplianceError, SiteConfig
@@ -396,6 +397,28 @@ def test_same_host_redirect_is_allowed(db: tuple[Path, sqlite3.Connection], tmp_
     # 同站（含子域）与同 scheme 的请求放行，不写状态库
     assert HostAllowlistMiddleware.from_crawler(crawler).process_request(result, spider) is None
     assert store.get_article(conn, url)["status"] == Status.DISCOVERED  # type: ignore[index]
+
+
+def test_cross_host_rejection_is_counted_once(
+    db: tuple[Path, sqlite3.Connection], tmp_path: Path
+) -> None:
+    _, conn = db
+    counts: Counter[Kind] = Counter()
+    spider = _spider(conn, tmp_path, counts)
+    mw = HostAllowlistMiddleware("https", "www.example.test")
+    request = Request("https://unapproved.test/private", cb_kwargs={"article_url": BASE + "alpha"})
+    with pytest.raises(IgnoreRequest):
+        mw.process_request(request, spider)
+    row = store.get_article(conn, BASE + "alpha")
+    assert row is not None and row["retries"] == 1
+    assert counts[Kind.FAILED] == 1
+    # 模拟 Scrapy 把这个 IgnoreRequest 交给 errback：白名单已经记过，不该再记第二次
+    failure = Failure(IgnoreRequest("blocked"))
+    failure.request = request  # type: ignore[attr-defined]
+    spider.on_error(failure)
+    row = store.get_article(conn, BASE + "alpha")
+    assert row is not None and row["retries"] == 1
+    assert counts[Kind.FAILED] == 1
 
 
 def test_robots_request_without_article_url_is_not_recorded_as_article(

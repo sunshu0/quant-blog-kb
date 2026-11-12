@@ -140,6 +140,10 @@ class BackoffRetryMiddleware:
         return result
 
 
+# 白名单中间件已经记过一次失败后，放在 request.meta 里的标记；errback 看到它就跳过，不再记第二次。
+_CROSS_HOST_BLOCKED = "qbkb_cross_host_blocked"
+
+
 class HostAllowlistMiddleware:
     """显式 scheme + host 白名单检查：约束初始 URL 和每一次重定向目标。
 
@@ -185,6 +189,8 @@ class HostAllowlistMiddleware:
                 f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则，停止抓取"
             )
         spider.fail_cross_host(str(article_url), request.url)  # type: ignore[attr-defined]
+        # 已经记过一次失败：标记一下，errback 别再记第二次（否则失败数和 retries 都会翻倍）
+        request.meta[_CROSS_HOST_BLOCKED] = True
         raise IgnoreRequest(f"请求目标 {request.url} 不在许可站点 {self.allowed_host} 内")
 
 
@@ -251,6 +257,8 @@ class ArticleSpider(scrapy.Spider):
 
     def on_error(self, failure: Failure) -> None:
         request: Request = failure.request  # type: ignore[attr-defined]
+        if request.meta.get(_CROSS_HOST_BLOCKED):
+            return  # 白名单中间件已经记过失败，别重复计数 / 累加 retries
         url = str(request.cb_kwargs["article_url"])
         exc = failure.value
         if not isinstance(exc, BaseException):
