@@ -76,7 +76,7 @@ extract:
         - ".sidebar ul.file-list"
 
 
-# 栏目来自页面的 Type 标题。四栏均待用户勾选；识别不了的新栏目只提醒，不翻译。
+# 栏目来自页面的 Type 标题。用户首批仅选择 The Edge；识别不了的新栏目只提醒，不翻译。
 # 论文、白皮书目前只抽网页摘要，PDF 正文不在本次范围。
 sections:
   page_key:
@@ -85,8 +85,8 @@ sections:
     - id: the-edge-a-cfm-blog
       name: The Edge a CFM blog
       key: The Edge a CFM blog
-      collect: false
-      status: 待选择
+      collect: true
+      status: 已选择
     - id: commentary-insights
       name: Commentary & Insights
       key: Commentary & Insights

@@ -1,6 +1,7 @@
 """CFM 栏目接入：构造内容离线验证；真实样本只从被忽略的本地目录读取。"""
 
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -17,14 +18,16 @@ from qbkb.sections import (
 )
 
 
-def test_cfm_sections_start_unselected() -> None:
+def test_cfm_sections_only_edge_selected() -> None:
     rules = load_section_rules(config.load_site("cfm"))
     assert rules.enabled and len(rules.sections) == 4
-    assert all(not s.collect for s in rules.sections)
+    assert [s.id for s in rules.sections if s.collect] == ["the-edge-a-cfm-blog"]
 
 
 def test_cfm_selection_and_new_section(tmp_path: Path) -> None:
-    site = config.load_site("cfm")
+    site = deepcopy(config.load_site("cfm"))
+    for section in site.raw["sections"]["list"]:
+        section["collect"] = False
     conn = store.connect(tmp_path / "state.db")
     keys = ["The Edge a CFM blog", "Commentary &amp; Insights", "New Research"]
     urls = []
@@ -74,7 +77,7 @@ def test_local_cfm_pages_have_recognized_sections() -> None:
         found = page_section(document_fromstring(raw), raw, url, rules)
         section = rules.classify(url, found.key)
         assert not found.issues and section is not None, path.name
-        assert not section.collect
+        assert section.collect == (section.id == "the-edge-a-cfm-blog")
         counts[section.id] += 1
     assert len(SAMPLES) == 12
     assert counts == {
