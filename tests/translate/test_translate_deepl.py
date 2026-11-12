@@ -266,6 +266,7 @@ def test_too_many_glossaries_is_not_reported_as_quota(error: Exception) -> None:
     assert sleeps == []
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_too_many_glossaries_exit_code_is_error_not_quota(tmp_path: Path) -> None:
     """CLI：术语表上限报成普通错误（退出码 1），提示里没有"额度用完、下个月再跑"。"""
     from qbkb import cli

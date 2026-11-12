@@ -60,6 +60,7 @@ def test_missing_llm_key_is_a_clear_error(
     assert "LLM_API_KEY" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_missing_deepl_key_only_when_there_is_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -67,10 +68,13 @@ def test_missing_deepl_key_only_when_there_is_work(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DEEPL_API_KEY", raising=False)
     args = ["translate", "--site", "man", "--db", str(db)]
-    assert cli.main(args) == 0  # 没有 filtered 文章，用不到 key
+    conn = store.connect(db)
+    store.set_status(conn, URL, Status.FETCHED)
+    conn.close()
+    assert cli.main(args) == 0  # 没有 extracted 文章，用不到 key
     assert "没有待翻译的文章" in capsys.readouterr().out
     conn = store.connect(db)
-    store.set_status(conn, URL, Status.FILTERED)
+    store.set_status(conn, URL, Status.EXTRACTED)
     conn.close()
     assert cli.main(args) == cli.EXIT_ERROR
     assert "DEEPL_API_KEY" in capsys.readouterr().err

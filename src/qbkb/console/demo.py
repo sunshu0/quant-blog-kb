@@ -5,7 +5,7 @@
   DemoTranslator 按段落原文查这份中文，所以演示时看到的是像样的中文译文；
 - 站点在本机 127.0.0.1 起 HTTP 服务，端口记在 .qbkb/demo/site.json 里，下次尽量用同一个端口
   （文章 URL 里带端口，换端口就是另一批文章）；端口被占用时清空演示数据、换一个端口；
-- 打分用 FakeScorer（按关键词），翻译用 DemoTranslator，抓取间隔 0（本机站点允许）；
+- 只采集"独立文章"栏目（另两篇演示"未选栏目"），翻译用 DemoTranslator，抓取间隔 0（本机站点允许）；
 - 为了让「待复查」页有内容可演示：momentum 那篇的第一段前两次翻译会"丢掉脚注上标"，
   结构校验拦下 → needs_review；在控制台点「重翻」（第三次）就好了。计数记在 .qbkb/demo/ 里。
 """
@@ -41,6 +41,8 @@ SITE_FILE = "site.json"
 FIRM = "示例资本（演示）"
 # 前几次翻译 momentum 那篇第一段时丢掉脚注（让它进 needs_review），之后正常
 FLAKY_ATTEMPTS = 2
+# 演示模式采集的栏目（man.yaml 的栏目 id）
+DEMO_COLLECT = frozenset({"article"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,7 +253,7 @@ PAGES: tuple[DemoPage, ...] = (
             ),
         ),
     ),
-    # 下面两篇演示"筛掉"：一篇 L2 判成 ESG/气候，一篇 L1 排除栏目。不会被翻译，所以不配中文
+    # 下面两篇演示"未选栏目"：一篇是视频栏目，一篇是 A Moment in Macro。不会被翻译，所以不配中文
     DemoPage(
         "/insights/climate-note-for-portfolios",
         "A Climate Note for Portfolios",
@@ -261,11 +263,12 @@ PAGES: tuple[DemoPage, ...] = (
             p(
                 f"Paragraph {i} of a constructed climate note: it talks about carbon prices, "
                 "weather patterns and how a made-up portfolio could report its emissions. It "
-                "exists only so that the demo shows an article being filtered out by topic.",
+                "exists only so that the demo shows an article whose column is not collected.",
                 "",
             )
             for i in range(4)
         ),
+        tagline="VIDEO | 3 MIN",
     ),
     DemoPage(
         "/insights/a-moment-in-macro/rates-this-week",
@@ -275,7 +278,7 @@ PAGES: tuple[DemoPage, ...] = (
         tuple(
             p(
                 f"Paragraph {i} of a constructed weekly macro note about interest rates. The "
-                "column it belongs to is excluded by a rule, so the demo never translates it.",
+                "column it belongs to is not selected, so the demo never translates it.",
                 "",
             )
             for i in range(4)
@@ -590,6 +593,10 @@ def ensure_config(ws: Workspace, base: str, source: Path = CONFIG_DIR) -> Path:
     man["firm"] = FIRM
     man["extract"]["min_chars"] = 400  # 示例文章短，不要每篇都报"正文太短"
     man["discover"]["sitemap"] = f"{base}/sitemap.xml"
+    # 栏目照抄 man，演示时只采集"独立文章"：视频那篇和 A Moment in Macro 那篇是"未选栏目"
+    for sec in man["sections"]["list"]:
+        sec["collect"] = sec["id"] in DEMO_COLLECT
+        sec["status"] = "演示"
     man["compliance"] = {
         "robots_txt": "演示站点：本机构造，全部放行",
         "terms_summary": "仓库自带的构造内容，没有任何真实文章",
@@ -602,12 +609,6 @@ def ensure_config(ws: Workspace, base: str, source: Path = CONFIG_DIR) -> Path:
         if old.stem != DEMO_SITE:
             old.unlink()
     _write_if_changed(sites / f"{DEMO_SITE}.yaml", yaml.safe_dump(man, allow_unicode=True))
-    filters: dict[str, Any] = yaml.safe_load((cfg / "filters.yaml").read_text("utf-8"))
-    # 示例文章比真实文章短：最少单词数调低，排除栏目照抄 man
-    filters["sites"] = {
-        DEMO_SITE: {"exclude_prefixes": ["/insights/a-moment-in-macro/"], "min_words": 100}
-    }
-    _write_if_changed(cfg / "filters.yaml", yaml.safe_dump(filters, allow_unicode=True))
     return cfg
 
 

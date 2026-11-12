@@ -20,7 +20,8 @@ def test_repo_filters_yaml_loads() -> None:
     assert "量化方法论" in cfg.include_categories
     assert "宏观周评" in cfg.exclude_categories
     assert cfg.categories == cfg.include_categories + cfg.exclude_categories
-    assert cfg.site("man").exclude_prefixes == ("/insights/a-moment-in-macro/",)
+    # v2：按系列排除改成"不选这个栏目"（config/sites/man.yaml 的 sections）
+    assert cfg.site("man").exclude_prefixes == ()
     assert cfg.site("man").min_words == 300
     assert cfg.site("unknown").min_words == 0
     assert cfg.threshold == 7 and cfg.excerpt_words == 500

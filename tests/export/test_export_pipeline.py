@@ -93,6 +93,7 @@ def test_export_article_files_and_frontmatter(conn: sqlite3.Connection, tmp_path
         "author",
         "published",
         "source_url",
+        "section",
         "category",
         "value_score",
         "rubric_version",
@@ -163,7 +164,7 @@ def test_missing_translation_requeues(conn: sqlite3.Connection, tmp_path: Path) 
     stats = run(conn, SITE, newer, tmp_path / "output")
     assert stats.requeued == [URL]
     row = store.get_article(conn, URL)
-    assert row is not None and row["status"] == Status.FILTERED
+    assert row is not None and row["status"] == Status.EXTRACTED  # v2：退回 extracted
     assert "缺 1 段译文" in row["error"]
 
 

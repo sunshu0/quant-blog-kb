@@ -223,12 +223,16 @@ def set_key(root: Path, name: str, value: str) -> None:
     os.replace(tmp, path)
 
 
+# 默认流程（v2）只需要翻译的 key：LLM 打分不在采集流程里了，LLM key 只给可选的加工步骤用
+REQUIRED_KEYS = (DEEPL_KEY,)
+
+
 def keys_configured(keys: dict[str, str]) -> bool:
-    return all(keys.get(n) for n in KEY_NAMES)
+    return all(keys.get(n) for n in REQUIRED_KEYS)
 
 
 def resolve_mode(setting: ModeSetting, keys: dict[str, str]) -> Mode:
-    """auto：两个 key 都配置了就是真实模式，否则演示模式。"""
+    """auto：翻译的 key 配置了就是真实模式，否则演示模式。"""
     if setting == "auto":
         return "real" if keys_configured(keys) else "demo"
     return setting

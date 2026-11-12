@@ -21,7 +21,7 @@ def test_v1_database_gets_body_segments(tmp_path: Path) -> None:
     conn = store.connect(path)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(articles)")}
     assert "body_segments" in cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == store_db.SCHEMA_VERSION == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == store_db.SCHEMA_VERSION == 3
     store.upsert_discovered(conn, DiscoveredUrl("https://e.test/a", "e", "a"))
     store.set_status(conn, "https://e.test/a", Status.EXTRACTED, body_segments=3)
     row = store.get_article(conn, "https://e.test/a")

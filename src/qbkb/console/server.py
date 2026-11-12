@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import httpx
 import yaml
 
-from qbkb import store
+from qbkb import config, store
 from qbkb.config import CONFIG_DIR
 from qbkb.console import demo, jobs
 from qbkb.console.net import LocalServer
@@ -170,6 +170,22 @@ class App:
         cats = data.get("include_categories") if isinstance(data, dict) else None
         return [str(c) for c in cats] if isinstance(cats, list) else []
 
+    def _section_names(self, ws: Workspace) -> dict[str, str]:
+        """栏目 id → 栏目名（按站点配置的顺序）。配置读不出来就只显示 id。"""
+        from qbkb.sections import load_section_rules
+
+        cfg = ws.config_dir or CONFIG_DIR
+        names: dict[str, str] = {}
+        try:
+            for name in config.list_sites(cfg):
+                if ws.site and name != ws.site:
+                    continue
+                for s in load_section_rules(config.load_site(name, cfg)).sections:
+                    names.setdefault(s.id, s.name)
+        except (OSError, ValueError, yaml.YAMLError):
+            return names
+        return names
+
     # ---- 读 ----
 
     def state(self) -> dict[str, object]:
@@ -222,18 +238,22 @@ class App:
                 rows = store.list_rows(conn, [Status.PUBLISHED], ws.site)
             finally:
                 conn.close()
+        # v2：按栏目分组；没有栏目的老数据按 v1 的类别
+        names = self._section_names(ws)
         groups: dict[str, list[dict[str, object]]] = {}
         for r in rows:
-            groups.setdefault(str(r["category"] or "未分类"), []).append(
+            sec = r["section"]
+            label = names.get(str(sec), str(sec)) if sec else str(r["category"] or "未分类")
+            groups.setdefault(label, []).append(
                 {
                     "url": r["url"],
                     "title": r["title_zh"] or r["title"] or r["slug"],
                     "title_en": r["title"],
                     "date": (r["published"] or "")[:10] or None,
-                    "score": r["value_score"],
                 }
             )
-        order = [c for c in self._categories(ws) if c in groups]
+        known = list(names.values()) + self._categories(ws)
+        order = [c for c in dict.fromkeys(known) if c in groups]
         order += sorted(c for c in groups if c not in order)
         return {
             "mode": ws.mode,
@@ -282,8 +302,9 @@ class App:
             "title_en": row["title"],
             "author": row["author"],
             "published": row["published"],
-            "score": row["value_score"],
-            "category": row["category"],
+            "section": self._section_names(ws).get(str(row["section"]), row["section"])
+            if row["section"]
+            else None,
             "translated_at": row["translated_at"],
             "translator": row["translator"],
             "view": view,
@@ -341,7 +362,7 @@ class App:
         if ws.demo:
             self.demo_site().start()
         elif not keys_configured(self.keys()):
-            raise _bad("真实模式需要先在「设置」页填写 DeepL 和 DeepSeek 的 key（或切回演示模式）")
+            raise _bad("真实模式需要先在「设置」页填写 DeepL 的 key（或切回演示模式）")
 
     def start_run(self, body: Mapping[str, Any]) -> dict[str, object]:
         try:

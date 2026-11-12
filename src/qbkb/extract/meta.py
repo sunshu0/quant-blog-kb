@@ -140,6 +140,14 @@ def normalize_date(value: str | None, formats: tuple[str, ...]) -> str | None:
     return None
 
 
+# trafilatura 有时把作者卡片的小标题一起当成作者（"About the author Jane Doe ..."）
+_AUTHOR_HEADING = re.compile(r"^\s*(?:about\s+the\s+authors?|written\s+by|by)\b[\s:：]*", re.I)
+
+
+def clean_author(name: str) -> str:
+    return _text(_AUTHOR_HEADING.sub("", name))
+
+
 def _dedupe(items: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(i for i in items if i))
 
@@ -175,6 +183,10 @@ def extract_meta(
         authors = _meta(doc, "author", "article:author")
     if not authors:
         authors = _rule_values(doc, template.author if template else None)
+    for rule in rules.author_fallback:
+        if authors:
+            break
+        authors = _rule_values(doc, rule)
 
     tags = _keywords(node.get("keywords"))
     if not tags:
@@ -195,7 +207,7 @@ def extract_meta(
             if published is None:
                 published = normalize_date(fallback.date, formats)
             if not authors and fallback.author:
-                authors = [a.strip() for a in fallback.author.split(";")]
+                authors = [clean_author(a) for a in fallback.author.split(";")]
 
     title_doc = doc.find(".//title")
     if not title and title_doc is not None and title_doc.text:
@@ -203,7 +215,7 @@ def extract_meta(
 
     return ArticleMeta(
         title=title or "",
-        author=", ".join(_dedupe(authors)) or None,
+        author=", ".join(_dedupe([clean_author(x) for x in authors])) or None,
         published=published,
         tags=_dedupe(tags),
     )

@@ -18,7 +18,7 @@ from qbkb.models import DiscoveredUrl, Segment, Status
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 # 改了表结构（加列等）就加 1，并在 _migrate 里补升级步骤
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ UPDATABLE_COLUMNS = frozenset(
         "translated_at",
         "md_path",
         "qc_issues",
+        "section_key",
+        "section",
         "error",
         "retries",
     }
@@ -59,6 +61,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("articles", "qc_issues", "TEXT"),
     ("articles", "body_segments", "INTEGER"),  # v2（Phase 2）
     ("translation_memory", "quality", "TEXT NOT NULL DEFAULT 'ok'"),
+    ("articles", "section_key", "TEXT"),  # v3（按栏目采集）
+    ("articles", "section", "TEXT"),
 )
 # PR #3 时期用 backend 名加这个后缀隔离坏译文；升级时改成 quality = 'rejected'。
 _LEGACY_REJECTED_SUFFIX = "#rejected"
@@ -242,6 +246,27 @@ def set_status(conn: sqlite3.Connection, url: str, status: Status, **fields: Val
         cur = conn.execute(f"UPDATE articles SET {', '.join(assignments)} WHERE url = ?", params)
     if cur.rowcount == 0:
         raise KeyError(url)
+
+
+def set_fields(conn: sqlite3.Connection, url: str, **fields: Value) -> None:
+    """只更新若干列，不改状态、不动 updated_at（补记栏目等不算流程推进）。"""
+    unknown = set(fields) - UPDATABLE_COLUMNS
+    if unknown:
+        raise ValueError(f"不能更新的列: {sorted(unknown)}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{col} = ?" for col in fields)
+    with conn:
+        cur = conn.execute(
+            f"UPDATE articles SET {assignments} WHERE url = ?", [*fields.values(), url]
+        )
+    if cur.rowcount == 0:
+        raise KeyError(url)
+
+
+def site_rows(conn: sqlite3.Connection, site: str) -> list[sqlite3.Row]:
+    """这个站点的全部文章（任意状态），按 URL 排序。"""
+    return list(conn.execute("SELECT * FROM articles WHERE site = ? ORDER BY url", (site,)))
 
 
 def record_failure(

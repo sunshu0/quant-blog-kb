@@ -118,7 +118,6 @@ async function loadToc() {
     toc.append(el("h3", { textContent: `${g.category}（${g.articles.length}）` }));
     for (const a of g.articles) {
       const bits = [a.date || "无日期"];
-      if (a.score !== null && a.score !== undefined) bits.push(`${a.score} 分`);
       const link = el("a", { href: "#", title: a.title_en || "" },
         a.title, el("span", { className: "sub", textContent: bits.join(" · ") }));
       link.dataset.url = a.url;
@@ -140,8 +139,7 @@ async function openArticle(url, view) {
     $("reader-meta").hidden = false;
     const src = $("meta-source");
     if (d.source_url) { src.href = d.source_url; src.hidden = false; } else src.hidden = true;
-    $("meta-score").textContent = d.score === null ? "未打分" : `分数 ${d.score}`;
-    $("meta-category").textContent = `类别 ${d.category || "未分类"}`;
+    $("meta-section").textContent = `栏目 ${d.section || "未记录"}`;
     $("meta-translated").textContent = `翻译时间 ${fmtTime(d.translated_at)}`;
     body.innerHTML = d.html; // 服务端已渲染并做过安全处理（render.py）
     body.parentElement.scrollTop = 0;
