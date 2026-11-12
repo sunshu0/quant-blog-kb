@@ -62,3 +62,31 @@ def chunk_texts(
     if start < len(texts):
         chunks.append(range(start, len(texts)))
     return chunks
+
+
+def chunk_texts_by_length(
+    lengths: Sequence[int],
+    max_items: int = MAX_TEXTS_PER_REQUEST,
+    max_chars: int = MAX_REQUEST_CHARS,
+) -> list[range]:
+    """按每条的实际发送长度切批（返回的 range 是下标，调用方自己索引原文本）。
+
+    和 chunk_texts 一样按顺序切、不超过 max_items 条 / max_chars 字符，只是长度用 lengths[i]
+    而不是 len(texts[i])。pipeline 用它按"后端真正送出去的长度"（脚注占位展开后）分批，
+    保证一批只对应一个请求：后端不会再因为长度超限把它切成多个请求，后一块失败时前面已
+    计费的译文已经落进翻译记忆、不会丢。
+    """
+    if max_items < 1 or max_chars < 1:
+        raise ValueError("max_items 和 max_chars 必须是正数")
+    chunks: list[range] = []
+    start, size = 0, 0
+    for i, n in enumerate(lengths):
+        if n > max_chars:
+            raise SegmentTooLargeError(f"第 {i} 条有 {n} 个字符，超过单次请求上限 {max_chars}")
+        if i > start and (i - start >= max_items or size + n > max_chars):
+            chunks.append(range(start, i))
+            start, size = i, 0
+        size += n
+    if start < len(lengths):
+        chunks.append(range(start, len(lengths)))
+    return chunks

@@ -15,7 +15,7 @@ from qbkb.translate.base import (
     MAX_TEXTS_PER_REQUEST,
     ArticleTranslationError,
     TranslatorUnavailableError,
-    chunk_texts,
+    chunk_texts_by_length,
     count_chars,
 )
 from qbkb.translate.fixed import FIXED_FILE, is_interview, untranslated_units
@@ -283,8 +283,11 @@ def translate_article(
         stats.oversized = [s.idx for s in segments if s.src_hash in oversized]
 
     texts = [segments[p].html for p in pending]
+    # 按"实际送出去的长度"（脚注占位展开后）分批，而不是原文长度：保证一批只对应后端的一个请求，
+    # 后一块失败时前面已计费的译文已经逐批落进翻译记忆、不会整个丢掉
+    sent_lens = [sent_length(t) for t in texts]
     try:
-        for chunk in chunk_texts(texts, MAX_TEXTS_PER_REQUEST, max_batch_chars):
+        for chunk in chunk_texts_by_length(sent_lens, MAX_TEXTS_PER_REQUEST, max_batch_chars):
             batch = [pending[i] for i in chunk]
             batch_texts = [texts[i] for i in chunk]
             out = _call(translator, batch_texts, glossary, _context(segments, batch, context_chars))

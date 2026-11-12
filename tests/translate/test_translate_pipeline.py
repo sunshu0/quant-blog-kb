@@ -19,6 +19,7 @@ from qbkb.translate import (
     needs_review,
     translate_article,
 )
+from qbkb.translate.footnotes import sent_length
 
 URL = "https://example.test/insights/a"
 
@@ -366,3 +367,69 @@ def test_estimate_chars(
     assert estimate_chars(conn, [a, b], "fake", glossary) == TOTAL + len("<p>New.</p>")
     translate_article(conn, a, FakeTranslator(), glossary)
     assert estimate_chars(conn, [a, b], "fake", glossary) == len("<p>New.</p>")
+
+
+def _sup_segments() -> list[str]:
+    # 脚注占位展开后（<sup>N</sup> → <a href="#qbkb-sup-N">†</a>）比原文长
+    return [
+        "<p>" + "x" * 60 + "<sup>3</sup></p>",
+        "<p>" + "y" * 60 + "<sup>4</sup></p>",
+    ]
+
+
+class _IdentityTranslator:
+    """原样返回、只记录每次调用的段落：绕过 FakeTranslator 对 <sup> 内容的改写，专心测分批。"""
+
+    name = "fake"
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def translate(
+        self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
+    ) -> list[str]:
+        self.calls.append(list(segments))
+        return list(segments)
+
+
+def test_batches_by_sent_length_not_raw_length(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    segs = _sup_segments()
+    add_article(segs)
+    # 原文两段合起来 ≤ limit，但脚注展开后 > limit：必须分成两批，否则后端会再切成两个请求
+    limit = sum(map(len, segs)) + 5
+    assert sum(map(sent_length, segs)) > limit
+    t = _IdentityTranslator()
+    stats = translate_article(conn, URL, t, glossary, max_batch_chars=limit)
+    assert stats.translated == 2
+    assert t.calls == [[segs[0]], [segs[1]]]  # 每批一段，一段对应一个请求
+
+
+def test_later_batch_failure_preserves_earlier_batch(
+    conn: sqlite3.Connection, add_article: AddArticle, glossary: Glossary
+) -> None:
+    segs = _sup_segments()
+    add_article(segs)
+    limit = sum(map(len, segs)) + 5
+
+    class QuotaOnSecond(_IdentityTranslator):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls_made = 0
+
+        def translate(
+            self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
+        ) -> list[str]:
+            self.calls_made += 1
+            if self.calls_made > 1:
+                raise QuotaExceededError("额度在这批中间用完")
+            return super().translate(segments, glossary, context)
+
+    t = QuotaOnSecond()
+    with pytest.raises(QuotaStopped) as exc:
+        translate_article(conn, URL, t, glossary, max_batch_chars=limit)
+    # 第一批已经翻好、写进翻译记忆；第二批额度用完，前面不丢
+    assert exc.value.stats.translated == 1
+    assert _tm(conn, 0, glossary) is not None
+    assert _tm(conn, 1, glossary) is None
