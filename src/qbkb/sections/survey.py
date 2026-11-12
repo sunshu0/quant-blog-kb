@@ -182,7 +182,15 @@ def write_samples(
     marks = {r.get("网址", ""): (r.get("要不要", ""), r.get("备注", "")) for r in old}
     rows: list[list[str]] = []
     for t in tallies:
-        for m in sample(t, n, seed):
+        chosen = sample(t, n, seed)
+        seen = {m.url for m in chosen}
+        # 重新抽样仍保留当前栏目内已经投入人工判断或备注的成员。
+        chosen += [
+            m
+            for m in t.members
+            if m.url not in seen and any(v.strip() for v in marks.get(m.url, ("", "")))
+        ]
+        for m in chosen:
             mark, note = marks.get(m.url, ("", ""))
             if not note and not m.title:
                 note = "还没抓取，只有网址"

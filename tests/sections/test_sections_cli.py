@@ -241,3 +241,16 @@ def test_extract_reports_new_sections_as_attention(
     assert cli.main(argv) == cli.EXIT_ATTENTION
     out = capsys.readouterr().out
     assert "发现 1 个配置里没有的栏目（只记录，不采集" in out and "ARTICLE | BRAND NEW：1 篇" in out
+
+
+def test_resample_keeps_marked_rows_when_seed_or_size_changes(tmp_path: Path) -> None:
+    env = Env(tmp_path)
+    assert cli.main(env.argv("--sample", "5")) == 0
+    env.mark({"article": "要"})
+    previous = {r["网址"] for r in env.rows() if r["栏目id"] == "article"}
+    assert cli.main(env.argv("--sample", "1", "--seed", "7", "--resample")) == 0
+    rows = env.rows()
+    kept = {r["网址"] for r in rows if r["要不要"] == "要"}
+    assert previous <= kept
+    urls = [r["网址"] for r in rows]
+    assert len(urls) == len(set(urls))

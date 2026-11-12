@@ -321,7 +321,7 @@ def build_index(
     groups: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
         groups.setdefault(_group(row, names), []).append(row)
-    order = [c for c in categories if c in groups]
+    order = [c for c in dict.fromkeys(categories) if c in groups]
     order += sorted(c for c in groups if c not in order)
     lines = [
         "# 量化博客中文知识库",

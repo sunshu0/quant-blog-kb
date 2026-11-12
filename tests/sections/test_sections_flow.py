@@ -222,3 +222,25 @@ def test_store_upgrades_v2_db_with_section_columns(tmp_path: Path) -> None:
     row = store.get_article(conn, "u")
     assert row is not None and row["status"] == "skipped" and row["section_key"] is None
     assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
+
+
+def test_discover_apply_keeps_legacy_migration_marker(tmp_path: Path) -> None:
+    conn = _conn(tmp_path)
+    picked = copy.deepcopy(SECTIONS)
+    for sec in picked["list"]:
+        sec["collect"] = True
+    site = make_site(picked)
+    urls = [
+        _legacy(conn, tmp_path, f"/insights/macro-blog/old-{i}", status, "ARTICLE | 5 MIN")
+        for i, status in enumerate((Status.EXTRACTED, Status.FILTERED, Status.SKIPPED))
+    ]
+    # run 的 discover 先执行 apply，再进入 extract。
+    apply_sections(conn, site)
+    for url in urls:
+        row = store.get_article(conn, url)
+        assert row is not None and row["section_key"] is None
+    assert translatable(conn, site) == []
+    stats = extract.run(conn, site, tmp_path)
+    assert stats.legacy == 3
+    assert sorted(translatable(conn, site)) == sorted(urls)
+    assert extract.run(conn, site, tmp_path).legacy == 0

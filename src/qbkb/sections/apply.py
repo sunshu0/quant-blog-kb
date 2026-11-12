@@ -48,6 +48,10 @@ def apply_sections(
         url = str(row["url"])
         status = Status(row["status"])
         key: str | None = row["section_key"]
+        # NULL 同时是 v1 待迁移标记；发现阶段不能提前写掉，否则 extract
+        # 不会重新抽取旧 filtered / skipped 文章。
+        if key is None and status in (Status.EXTRACTED, Status.FILTERED, Status.SKIPPED):
+            continue
         by_url = rules.by_url(url) if rules.enabled else None
         if by_url is not None:
             key = by_url.url_key
@@ -92,6 +96,8 @@ def translatable(
     rules = rules or load_section_rules(site)
     out: list[str] = []
     for row in store.list_rows(conn, [Status.EXTRACTED, Status.FILTERED], site.name):
+        if rules.enabled and row["section_key"] is None:
+            continue
         url = str(row["url"])
         if rules.collects(url, row["section_key"]):
             out.append(url)
