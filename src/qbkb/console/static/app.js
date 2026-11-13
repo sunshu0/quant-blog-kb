@@ -17,7 +17,11 @@ async function api(path, body) {
   const r = await fetch(path, opts);
   let data = {};
   try { data = await r.json(); } catch (e) { /* 非 JSON */ }
-  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error(data.error || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return data;
 }
 
@@ -47,12 +51,14 @@ function fmtTime(s) {
 // ---- 标签页 ----
 
 function showTab(name) {
+  if (name === "browse" && state.tab === "browse") closeReader();
   state.tab = name;
   for (const b of document.querySelectorAll(".tabs button")) {
     b.classList.toggle("active", b.dataset.tab === name);
   }
   for (const s of document.querySelectorAll(".tab")) s.hidden = s.id !== `tab-${name}`;
-  if (name === "browse") loadToc();
+  updateSelectBar();
+  if (name === "browse") loadToc().catch((e) => toast(e.message, true));
   if (name === "sections") loadSections();
   if (name === "review") loadReview();
   if (name === "settings" || name === "run") loadState();
@@ -107,16 +113,55 @@ function showQuota(mode, q) {
 
 // ---- 浏览 ----
 
+const MAX_PICK = 50; // 一次最多翻 50 篇（后端同样限制）
+const browse = {
+  data: null,
+  site: "all", // "all" 或站点 id
+  query: "",
+  open: new Set(), // 展开的栏目：`站点/栏目id`
+  picked: new Set(), // 勾选的文章 url，切站点、搜索、刷新列表都保留
+  legacy: false,
+  busy: false,
+  scrollY: 0,
+  onlyPicked: false, // 「只看已选的」
+  byUrl: new Map(), // url → 文章，给确认框列标题、只看已选用
+  visible: new Set(), // 当前列表（站点 + 搜索）里的 url
+};
+
+const BATCH = 50; // 大栏目分批显示，每批 50 张卡片
+const BACKENDS = { deepl: "DeepL", azure: "Azure 翻译", llm: "大模型翻译", fake: "演示翻译" };
+// 这个 flag 几乎每篇 PDF 都有，卡片上已有 PDF 标签，只在阅读区提示一次
+const isPdfNoise = (f) => /PDF/.test(f) && /不完整/.test(f);
+
 async function loadToc() {
   const data = await api("/api/articles");
-  const toc = $("toc");
-  toc.replaceChildren();
-  toc.append(el("div", { className: "hint", textContent: `共 ${data.total} 篇已收录` }));
+  browse.data = data;
+  browse.legacy = !Array.isArray(data.sites);
+  if (browse.legacy) {
+    browse.picked.clear();
+    renderLegacyToc(data);
+    updateSelectBar();
+    return;
+  }
+  browse.byUrl = new Map();
+  for (const s of data.sites) for (const sec of s.sections) for (const a of sec.articles) browse.byUrl.set(a.url, a);
+  for (const u of [...browse.picked]) if (!browse.byUrl.has(u)) browse.picked.delete(u);
+  if (browse.site !== "all" && !data.sites.some((s) => s.site === browse.site)) browse.site = "all";
+  renderToc();
+}
+
+// 后端还没给 sites 时的旧渲染（按类别分组的纯列表，不能勾选）
+function renderLegacyToc(data) {
+  $("toc-search").hidden = true;
+  $("toc-sites").hidden = true;
+  $("toc-hint").textContent = `共 ${data.total} 篇已收录`;
+  const list = $("toc-list");
+  list.replaceChildren();
   if (!data.total) {
-    toc.append(el("p", { className: "empty", textContent: "还没有文章：到「运行」页点一次「运行」。" }));
+    list.append(el("p", { className: "empty", textContent: "还没有文章：到「运行」页点一次「运行」。" }));
   }
   for (const g of data.groups) {
-    toc.append(el("h3", { textContent: `${g.category}（${g.articles.length}）` }));
+    list.append(el("h3", { textContent: `${g.category}（${g.articles.length}）` }));
     for (const a of g.articles) {
       const bits = [a.date || "无日期"];
       const link = el("a", { href: "#", title: a.title_en || "" },
@@ -124,17 +169,348 @@ async function loadToc() {
       link.dataset.url = a.url;
       link.classList.toggle("active", a.url === state.url);
       link.addEventListener("click", (ev) => { ev.preventDefault(); openArticle(a.url); });
-      toc.append(link);
+      list.append(link);
     }
+  }
+}
+
+function matches(a, q) {
+  return [a.title, a.title_en, a.summary].some((s) => s && s.toLowerCase().includes(q));
+}
+
+function renderSiteChips(sites) {
+  const box = $("toc-sites");
+  box.replaceChildren();
+  box.hidden = sites.length < 2;
+  const total = sites.reduce((n, s) => n + s.total, 0);
+  const chip = (id, label) => {
+    const b = el("button", { type: "button", className: "chip", textContent: label });
+    b.classList.toggle("active", browse.site === id);
+    b.addEventListener("click", () => { browse.site = id; renderToc(); });
+    return b;
+  };
+  box.append(chip("all", `全部 ${total}`));
+  for (const s of sites) box.append(chip(s.site, `${s.name} ${s.total}`));
+}
+
+function renderToc() {
+  const data = browse.data;
+  const toc = $("toc");
+  const scroll = toc.scrollTop;
+  const list = $("toc-list");
+  list.replaceChildren();
+  $("toc-search").hidden = false;
+  const q = browse.query.trim().toLowerCase();
+  $("toc-hint").textContent = `共 ${data.total} 篇已收录，其中已翻全文 ${countTranslated(data.sites)} 篇`;
+  if (!data.total) {
+    $("toc-sites").hidden = true;
+    list.append(el("p", { className: "empty", textContent: "还没有文章：到「运行」页点一次「运行」。" }));
+    updateSelectBar();
+    return;
+  }
+  renderSiteChips(data.sites);
+  browse.visible = new Set();
+  if (browse.onlyPicked && !browse.picked.size) browse.onlyPicked = false;
+  if (browse.onlyPicked) {
+    renderPickedList(list, q);
+    toc.scrollTop = scroll;
+    updateSelectBar();
+    return;
+  }
+  let shown = 0;
+  for (const site of data.sites) {
+    if (browse.site !== "all" && browse.site !== site.site) continue;
+    const blocks = [];
+    for (const sec of site.sections) {
+      const arts = q ? sec.articles.filter((a) => matches(a, q)) : sec.articles;
+      for (const a of arts) browse.visible.add(a.url);
+      if (q && !arts.length) continue;
+      shown += arts.length;
+      blocks.push(sectionBlock(site, sec, arts, q));
+    }
+    if (!blocks.length) continue;
+    if (browse.site === "all" && data.sites.length > 1) {
+      list.append(el("h3", { className: "site-title", textContent: `${site.name}（${site.total} 篇）` }));
+    }
+    list.append(...blocks);
+  }
+  if (q && !shown) list.append(el("p", { className: "empty", textContent: "没有匹配的文章。" }));
+  else if (q) list.prepend(el("div", { className: "hint search-hit", textContent: `找到 ${shown} 篇` }));
+  toc.scrollTop = scroll;
+  updateSelectBar();
+}
+
+// 「只看已选的」：把勾选的文章（不管在哪个站点、搜不搜得到）平铺出来，可逐个取消
+function renderPickedList(list, q) {
+  $("toc-sites").hidden = true;
+  const back = el("button", { type: "button", className: "ghost small", textContent: "← 回到全部文章" });
+  back.addEventListener("click", () => { browse.onlyPicked = false; renderToc(); });
+  list.append(el("div", { className: "picked-head" },
+    el("span", { className: "hint", id: "picked-head-text" }), back));
+  const box = el("div", { className: "sec-fold picked-list" });
+  for (const u of browse.picked) {
+    const a = browse.byUrl.get(u);
+    if (!a || (q && !matches(a, q))) continue;
+    browse.visible.add(u);
+    box.append(articleCard(a));
+  }
+  list.append(box);
+}
+
+function countTranslated(sites) {
+  let n = 0;
+  for (const s of sites) for (const sec of s.sections) for (const a of sec.articles) if (a.translated) n += 1;
+  return n;
+}
+
+function sectionBlock(site, sec, arts, q) {
+  const key = `${site.site}/${sec.id}`;
+  const done = sec.articles.filter((a) => a.translated).length;
+  const count = q ? `${arts.length}/${sec.total}` : String(sec.total);
+  const det = el("details", { className: "sec-fold" });
+  det.append(el("summary", {},
+    el("span", { className: "fold-name", textContent: sec.name }),
+    el("span", { className: "fold-count", textContent: `${count} 篇` }),
+    el("span", { className: "fold-done", textContent: `已翻全文 ${done}` })));
+  const body = el("div", { className: "fold-body" });
+  det.append(body);
+  const fill = () => {
+    if (body.dataset.filled) return;
+    body.dataset.filled = "1";
+    body.append(sectionTools(arts));
+    let done = 0;
+    const more = el("button", { type: "button", className: "ghost more-btn" });
+    const batch = () => {
+      const frag = document.createDocumentFragment();
+      for (const a of arts.slice(done, done + BATCH)) frag.append(articleCard(a));
+      done = Math.min(done + BATCH, arts.length);
+      more.before(frag);
+      const left = arts.length - done;
+      more.hidden = left <= 0;
+      more.textContent = `再显示 ${Math.min(BATCH, left)} 篇（还剩 ${left} 篇）`;
+    };
+    more.addEventListener("click", batch);
+    body.append(more);
+    batch();
+  };
+  det.addEventListener("toggle", () => {
+    if (det.open) fill();
+    if (!q) { if (det.open) browse.open.add(key); else browse.open.delete(key); }
+  });
+  if (q || browse.open.has(key)) { det.open = true; fill(); }
+  return det;
+}
+
+// 栏目里的快捷操作：把这个栏目还没翻全文的文章一次勾上
+function sectionTools(arts) {
+  const todo = arts.filter((a) => !a.translated);
+  const label = todo.length > MAX_PICK ? `勾选前 ${MAX_PICK} 篇（未翻 ${todo.length}）` : `勾选未翻的 ${todo.length} 篇`;
+  const all = el("button", { type: "button", className: "ghost small", textContent: label });
+  all.disabled = !todo.length;
+  all.addEventListener("click", () => {
+    let skipped = 0;
+    for (const a of todo) {
+      if (browse.picked.has(a.url)) continue;
+      if (browse.picked.size >= MAX_PICK) { skipped += 1; continue; }
+      browse.picked.add(a.url);
+    }
+    syncChecks();
+    updateSelectBar();
+    if (skipped) toast(`一次最多选 ${MAX_PICK} 篇，还有 ${skipped} 篇没勾上；先翻这一批，再选下一批。`, true);
+  });
+  return el("div", { className: "fold-tools" }, all);
+}
+
+function articleCard(a) {
+  const card = el("div", { className: "art" });
+  card.dataset.url = a.url;
+  card.classList.toggle("active", a.url === state.url);
+
+  const box = el("input", { type: "checkbox", className: "art-pick", checked: browse.picked.has(a.url) });
+  box.dataset.url = a.url;
+  box.setAttribute("aria-label", `选择：${a.title}`);
+  box.addEventListener("change", () => {
+    if (box.checked && browse.picked.size >= MAX_PICK) {
+      box.checked = false;
+      toast(`一次最多选 ${MAX_PICK} 篇。`, true);
+      return;
+    }
+    if (box.checked) browse.picked.add(a.url); else browse.picked.delete(a.url);
+    updateSelectBar();
+    if (browse.onlyPicked && !browse.picked.size) renderToc();
+  });
+  const check = el("label", { className: "art-check" }, box);
+
+  const title = el("a", { href: "#", className: "art-title", textContent: a.title || a.title_en || "（无标题）" });
+  title.addEventListener("click", (ev) => { ev.preventDefault(); openArticle(a.url); });
+
+  const main = el("div", { className: "art-main" }, title);
+  if (a.title_en && a.title_en !== a.title) main.append(el("div", { className: "art-en", textContent: a.title_en }));
+
+  const meta = el("div", { className: "art-meta" },
+    el("span", { className: "art-date", textContent: a.date || "无日期" }),
+    el("span", { className: `tag ${a.translated ? "full" : "brief"}`, textContent: a.translated ? "已翻全文" : "只有摘要" }));
+  if (a.has_pdf) meta.append(el("span", { className: "tag pdf", textContent: "PDF" }));
+  for (const f of (a.flags || []).filter((x) => !isPdfNoise(x)).slice(0, 3)) meta.append(el("span", { className: "tag flag", textContent: f }));
+  main.append(meta);
+
+  if (a.summary) {
+    const sum = el("div", { className: "art-sum", textContent: a.summary });
+    main.append(sum);
+    if (a.summary.length > 60) {
+      const more = el("button", { type: "button", className: "link-btn", textContent: "展开摘要" });
+      more.addEventListener("click", () => {
+        const open = sum.classList.toggle("open");
+        more.textContent = open ? "收起摘要" : "展开摘要";
+      });
+      main.append(more);
+    }
+  } else {
+    main.append(el("div", { className: "art-sum none", textContent: "（还没有中文摘要）" }));
+  }
+  card.append(check, main);
+  return card;
+}
+
+function syncChecks() {
+  for (const c of document.querySelectorAll(".art-pick")) c.checked = browse.picked.has(c.dataset.url);
+}
+
+function updateSelectBar() {
+  const n = browse.picked.size;
+  const show = n > 0 && state.tab === "browse" && !browse.legacy;
+  $("select-bar").hidden = !show;
+  document.body.classList.toggle("has-bar", show);
+  let inList = 0;
+  for (const u of browse.picked) if (browse.visible.has(u)) inList += 1;
+  $("select-count").textContent = `已选 ${n} 篇`;
+  $("select-sub").textContent = browse.onlyPicked ? "正在只看已选的" : `当前列表里 ${inList} 篇`;
+  $("select-sub").classList.toggle("warn-text", !browse.onlyPicked && inList < n);
+  $("select-only").textContent = browse.onlyPicked ? "看全部" : "只看已选的";
+  const head = $("picked-head-text");
+  if (head) head.textContent = `已选的 ${n} 篇（取消勾选就不翻）`;
+  $("select-go").textContent = `翻译选中的 ${n} 篇`;
+  $("select-go").disabled = browse.busy;
+}
+
+function fmtNum(n) {
+  return typeof n === "number" ? n.toLocaleString("zh-CN") : "未知";
+}
+
+// 简单的确认框：返回 true / false。showOk=false 时只有「知道了」。
+function askConfirm(title, lines, okLabel, showOk, okDisabled) {
+  return new Promise((resolve) => {
+    $("modal-title").textContent = title;
+    const body = $("modal-body");
+    body.replaceChildren();
+    for (const l of lines) {
+      if (l.list) {
+        const ul = el("ul", { className: "modal-list" });
+        for (const t of l.list) ul.append(el("li", { textContent: t }));
+        body.append(ul);
+      } else {
+        body.append(el("p", { className: l.bad ? "bad-text" : l.soft ? "soft-text" : "", textContent: l.text }));
+      }
+    }
+    $("modal-ok").hidden = !showOk;
+    $("modal-ok").disabled = Boolean(okDisabled);
+    $("modal-ok").textContent = okLabel;
+    $("modal-cancel").textContent = showOk ? "取消" : "知道了";
+    $("modal").hidden = false;
+    (showOk ? $("modal-ok") : $("modal-cancel")).focus({ preventScroll: true });
+    document.querySelector(".modal-box").scrollTop = 0;
+    const done = (v) => {
+      $("modal").hidden = true;
+      $("modal-ok").onclick = $("modal-cancel").onclick = $("modal").onclick = null;
+      document.removeEventListener("keydown", onKey);
+      resolve(v);
+    };
+    const onKey = (ev) => { if (ev.key === "Escape") done(false); };
+    document.addEventListener("keydown", onKey);
+    $("modal-ok").onclick = () => done(true);
+    $("modal-cancel").onclick = () => done(false);
+    $("modal").onclick = (ev) => { if (ev.target === $("modal")) done(false); };
+  });
+}
+
+// 翻选中文章的全文：先 dry_run 让用户确认篇数 / 字符 / 额度，再正式开始并跳到任务日志。
+async function translateSelected(urls) {
+  if (browse.busy || !urls.length) return;
+  browse.busy = true;
+  updateSelectBar();
+  $("meta-translate").disabled = true;
+  try {
+    const d = await api("/api/translate", { urls, dry_run: true });
+    const n = d.count || 0;
+    const already = d.already || 0;
+    if (!n) {
+      await askConfirm("不用翻译", [{ text: `选中的 ${urls.length} 篇都已经翻过全文了。` }], "", false);
+      return;
+    }
+    // chars_base：基础估算；chars：最坏上限。没有 chars_base 的老后端按 chars_upper_bound 判断。
+    const hasBase = typeof d.chars_base === "number";
+    const charsText = hasBase
+      ? `约 ${fmtNum(d.chars_base)} 字符（最多 ${fmtNum(d.chars)}）`
+      : d.chars_upper_bound === true
+        ? `最多约 ${fmtNum(d.chars)} 字符（已翻过的段落不重复收费，实际会更少）`
+        : `约 ${fmtNum(d.chars)} 字符`;
+    const lines = [{ text: `将翻 ${n} 篇${already ? `（另有 ${already} 篇已翻过，会跳过）` : ""}，${charsText}。` }];
+    // 要翻的标题（已翻全文的会被后端跳过，这里也不列）
+    const titles = urls.map((u) => browse.byUrl.get(u)).filter((a) => a && !a.translated).map((a) => a.title || a.title_en || a.url);
+    if (titles.length) {
+      const shownTitles = titles.slice(0, 10);
+      if (titles.length > 10) shownTitles.push(`…共 ${n} 篇`);
+      lines.push({ list: shownTitles });
+    }
+    const hasQuota = typeof d.quota_left === "number";
+    if (d.backend) {
+      lines.push({ text: `翻译服务：${BACKENDS[d.backend] || d.backend}；剩余额度：${hasQuota ? `${fmtNum(d.quota_left)} 字符` : "未知"}。` });
+    } else {
+      lines.push({ text: "还没配置翻译服务，开始后会失败。请先到「设置」里填好翻译服务的 key。", bad: true });
+    }
+    // 红字只给「基础估算就超额度」；只有上限超额度时用温和提示
+    const base = hasBase ? d.chars_base : d.chars_upper_bound === true ? null : d.chars;
+    const BAD = "注意：预计字符数超过了剩余额度，可能翻不完；额度不够会自动停下，已翻的会保存。";
+    const SOFT = "最多的情况会超过剩余额度。这是保守估计，实际通常更少；额度不够会自动停下，已翻的会保存。";
+    if (hasQuota && typeof base === "number" && base > d.quota_left) {
+      lines.push({ text: BAD, bad: true });
+    } else if (hasQuota && typeof d.chars === "number" && d.chars > d.quota_left) {
+      lines.push({ text: SOFT, soft: true });
+    }
+    if (!(await askConfirm("确认翻译全文", lines, `开始翻译 ${n} 篇`, true, !d.backend))) return;
+    const r = await api("/api/translate", { urls, dry_run: false });
+    for (const u of urls) browse.picked.delete(u);
+    syncChecks();
+    updateSelectBar();
+    toast(`已开始翻译 ${r.count ?? n} 篇，进度看下面的日志。`);
+    const j = await api("/api/job?since=0");
+    if (j.job) beginJob(j.job);
+    showTab("run");
+  } catch (e) {
+    toast(e.status === 409 ? "已有翻译或运行任务在跑，等它完成再点。勾选都还留着。" : e.message, true);
+  } finally {
+    browse.busy = false;
+    updateSelectBar();
+    $("meta-translate").disabled = false;
+  }
+}
+
+function markActive(url) {
+  for (const a of document.querySelectorAll(".toc [data-url]")) {
+    if (a.classList.contains("art-pick")) continue;
+    a.classList.toggle("active", a.dataset.url === url);
   }
 }
 
 async function openArticle(url, view) {
   state.url = url;
   state.view = view || state.view;
-  for (const a of document.querySelectorAll(".toc a")) a.classList.toggle("active", a.dataset.url === url);
+  markActive(url);
   for (const b of document.querySelectorAll(".views button")) b.classList.toggle("active", b.dataset.view === state.view);
   const body = $("reader-body");
+  // 手机上列表和阅读区轮流显示：记住列表滚到哪，返回时回到原位
+  if (!$("tab-browse").classList.contains("reading")) browse.scrollY = window.scrollY;
+  $("tab-browse").classList.add("reading");
   try {
     const d = await api(`/api/article?url=${encodeURIComponent(url)}&view=${state.view}`);
     $("reader-meta").hidden = false;
@@ -142,11 +518,35 @@ async function openArticle(url, view) {
     if (d.source_url) { src.href = d.source_url; src.hidden = false; } else src.hidden = true;
     $("meta-section").textContent = `栏目 ${d.section || "未记录"}`;
     $("meta-translated").textContent = `翻译时间 ${fmtTime(d.translated_at)}`;
+    const st = $("meta-state");
+    const known = typeof d.translated === "boolean";
+    st.hidden = !known;
+    if (known) {
+      st.textContent = d.translated ? "已翻全文" : "只有摘要";
+      st.className = `tag ${d.translated ? "full" : "brief"}`;
+    }
+    $("meta-translate").hidden = !(known && !d.translated) || browse.legacy;
+    // 只有摘要的文章：没有翻译时间，也没有中英对照可看
+    const brief = known && !d.translated;
+    // 只有摘要的文章没有中英对照，停在 bi 视图时切回中文
+    if (brief && state.view !== "zh") return openArticle(url, "zh");
+    $("meta-translated").hidden = brief;
+    document.querySelector(".views").hidden = brief;
+    const a = browse.byUrl.get(url);
+    const note = a && (a.flags || []).find(isPdfNoise);
+    $("meta-note").hidden = !note;
+    $("meta-note").textContent = note ? `提示：${note}（PDF 转出来的正文，公式和表格请对照原文）` : "";
     body.innerHTML = d.html; // 服务端已渲染并做过安全处理（render.py）
     body.parentElement.scrollTop = 0;
+    window.scrollTo(0, 0);
   } catch (e) {
     body.replaceChildren(el("p", { className: "empty", textContent: e.message }));
   }
+}
+
+function closeReader() {
+  $("tab-browse").classList.remove("reading");
+  window.scrollTo(0, browse.scrollY);
 }
 
 // ---- 运行 ----
@@ -180,6 +580,7 @@ function watchJob() {
       state.poll = null;
       loadState();
       if (state.tab === "review") loadReview();
+      if (state.tab === "browse") loadToc().catch(() => {});
       toast(`任务结束：${d.job.result}`, d.job.exit_code !== 0 && d.job.exit_code !== 5);
     }
   };
@@ -420,6 +821,9 @@ async function testKey(which) {
 async function setMode(mode) {
   try { await api("/api/mode", { mode }); } catch (e) { toast(e.message, true); }
   state.url = null;
+  browse.picked.clear();
+  browse.open.clear();
+  closeReader();
   $("reader-meta").hidden = true;
   $("reader-body").replaceChildren(el("p", { className: "empty", textContent: "从左边选一篇文章。" }));
   await loadState();
@@ -466,6 +870,30 @@ document.addEventListener("DOMContentLoaded", () => {
   for (const b of document.querySelectorAll(".views button")) {
     b.addEventListener("click", () => { if (state.url) openArticle(state.url, b.dataset.view); });
   }
+  let searchTimer = null;
+  $("toc-search").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      browse.query = $("toc-search").value;
+      if (browse.data && !browse.legacy) renderToc();
+    }, 200);
+  });
+  $("select-go").addEventListener("click", () => translateSelected([...browse.picked]));
+  $("select-clear").addEventListener("click", () => {
+    browse.picked.clear();
+    if (browse.onlyPicked) { browse.onlyPicked = false; renderToc(); }
+    syncChecks();
+    updateSelectBar();
+  });
+  $("select-only").addEventListener("click", () => {
+    browse.onlyPicked = !browse.onlyPicked;
+    closeReader();
+    renderToc();
+    window.scrollTo(0, 0);
+    $("toc").scrollTop = 0;
+  });
+  $("reader-back").addEventListener("click", closeReader);
+  $("meta-translate").addEventListener("click", () => { if (state.url) translateSelected([state.url]); });
   $("run-start").addEventListener("click", startRun);
   $("run-stop").addEventListener("click", stopRun);
   $("sections-site").addEventListener("change", () => { sectionsSite = $("sections-site").value; loadSections(); });

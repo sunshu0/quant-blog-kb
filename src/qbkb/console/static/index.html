@@ -10,7 +10,10 @@
 </head>
 <body>
 <header class="top">
-  <div class="brand">qbkb <span>量化博客中文知识库</span></div>
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 22.5V9.5c2.6-.9 5.3-.6 8 1 2.7-1.6 5.4-1.9 8-1v13c-2.6-.9-5.3-.6-8 1-2.7-1.6-5.4-1.9-8-1Z" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/><path d="M16 10.5v13" stroke="#fff" stroke-width="1.8"/><path d="m10.5 18 2.2-2.4 1.8 1.4" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    qbkb <span>量化博客中文知识库</span>
+  </div>
   <nav class="tabs" role="tablist">
     <button type="button" data-tab="browse" class="active">浏览文章</button>
     <button type="button" data-tab="sections">栏目抽样</button>
@@ -30,14 +33,25 @@
 <div id="toast" class="toast" hidden></div>
 
 <section id="tab-browse" class="tab">
-  <aside id="toc" class="toc"></aside>
+  <aside id="toc" class="toc">
+    <div class="toc-tools">
+      <div id="toc-hint" class="hint"></div>
+      <input id="toc-search" type="search" placeholder="搜索中文标题、英文标题、摘要…" autocomplete="off" aria-label="搜索文章">
+      <div id="toc-sites" class="chips" role="group" aria-label="选择站点"></div>
+    </div>
+    <div id="toc-list"></div>
+  </aside>
   <article class="reader">
+    <button type="button" id="reader-back" class="ghost reader-back">← 返回文章列表</button>
     <div id="reader-meta" class="meta" hidden>
       <div class="meta-row">
         <a id="meta-source" target="_blank" rel="noopener noreferrer">原文链接</a>
         <span id="meta-section"></span>
         <span id="meta-translated"></span>
+        <span id="meta-state" class="tag"></span>
+        <button type="button" id="meta-translate" class="primary" hidden>翻译这篇全文</button>
       </div>
+      <div id="meta-note" class="meta-note" hidden></div>
       <div class="views" role="group" aria-label="显示方式">
         <button type="button" data-view="zh" class="active">中文</button>
         <button type="button" data-view="bi">中英对照</button>
@@ -143,5 +157,26 @@
     <div id="sched-last" class="hint"></div>
   </div>
 </section>
+
+<div id="select-bar" class="select-bar" hidden>
+  <div class="select-info">
+    <span id="select-count" class="select-count"></span>
+    <span id="select-sub" class="select-sub"></span>
+  </div>
+  <button type="button" id="select-only" class="ghost small">只看已选的</button>
+  <button type="button" id="select-clear" class="ghost small">清空</button>
+  <button type="button" id="select-go" class="primary"></button>
+</div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <h3 id="modal-title"></h3>
+    <div id="modal-body" class="modal-body"></div>
+    <div class="modal-actions">
+      <button type="button" id="modal-cancel">取消</button>
+      <button type="button" id="modal-ok" class="primary">开始翻译</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
