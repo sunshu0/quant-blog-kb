@@ -882,11 +882,12 @@ class App:
         return {
             "count": len(todo),
             "already": already,
-            # chars 已扣掉翻译记忆命中的段落，并把结构校验失败后的重翻算作最坏情况（上限）；
-            # chars_base 是不含重翻的基础估算；没有待翻正文段落（只剩标题）时两者相等、不是上限
+            # chars 已扣掉翻译记忆命中的段落，是保守上限：2 ×（待翻正文 + 待翻标题），覆盖结构校验
+            # 失败后的重翻、标题不能复用译文的情况；chars_base 是一切顺利时的基础估算。
+            # 有任何要送的内容（chars_base > 0）时 chars_upper_bound 为 true
             "chars": est.maximum,
             "chars_base": est.base,
-            "chars_upper_bound": not est.exact,
+            "chars_upper_bound": est.upper_bound,
             "backend": name.split(":")[0] if name and has_key else None,
             "quota_left": left if isinstance(left, int) else None,
         }

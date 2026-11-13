@@ -79,18 +79,20 @@ def article_card(r: Mapping[str, Any] | sqlite3.Row) -> dict[str, object]:
 class FulltextEstimate:
     """翻选中文章全文的字符估算。
 
-    base：按流水线（translate_article）同样的规则算出的基础字符数，不含结构校验失败后的重试；
-    maximum：再加上"每个待翻正文段落都校验失败、重翻一次"的最坏情况
-    （重翻单独送一次、不带 context）。
-    没有待翻正文段落时只剩标题（标题不重试），base 就是确切值。
+    base：按流水线（translate_article）同样的规则算出的基础字符数，假设每次翻译都一次通过结构校验、
+    翻完的译文能被后面的同文单元复用（正文先于标题、重复标题只送一次）；
+    maximum：保守上限 = 2 ×（待翻正文 + 待翻标题）。校验反复失败时译文存不进翻译记忆，
+    标题既不能和正文共享、也不能在文章之间去重，正文还会重翻一次，实际送出可以超过 base；
+    这里不去精确建模，一律按两倍、标题也不去重来算，保证不低估。
+    只要有任何要送的内容（base > 0）就只能说是上限；什么都不用送时才是确切的 0。
     """
 
     base: int
     maximum: int
 
     @property
-    def exact(self) -> bool:
-        return self.base == self.maximum
+    def upper_bound(self) -> bool:
+        return self.base > 0
 
 
 def estimate_fulltext(
@@ -100,12 +102,14 @@ def estimate_fulltext(
 
     - 正文段落：固定译文 / 说话人标签不送；翻译记忆里有记录的不送（含 rejected：流水线不自动重翻，
       留给人工复查）；没有记录的才送。跨文章按 hash 去重（先翻的写进翻译记忆，后面的命中）；
-    - 标题：只有翻译记忆里有**可用**译文才免费，rejected 的照样送；和某个待翻正文段落相同的
-      标题单元也免费（正文先翻完，标题命中）；
+    - 标题：只有翻译记忆里有**可用**译文才免费，rejected 的照样送；
+    - base 里和某个待翻正文段落相同的标题、跨文章重复的标题只算一次（假设翻成功能复用）；
+      maximum 里每篇文章的待翻标题各算一次，不去重、不和正文共享，再整体乘 2；
     - 按送出前的长度算（DeepL 脚注占位展开后）。
     """
     body: dict[str, str] = {}  # hash → 待翻正文段落
-    titles: dict[str, None] = {}
+    titles: dict[str, None] = {}  # 去重后的待翻标题单元（基础估算用）
+    title_sends = 0  # 各文章待翻标题的送出长度之和，不去重（上限用）
     for url in urls:
         row = store.get_article(conn, url)
         if row is None:
@@ -120,14 +124,13 @@ def estimate_fulltext(
             body[seg.src_hash] = seg.html
         title = row["title"]
         if title and str(title).strip():
-            titles[title_unit(str(title))] = None
+            unit = title_unit(str(title))
+            if lookup_translation(conn, unit, backend, glossary) is None:
+                titles[unit] = None
+                title_sends += sent_length(unit)
     body_chars = sum(sent_length(h) for h in body.values())
-    title_chars = sum(
-        sent_length(u)
-        for u in titles
-        if segment_hash(u) not in body and lookup_translation(conn, u, backend, glossary) is None
-    )
-    return FulltextEstimate(base=body_chars + title_chars, maximum=2 * body_chars + title_chars)
+    base_titles = sum(sent_length(u) for u in titles if segment_hash(u) not in body)
+    return FulltextEstimate(base=body_chars + base_titles, maximum=2 * (body_chars + title_sends))
 
 
 def url_problem(url: str) -> str | None:

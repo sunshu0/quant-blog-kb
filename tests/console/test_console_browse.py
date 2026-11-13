@@ -354,8 +354,8 @@ def test_dry_run_counts_already_and_estimates_without_external_calls(
     conn.close()
     est = _post(client, {"urls": [urls["wp_old"]], "dry_run": True}).json()
     # 正文命中后只剩标题（标题不重试）：数字是确切的，不再是上限
-    assert est["chars"] == est["chars_base"] > 0 and est["chars"] < full
-    assert est["chars_upper_bound"] is False
+    assert est["chars_base"] > 0 and est["chars"] == 2 * est["chars_base"] < full
+    assert est["chars_upper_bound"] is True  # 只要还有要送的内容就是上限
     # 额度来自上次记录（quota.json），没有就是 null
     (tmp_path / ".qbkb" / "quota.json").write_text(
         json.dumps({"used": 1, "limit": 500000, "remaining": 499999}), encoding="utf-8"
@@ -427,7 +427,7 @@ def test_real_run_without_key_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ApiError) as info:
         app.translate_fulltext({"urls": [urls["wp_old"]], "dry_run": False})
     assert info.value.status == 400 and "key" in info.value.message
-    est = app.translate_fulltext({"urls": [urls["wp_old"]], "dry_run": True})
+    est: Any = app.translate_fulltext({"urls": [urls["wp_old"]], "dry_run": True})
     assert est["backend"] is None and est["count"] == 1  # 没 key 也能估，只是不报后端
 
 
@@ -442,7 +442,7 @@ def test_dry_run_uses_injected_backend_name_in_demo(tmp_path: Path) -> None:
     conn = store.connect(ws.db)
     url = _add(conn, "demo", "d1", section=None)
     conn.close()
-    est = app.translate_fulltext({"urls": [url], "dry_run": True})
+    est: Any = app.translate_fulltext({"urls": [url], "dry_run": True})
     assert est["count"] == 1 and est["backend"] == "fake" and est["quota_left"] is None
     # 演示模式的真跑：命令带 --translator demo 和演示配置，不带真实 key
     assert jobs.translate_urls_commands(ws, Path("x.txt"), python="py")[0][4:] == [
@@ -478,16 +478,86 @@ def test_estimate_matches_pipeline_title_rejected_body_hit(tmp_path: Path) -> No
     _tm_put(conn, body, glossary, "<p>已翻正文。</p>")
     _tm_put(conn, title_unit("Title a"), glossary, "<b>坏的</b>", quality=store.TM_REJECTED)
     conn.close()
-    est = app.translate_fulltext({"urls": [url], "dry_run": True})
+    est: Any = app.translate_fulltext({"urls": [url], "dry_run": True})
     title_len = len(title_unit("Title a"))
-    assert est["chars"] == est["chars_base"] == title_len > 0
-    assert est["chars_upper_bound"] is False  # 没有待翻正文，标题不重试：确切值
+    assert est["chars_base"] == title_len > 0
+    assert est["chars"] == 2 * title_len and est["chars_upper_bound"] is True
     # 和流水线对照：真实送出的就是这个标题，字符数相同
     tr = FakeTranslator(name=REAL_BACKEND)
     conn = store.connect(tmp_path / "state.db")
     translate_article(conn, url, tr, glossary)
     conn.close()
-    assert tr.calls == [[title_unit("Title a")]] and tr.chars_used == est["chars"]
+    assert tr.calls == [[title_unit("Title a")]]
+    assert tr.chars_used == est["chars_base"] <= est["chars"]
+
+
+class _AlwaysBad:
+    """假后端：每次都返回结构不合格的译文（校验反复失败，译文存不进可用翻译记忆）。"""
+
+    name = REAL_BACKEND
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.chars_used = 0
+
+    def translate(self, segments: Any, glossary: Any, context: str = "") -> list[str]:
+        self.calls.append(list(segments))
+        self.chars_used += sum(len(x) for x in segments)
+        return ["<b>bad</b>" for _ in segments]
+
+
+def test_estimate_covers_title_equal_to_failed_body(tmp_path: Path) -> None:
+    """标题和唯一正文相同、后端每次都校验失败：正文送两次、标题还要再送一次，不能超过 chars。"""
+    from qbkb.translate.pipeline import title_unit, translate_article
+
+    app = _real_app(tmp_path)
+    conn = store.connect(tmp_path / "state.db")
+    url = _add(conn, "cfm", "t", section="whitepaper", title_zh=None)
+    store.set_fields(conn, url, title="Title")
+    store.replace_segments(conn, url, [Segment(0, title_unit("Title"))])
+    conn.close()
+    est: Any = app.translate_fulltext({"urls": [url], "dry_run": True})
+    tr = _AlwaysBad()
+    conn = store.connect(tmp_path / "state.db")
+    translate_article(conn, url, tr, app._glossary(app.ws()))  # pyright: ignore[reportPrivateUsage]
+    conn.close()
+    assert len(tr.calls) == 3  # 正文、正文重翻、标题
+    assert tr.chars_used > est["chars_base"]  # 基础估算确实低估了
+    assert tr.chars_used <= est["chars"] and est["chars_upper_bound"] is True
+
+
+def test_estimate_covers_repeated_failed_titles(tmp_path: Path) -> None:
+    """两篇同名标题、正文都已命中、标题每次都校验失败：标题没法复用，每篇各送一次。"""
+    from qbkb.translate.pipeline import translate_article
+
+    app = _real_app(tmp_path)
+    conn = store.connect(tmp_path / "state.db")
+    urls = [_add(conn, "cfm", f"r{i}", section="whitepaper", title_zh=None) for i in range(2)]
+    for u in urls:
+        store.set_fields(conn, u, title="Title")
+    glossary = app._glossary(app.ws())  # pyright: ignore[reportPrivateUsage]
+    _tm_put(conn, "<p>Some English paragraph for the article.</p>", glossary, "<p>已翻。</p>")
+    conn.close()
+    est: Any = app.translate_fulltext({"urls": urls, "dry_run": True})
+    tr = _AlwaysBad()
+    conn = store.connect(tmp_path / "state.db")
+    for u in urls:
+        translate_article(conn, u, tr, glossary)
+    conn.close()
+    assert len(tr.calls) == 2 and tr.chars_used > est["chars_base"]
+    assert tr.chars_used <= est["chars"] and est["chars_upper_bound"] is True
+
+
+def test_estimate_nothing_to_send_is_exact_zero(tmp_path: Path) -> None:
+    app = _real_app(tmp_path)
+    conn = store.connect(tmp_path / "state.db")
+    url = _add(conn, "cfm", "z", section="whitepaper", title_zh=None)
+    glossary = app._glossary(app.ws())  # pyright: ignore[reportPrivateUsage]
+    _tm_put(conn, "<p>Some English paragraph for the article.</p>", glossary, "<p>已翻。</p>")
+    _tm_put(conn, "<p>Title z</p>", glossary, "<p>标题</p>")
+    conn.close()
+    est: Any = app.translate_fulltext({"urls": [url], "dry_run": True})
+    assert (est["chars"], est["chars_base"], est["chars_upper_bound"]) == (0, 0, False)
 
 
 def test_estimate_base_equals_real_send_and_skips_rejected_body(tmp_path: Path) -> None:
