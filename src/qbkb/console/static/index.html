@@ -48,6 +48,7 @@
         <span id="meta-state" class="tag"></span>
         <button type="button" id="meta-translate" class="primary" hidden>翻译这篇全文</button>
       </div>
+      <div id="meta-note" class="meta-note" hidden></div>
       <div class="views" role="group" aria-label="显示方式">
         <button type="button" data-view="zh" class="active">中文</button>
         <button type="button" data-view="bi">中英对照</button>
@@ -155,8 +156,12 @@
 </section>
 
 <div id="select-bar" class="select-bar" hidden>
-  <span id="select-count" class="select-count"></span>
-  <button type="button" id="select-clear" class="ghost">清空</button>
+  <div class="select-info">
+    <span id="select-count" class="select-count"></span>
+    <span id="select-sub" class="select-sub"></span>
+  </div>
+  <button type="button" id="select-only" class="ghost small">只看已选的</button>
+  <button type="button" id="select-clear" class="ghost small">清空</button>
   <button type="button" id="select-go" class="primary"></button>
 </div>
 
