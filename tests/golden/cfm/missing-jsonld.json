@@ -1,0 +1,21 @@
+{
+  "url": "https://www.cfm.com/old-style-whitepaper/",
+  "method": "rule:post",
+  "meta": {
+    "title": "Old Style Whitepaper",
+    "author": null,
+    "published": "2018-02-19",
+    "tags": [
+      "Whitepaper",
+      "Trend",
+      "Macro"
+    ]
+  },
+  "n_body": 1,
+  "issues": [
+    "正文太短：77 字符（下限 1000）"
+  ],
+  "segments": [
+    "<p>An invented summary of a whitepaper whose page has no structured data at all.</p>"
+  ]
+}

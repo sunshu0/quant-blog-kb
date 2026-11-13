@@ -1,0 +1,21 @@
+{
+  "url": "https://www.cfm.com/toy-funds/",
+  "method": "rule:post",
+  "meta": {
+    "title": "Toy Funds",
+    "author": "Carol Placeholder, Dan Fixture",
+    "published": "2020-09-11",
+    "tags": [
+      "Academic Papers",
+      "Liquidity"
+    ]
+  },
+  "n_body": 2,
+  "issues": [
+    "正文太短：223 字符（下限 1000）"
+  ],
+  "segments": [
+    "<p><strong>Abstract</strong></p>",
+    "<p>We build an invented model of funds that buy what they already hold. In the toy model, flows push prices, prices attract flows, and the loop ends when it stops. The abstract is short because the full paper is a PDF.</p>"
+  ]
+}

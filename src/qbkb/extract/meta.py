@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import date, datetime
 from typing import Any
 
@@ -33,6 +35,11 @@ _WS = re.compile(r"\s+")
 
 def _text(s: str) -> str:
     return _WS.sub(" ", s).strip()
+
+
+def _jtext(s: str) -> str:
+    """JSON-LD 里的字符串：有的站点（Yoast 等）写成 HTML 实体（&#8220;、&amp;），json 不解码。"""
+    return _text(html.unescape(s))
 
 
 def _types(node: dict[str, Any]) -> set[str]:
@@ -77,23 +84,34 @@ def _jsonld_article(doc: HtmlElement) -> tuple[dict[str, Any] | None, dict[str, 
 def _names(value: Any, by_id: dict[str, dict[str, Any]]) -> list[str]:
     """JSON-LD 的 author 可能是字符串、对象、@id 引用或它们的列表。"""
     if isinstance(value, str):
-        return [_text(value)] if value.strip() else []
+        return [_jtext(value)] if value.strip() else []
     if isinstance(value, list):
         return [name for v in value for name in _names(v, by_id)]
     if isinstance(value, dict):
         name = value.get("name")
         if not name and isinstance(value.get("@id"), str):
             name = by_id.get(value["@id"], {}).get("name")
-        return [_text(name)] if isinstance(name, str) and name.strip() else []
+        return [_jtext(name)] if isinstance(name, str) and name.strip() else []
     return []
 
 
-def _keywords(value: Any) -> list[str]:
+def _keywords(value: Any, *, split: bool = True, unescape: bool = False) -> list[str]:
+    """字符串按逗号拆开（split=False 时整串算一个，比如栏目名里可能有逗号），列表逐项取。"""
+    clean = _jtext if unescape else _text
     if isinstance(value, str):
-        return [_text(k) for k in value.split(",") if k.strip()]
+        parts = value.split(",") if split else [value]
+        return [clean(k) for k in parts if k.strip()]
     if isinstance(value, list):
-        return [_text(k) for k in value if isinstance(k, str) and k.strip()]
+        return [clean(k) for k in value if isinstance(k, str) and k.strip()]
     return []
+
+
+_URL_LIKE = re.compile(r"^(?:https?://|www\.)", re.I)
+
+
+def _real_authors(names: list[str], publishers: set[str]) -> list[str]:
+    """去掉不是真人作者的值：和站点名 / 发布机构同名的（WordPress 账号名常常就是机构名）、网址。"""
+    return [n for n in names if n.casefold() not in publishers and not _URL_LIKE.match(n)]
 
 
 def _meta(doc: HtmlElement, *keys: str) -> list[str]:
@@ -107,15 +125,35 @@ def _meta(doc: HtmlElement, *keys: str) -> list[str]:
     return out
 
 
+_BR = "\ue000"  # 私用区字符当占位：不是空白，不会被 \s 折叠掉
+
+
+def _element_text(el: HtmlElement) -> str:
+    """元素的文字，空白折叠成一个空格；<br> 变成换行。
+
+    "姓名<br/>职位" 直接 text_content() 会粘成"姓名职位"，规则的 pattern 就切不开了；
+    换成换行后可以用 '^([^\\n]+)' 只取第一行。没有 <br> 时和 text_content() 折叠空白的结果一样。
+    """
+    if el.find(".//br") is None:
+        return _text(el.text_content())
+    dup = deepcopy(el)
+    for br in dup.iter("br"):
+        br.tail = _BR + (br.tail or "")
+    lines = (_text(part) for part in dup.text_content().split(_BR))
+    return "\n".join(line for line in lines if line)
+
+
 def _rule_values(doc: HtmlElement, rule: FieldRule | None) -> list[str]:
     if rule is None:
         return []
     out: list[str] = []
     for el in doc.cssselect(rule.selector):
-        value = _text(el.text_content())
+        value = _element_text(el)
         if rule.pattern is not None:
             m = rule.pattern.search(value)
             value = _text(m.group(1)) if m else ""
+        else:
+            value = _text(value)
         if value:
             out.append(value)
     return out
@@ -164,7 +202,7 @@ def extract_meta(
 
     titles: list[str] = []
     if isinstance(node.get("headline"), str):
-        titles.append(_text(node["headline"]))
+        titles.append(_jtext(node["headline"]))
     titles += [strip_title(t) for t in _meta(doc, "og:title", "twitter:title")]
     titles += _rule_values(doc, template.title if template else None)
 
@@ -178,9 +216,12 @@ def extract_meta(
         for d in _rule_values(doc, template.published if template else None)
     ]
 
-    authors = _names(node.get("author"), by_id)
+    publishers = {
+        n.casefold() for n in _meta(doc, "og:site_name") + _names(node.get("publisher"), by_id)
+    }
+    authors = _real_authors(_names(node.get("author"), by_id), publishers)
     if not authors:
-        authors = _meta(doc, "author", "article:author")
+        authors = _real_authors(_meta(doc, "author", "article:author"), publishers)
     if not authors:
         authors = _rule_values(doc, template.author if template else None)
     for rule in rules.author_fallback:
@@ -188,13 +229,17 @@ def extract_meta(
             break
         authors = _rule_values(doc, rule)
 
-    tags = _keywords(node.get("keywords"))
+    # JSON-LD 的栏目（articleSection）排在关键词前面，一起当标签
+    sections = _keywords(node.get("articleSection"), split=False, unescape=True)
+    tags = _keywords(node.get("keywords"), unescape=True)
     if not tags:
         tags = _meta(doc, "article:tag")
     if not tags:
         tags = [k for v in _meta(doc, "keywords") for k in _keywords(v)]
     if not tags:
         tags = _rule_values(doc, template.tags if template else None)
+
+    tags = sections + tags
 
     title = next((t for t in titles if t), None)
     published = next((d for d in dates if d), None)
@@ -207,7 +252,9 @@ def extract_meta(
             if published is None:
                 published = normalize_date(fallback.date, formats)
             if not authors and fallback.author:
-                authors = [clean_author(a) for a in fallback.author.split(";")]
+                authors = _real_authors(
+                    [clean_author(a) for a in fallback.author.split(";")], publishers
+                )
 
     title_doc = doc.find(".//title")
     if not title and title_doc is not None and title_doc.text:

@@ -17,7 +17,12 @@ import httpx
 from qbkb import store
 from qbkb.config import SiteConfig, ensure_allowed
 from qbkb.discover.sitemap import MAX_SITEMAP_BYTES, SitemapEntry, SitemapError, parse_sitemap
-from qbkb.fetch.settings import DOWNLOAD_DELAY_SECONDS, TIMEOUT_SECONDS, USER_AGENT
+from qbkb.fetch.settings import (
+    DOWNLOAD_DELAY_SECONDS,
+    TIMEOUT_SECONDS,
+    USER_AGENT,
+    site_crawl_delay,
+)
 from qbkb.models import DiscoveredUrl
 
 # 站点配置里没写时的默认值（新配置项，见 PR 说明）
@@ -180,6 +185,8 @@ def http_get(
     *,
     max_bytes: int = MAX_SITEMAP_BYTES,
     transport: httpx.BaseTransport | None = None,
+    delay: float = DOWNLOAD_DELAY_SECONDS,
+    sleep: Sleep = time.sleep,
 ) -> bytes:
     """下载一份 sitemap。
 
@@ -192,7 +199,9 @@ def http_get(
         follow_redirects=False,
         transport=transport,
     ) as client:
-        for _ in range(MAX_REDIRECTS + 1):
+        for attempt in range(MAX_REDIRECTS + 1):
+            if attempt:
+                sleep(delay)
             with client.stream("GET", url) as resp:
                 if resp.is_redirect:
                     location = resp.headers.get("Location")
@@ -269,8 +278,14 @@ def discover_site(
     rules = DiscoverRules.from_site(site)
     hosts = rules.allowed_hosts
     stats = DiscoverStats()
+    # 站点要求的最小间隔（crawl_delay，比如 robots.txt 的 Crawl-delay）比默认值大时用它
+    delay = max(DOWNLOAD_DELAY_SECONDS, site_crawl_delay(site.raw) or 0.0)
     entries = collect_entries(
-        rules, fetch or (lambda url: http_get(url, hosts)), stats, sleep=sleep
+        rules,
+        fetch or (lambda url: http_get(url, hosts, delay=delay, sleep=sleep)),
+        stats,
+        sleep=sleep,
+        delay=delay,
     )
     result = apply_entries(conn, rules, entries)
     result.sitemaps_fetched = stats.sitemaps_fetched

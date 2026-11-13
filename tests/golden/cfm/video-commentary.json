@@ -1,0 +1,23 @@
+{
+  "url": "https://www.cfm.com/pt-1-someone-speaks-on-a-sample-podcast/",
+  "method": "rule:post",
+  "meta": {
+    "title": "Pt 1: Someone Speaks on a Sample Podcast",
+    "author": null,
+    "published": "2026-10-29",
+    "tags": [
+      "Commentary & Insights"
+    ]
+  },
+  "n_body": 5,
+  "issues": [
+    "正文太短：155 字符（下限 1000）"
+  ],
+  "segments": [
+    "<p>Someone from the fixture team spoke on a sample podcast.</p>",
+    "<p>Watch the full video here.</p>",
+    "<img src=\"https://www.cfm.com/wp-content/uploads/2026/10/sample-poster.png\" alt=\"\">",
+    "<p>Part 1</p>",
+    "<p><strong>Disclaimer:</strong><br> Fixture disclaimer: the interviewer chose the pictures.</p>"
+  ]
+}

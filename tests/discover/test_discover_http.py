@@ -104,3 +104,25 @@ def test_discover_site_uses_http_get_with_site_hosts(
     discover_site(site, conn, sleep=lambda _s: None)
     conn.close()
     assert seen == [(URL, HOSTS)]
+
+
+def test_redirect_obeys_site_delay() -> None:
+    waits: list[float] = []
+    events: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        events.append(request.url.path)
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "/end"})
+        assert waits == [10.5]
+        return httpx.Response(200, content=b"done")
+
+    result = http_get(
+        "https://example.test/start",
+        frozenset({"example.test"}),
+        transport=httpx.MockTransport(handler),
+        delay=10.5,
+        sleep=waits.append,
+    )
+    assert result == b"done"
+    assert events == ["/start", "/end"]

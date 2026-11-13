@@ -140,3 +140,103 @@ def test_invalid_jsonld_date_falls_through_to_next_source() -> None:
     head = _ld({"@type": "Article", "headline": "H", "datePublished": "2023-00-00"})
     head += '<meta property="article:published_time" content="2023-04-05">'
     assert _meta(_page(head)).published == "2023-04-05"
+
+
+# ---- WordPress / Yoast 的 JSON-LD（CFM 等站点） ----
+
+
+def test_jsonld_html_entities_are_decoded() -> None:
+    head = _ld(
+        {
+            "@type": "Article",
+            "headline": "&#8220;Quoted&#8221; title &amp; more",
+            "author": {"name": "Jane &amp; John"},
+            "keywords": ["Rates &amp; FX"],
+        }
+    )
+    m = _meta(_page(head))
+    assert m.title == "“Quoted” title & more"
+    assert m.author == "Jane & John"
+    assert m.tags == ("Rates & FX",)
+
+
+def test_article_section_goes_first_in_tags() -> None:
+    head = _ld(
+        {
+            "@type": "Article",
+            "headline": "H",
+            "articleSection": ["Commentary &amp; Insights", "Markets, Rates"],
+            "keywords": "Inflation, Macro",
+        }
+    )
+    # 栏目名不按逗号拆；关键词照旧按逗号拆
+    assert _meta(_page(head)).tags == (
+        "Commentary & Insights",
+        "Markets, Rates",
+        "Inflation",
+        "Macro",
+    )
+
+
+def test_article_section_as_string() -> None:
+    head = _ld({"@type": "Article", "headline": "H", "articleSection": "Whitepaper"})
+    assert _meta(_page(head)).tags == ("Whitepaper",)
+
+
+def test_publisher_name_and_urls_are_not_authors() -> None:
+    """WordPress 账号名就是机构名、主题写错的 meta author 是网址：都跳过，用站点规则。"""
+    head = '<meta property="og:site_name" content="ACME">'
+    head += _ld(
+        {
+            "@graph": [
+                {
+                    "@type": "Article",
+                    "headline": "H",
+                    "author": {"name": "acme"},
+                    "publisher": {"@id": "#org"},
+                },
+                {"@type": "Organization", "@id": "#org", "name": "ACME Capital"},
+            ]
+        }
+    )
+    head += '<meta name="author" content="ACME Capital">'
+    head += '<meta name="author" content="https://theme.example">'
+    extract = {
+        "templates": [
+            {"name": "x", "body": "body", "author": {"selector": "li", "pattern": r"^([^\n]+)"}}
+        ]
+    }
+    body = "<ul><li>Ann Real<br/>Head of Research</li><li></li><li>Bo Real<br>Univ</li></ul>"
+    assert _meta(_page(head, body), extract).author == "Ann Real, Bo Real"
+
+
+def test_real_jsonld_author_still_wins() -> None:
+    head = '<meta property="og:site_name" content="ACME">'
+    head += _ld({"@type": "Article", "headline": "H", "author": {"name": "Real Person"}})
+    extract = {"templates": [{"name": "x", "body": "body", "author": "li"}]}
+    assert _meta(_page(head, "<ul><li>Other</li></ul>"), extract).author == "Real Person"
+
+
+def test_rule_value_br_becomes_line_break() -> None:
+    body = "<ul><li> Ann  Real <br/> Head, <b>Desk</b></li></ul>"
+    # 不带 pattern：<br> 两边的字不会粘在一起
+    plain = {"templates": [{"name": "x", "body": "body", "author": "li"}]}
+    assert _meta(_page(body=body), plain).author == "Ann Real Head, Desk"
+    first = {
+        "templates": [
+            {"name": "x", "body": "body", "author": {"selector": "li", "pattern": r"^([^\n]+)"}}
+        ]
+    }
+    assert _meta(_page(body=body), first).author == "Ann Real"
+
+
+def test_section_does_not_hide_meta_keywords() -> None:
+    head = _ld({"@type": "Article", "headline": "H", "articleSection": "Research"})
+    head += '<meta property="article:tag" content="Rates">'
+    assert _meta(_page(head)).tags == ("Research", "Rates")
+
+
+def test_section_does_not_hide_rule_keywords() -> None:
+    head = _ld({"@type": "Article", "headline": "H", "articleSection": "Research"})
+    rules = {"templates": [{"name": "x", "body": "body", "tags": ".tag"}]}
+    assert _meta(_page(head, '<span class="tag">Macro</span>'), rules).tags == ("Research", "Macro")

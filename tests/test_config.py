@@ -14,9 +14,21 @@ def _write_site(tmp_path: Path, name: str, body: str) -> Path:
 
 def test_repo_sites_load() -> None:
     names = config.list_sites()
-    assert "man" in names
+    assert {"man", "cfm"} <= set(names)
     for name in names:
         config.load_site(name)
+
+
+def test_cfm_compliance() -> None:
+    """CFM：2026-11-12 获书面许可（不含公开再分发），可以抓取。"""
+    site = config.load_site("cfm")
+    config.ensure_allowed(site)
+    compliance = site.raw["compliance"]
+    assert compliance["terms_url"] == "https://www.cfm.com/terms-of-use/"
+    assert "2026-11-12" in compliance["permission"]
+    assert "Crawl-delay" in compliance["robots_txt"]
+    assert site.raw["base_url"] == "https://www.cfm.com"
+    assert not config.is_local_site(site)
 
 
 def test_allowed_site_passes_gate(tmp_path: Path) -> None:

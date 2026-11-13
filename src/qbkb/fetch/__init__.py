@@ -17,7 +17,7 @@ from qbkb import store
 from qbkb.config import SiteConfig, ensure_allowed
 from qbkb.extract.rules import ExtractRules
 from qbkb.fetch.outcome import Kind, Outcome
-from qbkb.fetch.settings import USER_AGENT, build_settings
+from qbkb.fetch.settings import USER_AGENT, apply_crawl_delay, build_settings, site_crawl_delay
 from qbkb.models import Status
 from qbkb.pdf import load_pdf_rules
 
@@ -163,9 +163,9 @@ def run_fetch(
             pdf_urls = []
         if not targets and not pdf_urls:
             return FetchStats()
-        settings = build_settings(
-            http_cache=http_cache, log_level=log_level, **(settings_overrides or {})
-        )
+        # 站点要求的最小间隔（crawl_delay）优先于命令行和默认值
+        overrides = apply_crawl_delay(settings_overrides or {}, site_crawl_delay(site.raw))
+        settings = build_settings(http_cache=http_cache, log_level=log_level, **overrides)
         process = CrawlerProcess(settings=settings)
         # 显式 create_crawler 是为了在 process.start() 之后还能拿到 spider，读回 stop_reason
         crawler = process.create_crawler(ArticleSpider)

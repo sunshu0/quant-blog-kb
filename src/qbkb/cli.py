@@ -853,6 +853,7 @@ def stage_export(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
             out,
             images=images,
             categories=cfg.categories,
+            config_dir=_cfg(args),
             rebuild=args.rebuild,
             limit=args.limit,
         )

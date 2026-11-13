@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from qbkb.config import SiteConfig, ensure_allowed, is_local_host
-from qbkb.fetch.settings import TIMEOUT_SECONDS, USER_AGENT
+from qbkb.fetch.settings import TIMEOUT_SECONDS, USER_AGENT, site_crawl_delay
 
 MIN_INTERVAL_SECONDS = 1.0
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -72,6 +72,8 @@ class ImageFetcher:
         # 真实站点不能低于 MIN_INTERVAL_SECONDS；本机测试站点（*.test、127.0.0.1……）不限
         local = all(is_local_host(h.split(":")[0]) for h in self.hosts)
         self.min_interval = min_interval if local else max(min_interval, MIN_INTERVAL_SECONDS)
+        # 站点要求的最小间隔（crawl_delay）对图片同样适用
+        self.min_interval = max(self.min_interval, site_crawl_delay(site.raw) or 0.0)
         self.max_bytes = max_bytes
         self._sleep = sleep
         self._clock = clock

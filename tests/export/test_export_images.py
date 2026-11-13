@@ -97,6 +97,22 @@ def test_size_limit(tmp_path: Path) -> None:
         f.get("https://e.test/big.png")
 
 
+def test_site_crawl_delay_raises_interval(tmp_path: Path) -> None:
+    """站点配置了 crawl_delay（robots.txt 的 Crawl-delay）时，图片之间也按它等。"""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"Content-Type": "image/png"}, content=PNG)
+
+    slow = SiteConfig("e", "allowed", {"base_url": "https://e.test", "crawl_delay": 10.5})
+    clock = Clock()
+    f = _fetcher(tmp_path, handler, clock, slow)
+    assert f.min_interval == 10.5
+    f.get("https://e.test/a.png")
+    clock.t += 0.5
+    f.get("https://e.test/b.png")
+    assert clock.sleeps == [pytest.approx(10.0)]
+
+
 def test_compliance_gate(tmp_path: Path) -> None:
     blocked = SiteConfig("e", "permission_needed", {"base_url": "https://e.test"})
     with pytest.raises(ComplianceError):

@@ -1,5 +1,6 @@
-"""黄金样本回归：tests/golden/man/*.html 逐个比对人工确认过的 *.json。
+"""黄金样本回归：tests/golden/<站点>/*.html 逐个比对人工确认过的 *.json。
 
+目录名就是站点名（用 config/sites/<站点>.yaml 的规则抽取）。
 改了抽取规则、确认新输出是对的之后，用 QBKB_UPDATE_GOLDEN=1 重新生成期望文件，
 再逐个看 git diff，确认每一处变化都是有意的。
 """
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +19,17 @@ from qbkb import config
 from qbkb.extract import check_quality, extract, extract_full, load_rules
 
 GOLDEN = Path(__file__).resolve().parents[1] / "golden"
-CASES = sorted((GOLDEN / "man").glob("*.html"))
+CASES = sorted(GOLDEN.glob("*/*.html"))
+IDS = [f"{p.parent.name}-{p.stem}" for p in CASES]
 UPDATE = os.environ.get("QBKB_UPDATE_GOLDEN") == "1"
 
 
+def _site(html_path: Path) -> str:
+    return html_path.parent.name
+
+
 def _actual(html_path: Path, url: str) -> dict[str, Any]:
-    rules = load_rules(config.load_site("man"))
+    rules = load_rules(config.load_site(_site(html_path)))
     result = extract_full(html_path.read_bytes(), url, rules)
     meta = result.article.meta
     return {
@@ -41,10 +48,14 @@ def _actual(html_path: Path, url: str) -> dict[str, Any]:
 
 
 def test_golden_cases_exist() -> None:
-    assert len(CASES) >= 5
+    per_site = Counter(_site(p) for p in CASES)
+    assert per_site["man"] >= 5
+    assert per_site["cfm"] >= 3
+    # 每个样本目录都对应一个已配置的站点
+    assert set(per_site) <= set(config.list_sites())
 
 
-@pytest.mark.parametrize("html_path", CASES, ids=[p.stem for p in CASES])
+@pytest.mark.parametrize("html_path", CASES, ids=IDS)
 def test_golden(html_path: Path) -> None:
     expected_path = html_path.with_suffix(".json")
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
@@ -64,11 +75,11 @@ def test_golden(html_path: Path) -> None:
     assert len(actual["segments"]) == len(expected["segments"])
 
 
-@pytest.mark.parametrize("html_path", CASES, ids=[p.stem for p in CASES])
+@pytest.mark.parametrize("html_path", CASES, ids=IDS)
 def test_golden_is_deterministic(html_path: Path) -> None:
     """同一个输入抽两次，段落和 body_hash 完全一样（流程幂等的前提）。"""
     url = json.loads(html_path.with_suffix(".json").read_text(encoding="utf-8"))["url"]
-    rules = load_rules(config.load_site("man"))
+    rules = load_rules(config.load_site(_site(html_path)))
     a = extract(html_path.read_bytes(), url, rules)
     b = extract(html_path.read_text(encoding="utf-8"), url, rules)
     assert a.segments == b.segments

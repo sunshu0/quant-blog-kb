@@ -1,0 +1,29 @@
+{
+  "url": "https://www.cfm.com/quiet-quarters-sample/",
+  "method": "rule:post",
+  "meta": {
+    "title": "“Quiet Quarters”? A sample blog post",
+    "author": "Alice Example, Bob Sample",
+    "published": "2026-10-30",
+    "tags": [
+      "The Edge a CFM blog"
+    ]
+  },
+  "n_body": 13,
+  "issues": [],
+  "segments": [
+    "<p>This sample post is written for the test suite only.</p>",
+    "<p><strong>A calm opening</strong></p>",
+    "<p>Imagine a market that drifts sideways for a whole quarter. A reader might ask whether the quiet means anything at all, or whether it is simply what most quarters look like when nobody is watching.</p>",
+    "<ul><li>Quiet quarters are common in the made-up series used here.</li> <li>Loud quarters cluster together, which is the point of this toy example.</li></ul>",
+    "<img src=\"https://www.cfm.com/wp-content/uploads/2026/10/sample-chart.png\" alt=\"\">",
+    "<p>Chart 1: Toy distribution of quarterly ranges</p>",
+    "<p><em>Simulated ranges from an invented random walk; nothing here is real data.</em></p>",
+    "<p><em>Source: test fixture</em></p>",
+    "<p>The second half of the argument is that a quiet quarter tells you little about the next one<sup>1 </sup>. We repeat the toy experiment many times and the answer does not change, which is reassuring for a fixture and boring for a reader.</p>",
+    "<p>Finally, we note that any pattern found by searching many windows needs a correction for the number of windows searched. Otherwise the best window always looks impressive.</p>",
+    "<p><em><sup>1 </sup> A footnote written for the fixture: it explains nothing in particular.</em></p>",
+    "<p><em><strong>Disclaimer:</strong> </em></p>",
+    "<p><em>This fixture disclaimer is invented. Simulated results are not an indicator of anything.</em></p>"
+  ]
+}
