@@ -23,6 +23,7 @@ from qbkb.export.markdown import (
     md_filename,
     render,
     render_bilingual,
+    render_untranslated,
     rewrite_images,
     safe_url,
     tidy_zh_spacing,
@@ -31,6 +32,7 @@ from qbkb.export.markdown import (
 )
 from qbkb.models import Status
 from qbkb.sections import load_section_rules
+from qbkb.summarize import valid_summary
 from qbkb.translate import Glossary, lookup_translation, translated_title
 
 log = logging.getLogger(__name__)
@@ -145,32 +147,40 @@ def export_article(
     images: ImageFetcher | None,
     stats: ExportStats,
 ) -> Path | None:
-    """导出一篇。返回主文件路径；缺译文时退回 extracted 并返回 None。"""
+    """导出一篇。返回主文件路径；有全文译文但缺译文时退回 extracted 并返回 None。
+
+    backend（translator）为空 = 还没翻全文：中文正文留空，输出英文原文 + 中文标题 + 摘要，
+    不报错、不退回重翻（分层翻译的入库结果）。
+    """
     row = store.get_article(conn, url)
     if row is None:
         raise KeyError(url)
     backend = row["translator"]
-    if not backend:
-        raise ValueError("没有 translator，先跑 translate")
     segments = store.get_segments(conn, url)
     if not segments:
         raise ValueError("没有段落")
-    zh_html: list[str] = []
-    missing = 0
-    for seg in segments:
-        tgt = lookup_translation(conn, seg.html, str(backend), glossary)
-        if tgt is None:
-            missing += 1
-        zh_html.append(tgt or "")
-    if missing:
-        msg = f"{FAIL_PREFIX}缺 {missing} 段译文（术语表改过？），退回 extracted 重新翻译"
-        store.set_status(conn, url, Status.EXTRACTED, error=msg)
-        stats.requeued.append(url)
-        return None
+
+    if backend:
+        zh_html: list[str] = []
+        missing = 0
+        for seg in segments:
+            tgt = lookup_translation(conn, seg.html, str(backend), glossary)
+            if tgt is None:
+                missing += 1
+            zh_html.append(tgt or "")
+        if missing:
+            msg = f"{FAIL_PREFIX}缺 {missing} 段译文（术语表改过？），退回 extracted 重新翻译"
+            store.set_status(conn, url, Status.EXTRACTED, error=msg)
+            stats.requeued.append(url)
+            return None
+    else:
+        zh_html = ["" for _ in segments]
 
     title = str(row["title"] or row["slug"])
     title_zh = (
-        row["title_zh"] or translated_title(conn, row["title"], str(backend), glossary) or title
+        row["title_zh"]
+        or (translated_title(conn, row["title"], str(backend), glossary) if backend else None)
+        or title
     )
     n_body = row["body_segments"]
     n_body = len(segments) if n_body is None else min(int(n_body), len(segments))
@@ -184,7 +194,8 @@ def export_article(
     zh_bi_blocks: list[str] = []
     en_blocks: list[str] = []
     for seg, tgt in zip(segments, zh_html, strict=True):
-        tgt = annotator.annotate(tgt, glossary.terms_in(seg.html))
+        if tgt:
+            tgt = annotator.annotate(tgt, glossary.terms_in(seg.html))
         zh = to_markdown(_localize(tgt, "", url, images, stats, seen))
         zh_bi = to_markdown(_localize(tgt, bi_prefix, url, images, stats, seen))
         # 中文段落去掉标点后面多余的空格（英文段落不动）
@@ -218,7 +229,10 @@ def export_article(
         n_body=n_body,
     )
     main, bilingual = article_paths(out_dir, str(row["site"]), row["published"], str(row["slug"]))
-    wrote = write_if_changed(main, render(doc))
+    if backend:
+        wrote = write_if_changed(main, render(doc))
+    else:
+        wrote = write_if_changed(main, render_untranslated(doc, valid_summary(conn, row)))
     doc_bi = dataclasses.replace(doc, zh_blocks=zh_bi_blocks)
     wrote = write_if_changed(bilingual, render_bilingual(doc_bi, title)) or wrote
     if not wrote:
@@ -262,7 +276,8 @@ def run(
     rebuild: bool = False,
     limit: int | None = None,
 ) -> ExportStats:
-    """导出这个站点全部 translated 文章（rebuild 时连已发布的一起重新生成），最后重建 index.md。
+    """导出 translated / published 文章，以及还没翻全文、但已经入库（extracted / filtered）的
+    文章（中文正文留空），最后重建 index.md。
 
     images 为 None 时不下载图片，Markdown 里保留原始链接。
     """
@@ -270,6 +285,14 @@ def run(
     urls = store.list_by_status(conn, Status.TRANSLATED, site.name)
     if rebuild:
         urls = sorted(urls + store.list_by_status(conn, Status.PUBLISHED, site.name))
+    # 还没翻全文的文章也导出（分层翻译：入库只翻标题 + 摘要）；按栏目配置过滤
+    rules = load_section_rules(site)
+    for row in store.list_rows(conn, [Status.EXTRACTED, Status.FILTERED], site.name):
+        if rules.enabled and row["section_key"] is None:
+            continue
+        if rules.collects(str(row["url"]), row["section_key"]):
+            urls.append(str(row["url"]))
+    urls = sorted(set(urls))
     if limit is not None:
         urls = urls[:limit]
     for url in urls:

@@ -246,8 +246,9 @@ def _manager(tmp_path: Path, popen: FakePopen, **kw: Any) -> jobs.JobManager:
 
 LINES = [
     "[discover] demo: 新 7、更新 0",
-    "[translate] demo: 待翻译 4 篇",
-    "[translate] 翻译后本月额度：已用 1200 / 上限 1000000 字符（剩余 998800）",
+    "[titles] demo: 补翻标题 4 / 4 篇（只翻标题，不翻正文）",
+    "[summarize] demo: 新生成 4、复用 0、输入截取 0",
+    "[titles] 翻译后本月额度：已用 1200 / 上限 1000000 字符（剩余 998800）",
     "[export] demo: 发布 3（内容没变 1）、退回重翻 0",
     "错误：key sk-abcdefghijklmnop9876 不对",
 ]
@@ -265,7 +266,7 @@ def test_job_manager_collects_output_and_result(tmp_path: Path) -> None:
     assert job.exit_code == 5 and done == [job]
     s = job.summary()
     assert s["running"] is False and "待复查" in str(s["result"])
-    assert s["stage"] == "export" and s["progress"] == {"done": 5, "total": 5}
+    assert s["stage"] == "export" and s["progress"] == {"done": 6, "total": 6}
     assert job.quota == {"used": 1200, "limit": 1000000, "remaining": 998800}
     assert job.published == 2
     assert "sk-abcdefghijklmnop9876" not in "\n".join(job.lines)  # key 被换成 ***
@@ -429,3 +430,18 @@ def test_job_summary_is_json_serialisable(tmp_path: Path) -> None:
     job = m.start(workspace(tmp_path, "demo"), "run", "运行", [["a"]], {})
     m.wait(5)
     json.dumps(job.summary(), ensure_ascii=False)
+
+
+def test_full_translate_stage_name_and_progress(tmp_path: Path) -> None:
+    """ds-1：--full-translate 时 translate 阶段有名字，进度按 full 阶段序列算（--skip 也去掉）。"""
+    ws = workspace(tmp_path, "demo")
+    lines = ["[discover] demo: 新 1", "[translate] demo: 完成 1 篇、需复查 0 篇"]
+    popen = FakePopen(FakeProc(lines, 5))
+    done: list[jobs.Job] = []
+    m = _manager(tmp_path, popen, on_finish=done.append)
+    cmd = [PY, "-m", "qbkb.cli", "run", "--full-translate", "--skip", "summarize"]
+    job = m.start(ws, "run", "运行", [cmd], {})
+    m.wait(5)
+    s = job.summary()
+    assert s["stage_name"] == "翻译全文"
+    assert s["progress"] == {"done": 4, "total": 5}  # discover/fetch/extract/translate/export

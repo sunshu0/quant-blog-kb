@@ -42,7 +42,9 @@ def test_requeue_exits_attention(tmp_path: Path) -> None:
     translate_article(conn, URL, FakeTranslator(), Glossary("0", {"momentum": "势头"}))
     conn.close()
     argv = ["run", "--site", "man", "--db", str(db), "--out", str(tmp_path / "o"), "--no-images"]
-    skips = [x for s in ("discover", "fetch", "extract", "translate") for x in ("--skip", s)]
+    skips = [
+        x for s in ("discover", "fetch", "extract", "titles", "summarize") for x in ("--skip", s)
+    ]
     assert cli.main([*argv, *skips]) == cli.EXIT_ATTENTION
     conn = store.connect(db)
     row = store.get_article(conn, URL)
@@ -63,8 +65,18 @@ def test_quota_wins_over_attention(tmp_path: Path) -> None:
     store.set_status(conn, URL, Status.TRANSLATED)  # 导出会失败
     conn.close()
     deps = cli.Deps(translator=FakeTranslator(quota_chars=len("<p>Text a.</p>")))
-    argv = ["run", "--site", "man", "--db", str(db), "--out", str(tmp_path / "o"), "--no-images"]
-    skips = [x for s in ("discover", "fetch", "extract") for x in ("--skip", s)]
+    argv = [
+        "run",
+        "--site",
+        "man",
+        "--db",
+        str(db),
+        "--out",
+        str(tmp_path / "o"),
+        "--no-images",
+        "--full-translate",
+    ]
+    skips = [x for s in ("discover", "fetch", "extract", "summarize") for x in ("--skip", s)]
     assert cli.main([*argv, *skips], deps=deps) == cli.EXIT_QUOTA
 
 
@@ -101,6 +113,7 @@ def test_is_local_host(host: str | None, local: bool) -> None:
     assert config.is_local_host(host) is local
 
 
+@pytest.mark.usefixtures("man_without_sections")
 def test_translate_titles_option(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     db = tmp_path / "s.db"
     conn = store.connect(db)

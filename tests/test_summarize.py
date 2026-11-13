@@ -227,8 +227,8 @@ def test_v3_schema_upgrades_without_erasing_articles(tmp_path: Path) -> None:
     conn.close()
 
 
-def test_summarize_is_not_a_default_stage() -> None:
-    assert "summarize" not in cli.STAGES
+def test_summarize_is_a_default_stage() -> None:
+    assert "summarize" in cli.STAGES
     assert cli.build_parser().parse_args(["summarize"]).input_chars == 24000
 
 

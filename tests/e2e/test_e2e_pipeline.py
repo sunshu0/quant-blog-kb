@@ -38,6 +38,18 @@ KEPT = {
 WITH_IMAGES = ("/insights/carry-basics", "/insights/momentum-method")
 
 
+class _FakeSummarizer:
+    """假摘要后端：返回固定中文摘要，不读 key、不联网。"""
+
+    version = "summary-test"
+
+    def summarize(self, title: str, body: str) -> tuple[str, bool]:
+        return "这是一段构造的中文摘要，说明文章主题与主要结论。", False
+
+    def close(self) -> None:
+        pass
+
+
 class Env:
     """一次端到端测试的工作目录和注入的依赖。"""
 
@@ -50,8 +62,10 @@ class Env:
         self.table = responses(base)
         self.image_hits: list[str] = []
 
-    def argv(self, *extra: str) -> list[str]:
-        return [
+    def argv(self, *extra: str, full_translate: bool = True) -> list[str]:
+        # 默认 full_translate=True：老用例测"入库即翻全文"的旧流程；分层翻译的新默认见
+        # test_default_run_is_title_only。
+        base = [
             "run",
             "--site",
             SITE,
@@ -63,8 +77,10 @@ class Env:
             str(self.raw),
             "--out",
             str(self.out),
-            *extra,
         ]
+        if full_translate:
+            base.append("--full-translate")
+        return base + list(extra)
 
     def sitemap_fetch(self, url: str) -> bytes:
         return self.table[urlsplit(url).path][1]
@@ -97,6 +113,7 @@ class Env:
             fetch_runner=self.fake_fetch,
             scorer=scorer or FakeScorer(),
             translator=translator or FakeTranslator(),
+            summarizer=_FakeSummarizer(),
             image_transport=self.image_transport(),
             sleep=lambda s: None,
         )
@@ -218,7 +235,7 @@ def test_resume_after_translation_quota(tmp_path: Path, capsys: pytest.CaptureFi
     assert "额度用完" in out and "下次运行同一条命令会从中断处接着跑" in out
     states = env.statuses()
     assert Status.PUBLISHED in states.values()  # 翻完的那篇照样导出
-    assert Status.EXTRACTED in states.values()
+    assert list(states.values()).count(Status.PUBLISHED) == 3  # 没翻完的以 title-only 导出
 
     second = FakeTranslator()
     assert cli.main(env.argv(), deps=env.deps(translator=second)) == cli.EXIT_OK
@@ -263,6 +280,29 @@ def test_run_never_scores(tmp_path: Path) -> None:
     assert list(env.statuses().values()).count(Status.PUBLISHED) == 3
 
 
+def test_default_run_is_title_only(tmp_path: Path) -> None:
+    """分层翻译：默认 run 只翻标题 + 摘要，不翻正文；文章导出用英文原文、中文正文留空。"""
+    env = Env(tmp_path)
+    translator = FakeTranslator()
+    assert cli.main(env.argv(full_translate=False), deps=env.deps(translator=translator)) == 0
+    # 只翻标题：每个调用都是单个标题单元，正文一段都没送
+    assert translator.calls and all(len(c) == 1 for c in translator.calls)
+    assert not any("Paragraph" in c[0] for c in translator.calls)
+
+    conn = store.connect(env.db)
+    rows = {urlsplit(r["url"]).path: r for r in store.site_rows(conn, SITE)}
+    conn.close()
+    for path in KEPT:
+        row = rows[path]
+        assert row["status"] == Status.PUBLISHED
+        assert row["translator"] is None  # 有标题 + 摘要，没翻全文
+        assert row["title_zh"] and row["summary_zh"]
+
+    main = (env.out / SITE / md_name("/insights/carry-basics")).read_text(encoding="utf-8")
+    assert "中文正文尚未翻译" in main
+    assert "Paragraph 0 about" in main  # 英文原文保留
+
+
 def test_selecting_a_section_later_translates_without_refetch(tmp_path: Path) -> None:
     """勾选一个原来不采集的栏目：下次 run 直接翻译已经抽取过的文章，不重抓。"""
     env = Env(tmp_path)
@@ -301,7 +341,7 @@ def test_real_fetch_against_local_server(tmp_path: Path) -> None:
     with serve() as (base, hits):
         env = Env(tmp_path, base)
         code = cli.main(
-            env.argv("--translator", "fake", "--fetch-delay", "0"),
+            env.argv("--translator", "fake", "--fetch-delay", "0", "--skip", "summarize"),
         )
         assert code == cli.EXIT_OK
     rows = _db_rows(env.db)

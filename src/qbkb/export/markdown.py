@@ -332,6 +332,21 @@ def render(doc: ArticleDoc) -> str:
     return "\n\n".join(p.strip("\n") for p in parts if p) + "\n"
 
 
+def render_untranslated(doc: ArticleDoc, summary: str) -> str:
+    """没有全文译文的主文件：中文标题 + 中文摘要 + 说明 + 英文原文。中文正文留空。"""
+    head = f"# {escape_text(doc.title_zh)}"
+    parts = [frontmatter_text(doc.frontmatter), head, doc.source_line]
+    if summary:
+        parts.append(f"> 中文摘要：{escape_text(summary)}")
+    parts.append("> 注：本文中文正文尚未翻译，以下为英文原文。")
+    body = _join(doc.en_blocks[: doc.n_body])
+    appendix = _join(doc.en_blocks[doc.n_body :])
+    parts.append(body)
+    if appendix:
+        parts += ["---", appendix]
+    return "\n\n".join(p.strip("\n") for p in parts if p) + "\n"
+
+
 def _plain(md: str) -> str:
     return re.sub(r"\s+", " ", md).strip()
 

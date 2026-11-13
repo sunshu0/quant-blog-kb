@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import html
+import json
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from qbkb import store
 from qbkb.models import QuotaExceededError, Segment, Status, Translator, segment_hash
+
+if TYPE_CHECKING:
+    from qbkb.sections import SectionRules
 from qbkb.translate.base import (
     MAX_REQUEST_CHARS,
     MAX_TEXTS_PER_REQUEST,
@@ -356,8 +360,12 @@ def translate_article(
         not stats.needs_review
         and not stats.changed
         and prior in (Status.TRANSLATED, Status.PUBLISHED)
+        and before is not None
+        and before["translator"]
     ):
-        return stats  # 保持原状态：已发布的不降级
+        # 只有「已经翻过全文」的文章才保持原状态不降级；只翻过标题（translator 为空）的文章
+        # 即使全部命中翻译记忆，也要落 translator，标记成全文已翻，否则会被反复选中。
+        return stats
     if stats.needs_review:
         parts = []
         if stats.rejected:
@@ -446,12 +454,55 @@ def estimate_chars(
     return total
 
 
-def missing_titles(conn: sqlite3.Connection, site: str | None = None) -> list[str]:
-    """已经 translated / published、有英文标题但没有中文标题的文章（PR #7 之前翻的）。"""
-    rows = store.list_rows(conn, [Status.TRANSLATED, Status.PUBLISHED], site)
-    return [
-        str(r["url"]) for r in rows if r["title"] and str(r["title"]).strip() and not r["title_zh"]
-    ]
+def missing_titles(
+    conn: sqlite3.Connection,
+    site: str | None = None,
+    rules: SectionRules | None = None,
+) -> list[str]:
+    """有英文标题、还没有中文标题的文章。
+
+    v2 分层翻译：入库时只翻标题，所以 extracted / filtered（还没翻全文的）也在这里；
+    已 translated / published 的是 PR #7 之前翻的、当时没翻标题。
+    给了 rules 就只返回采集栏目里的文章（titles 阶段不翻未选栏目的标题，避免浪费额度）。
+    标题翻译已失败过的（qc_issues 里有 TITLE_FAILED_MARK）不返回：不再重送。
+    """
+    rows = store.list_rows(
+        conn, [Status.EXTRACTED, Status.FILTERED, Status.TRANSLATED, Status.PUBLISHED], site
+    )
+    out: list[str] = []
+    for r in rows:
+        if not r["title"] or not str(r["title"]).strip() or r["title_zh"]:
+            continue
+        if TITLE_FAILED_MARK in _qc_items(r["qc_issues"]):
+            continue
+        url = str(r["url"])
+        if rules is not None and not rules.collects(url, r["section_key"]):
+            continue
+        out.append(url)
+    return out
+
+
+TITLE_FAILED_MARK = "标题翻译失败（结构校验未通过）"
+
+
+def _qc_items(value: str | None) -> list[str]:
+    """qc_issues 是 JSON 字符串数组；解析成列表（异常/非列表时兜底成单元素）。"""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return [value]
+    if isinstance(parsed, list):
+        return [str(x) for x in parsed]
+    return [str(parsed)]
+
+
+def _append_qc_issue(value: str | None, issue: str) -> str:
+    items = _qc_items(value)
+    if issue not in items:
+        items.append(issue)
+    return json.dumps(items, ensure_ascii=False)
 
 
 def backfill_titles(
@@ -459,7 +510,12 @@ def backfill_titles(
 ) -> int:
     """只补翻标题（走翻译记忆，命中就不花额度），返回补上了几篇。
 
-    已发布的文章补上后退回 translated，下次 export 用中文标题重新生成。
+    已发布的文章补上后退回 translated，下次 export 用中文标题重新生成；但只翻过标题、还没翻
+    全文（translator 为空）的文章保持 published 不动，避免造出「translated 却 translator 为空」
+    的坏状态（translated 只表示全文翻过）。
+    标题翻译/结构校验失败（_translate_title 返回 None）只记一次失败：在 qc_issues 里打标记、
+    不改文章状态（needs_review 会让文章从导出里消失），title_zh 留空、导出用英文标题回填；
+    missing_titles 会跳过带这个标记的文章，不再重送。
     额度用完抛 QuotaStopped、后端不可用抛 BackendStopped，已补的都已落库。
     """
     done = 0
@@ -480,9 +536,13 @@ def backfill_titles(
             # 这一篇标题的请求有问题：跳过这一篇（下一轮再试），别拖垮整轮补标题
             continue
         if title_zh is None:
+            # 翻译/结构校验失败：只打标记、不改状态，title_zh 留空（导出用英文标题回填）
+            store.set_fields(
+                conn, url, qc_issues=_append_qc_issue(row["qc_issues"], TITLE_FAILED_MARK)
+            )
             continue
         status = Status(row["status"])
-        if status is Status.PUBLISHED:
+        if status is Status.PUBLISHED and row["translator"]:
             status = Status.TRANSLATED
         store.set_status(conn, url, status, title_zh=title_zh)
         done += 1

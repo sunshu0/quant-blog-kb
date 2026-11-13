@@ -3,6 +3,7 @@
 - 版本：v0.1 初稿（2026-11-11）
 - 状态：已实现（Phase 0–2 和冒烟修复已合并；本地控制台见第 10 节）；第 0 节列出仍待决定的事项。
 - **v2（2026-11-12）**：按栏目采集、采集与筛选分开（老板反馈）。默认流程不再调用 LLM 打分，筛选改为人工选择栏目，见 D13 和 4.9。
+- **v2 分层翻译（2026-11-13）**：入库与全文翻译分开。默认流程变成 discover → fetch → extract → 翻译标题（titles）→ 生成摘要（summarize）→ export，**不翻全文**；全文按清单用 `qbkb translate --url-file` 翻，或用 `qbkb run --full-translate` 恢复旧行为。见 4.5、4.6 和 4.10。
 - 性质：面试小项目，同时作为"工程化 AI 工作流"的试点。
 
 ---
@@ -61,6 +62,8 @@
 ```
 
 **v2（2026-11-12，见 4.9）**：默认流程是 discover → fetch → extract（顺带判定栏目）→ translate → export，**不再有 filter**；translate 只处理采集栏目里的文章。上图的 filter 保留为可选的加工命令 `qbkb filter`，不在 `qbkb run`、控制台和每天自动更新里。
+
+**v2 分层翻译（2026-11-13）**：默认流程改为 discover → fetch → extract → **翻译标题（titles）** → **生成摘要（summarize）** → export，**不翻全文**。全文翻译变成按需的加工步骤：`qbkb translate --url-file 清单`（或 `--url`）只翻列出的文章；`qbkb run --full-translate` 恢复旧的"入库即翻全文"。见 4.10。
 
 每个阶段只处理状态库里"轮到自己"的文章，所以整个流程可以**断点续跑**，而且是**幂等**的：同一条命令跑一次和跑十次，结果一样。
 
@@ -254,6 +257,16 @@ contentType 和 tagline 不一致时记质量提示（播客页的 contentType �
   也不会因为栏目没选就被撤下）；
 - 原始 HTML 不在了的老数据保持原样（分栏目的站点里，它们没有栏目信息，不会被翻译）；
 - 还没重新抽取之前，老数据不会被翻译（translate 只翻栏目在采集列表里的）。
+
+### 4.10 分层翻译（v2，2026-11-13）
+
+入库和全文翻译分开，省下全文翻译额度：
+
+- **默认流程**：`qbkb run`（含控制台「运行」和每天自动更新）跑 discover → fetch → extract → **titles**（只翻标题）→ **summarize**（DeepSeek 摘要，不占翻译额度）→ export。文章的 `translator` 保持为空，状态是 extracted（有中文标题）→ 导出后 published；`title_zh` + `summary_zh` 有值但不等于"全文翻了"。
+- **恢复旧行为**：`qbkb run --full-translate` 把 titles 换成 translate（翻全文）。
+- **按需翻全文**：`qbkb translate --url-file 清单`（或 `--url`）只翻列出的文章全文，开始前打印预计字符数；`--url` / `--url-file` 直接按清单选文章，不管它当前是 extracted 还是只翻过标题的 published。
+- **区分**：有没有全文译文看 `translator` 字段（空 = 只有标题 + 摘要）；状态 `translated` 只表示"全文翻过"。translate（翻全文）还会把"已导出但 translator 为空"的文章重新选进来，所以 `--full-translate` 续跑 / 先入库再补翻都能接上。
+- **导出**：export / table 对没有全文译文的文章正常输出（英文原文 + 中文标题 + 中文摘要，中文正文留空并注明"尚未翻译"），不报错、不退回重翻。
 
 ---
 
