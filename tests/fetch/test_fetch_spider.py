@@ -455,6 +455,17 @@ def test_robots_same_host_scheme_change_is_allowed(
     assert mw.process_request(Request("https://www.example.test/robots.txt")) is None
 
 
+def test_process_request_blocks_cross_host_without_crawler() -> None:
+    """未绑定 crawler（拿不到 spider）时白名单仍要拦跨站请求，不能「失败即放行」。"""
+    mw = HostAllowlistMiddleware("https", "www.example.test")
+    with pytest.raises(IgnoreRequest):
+        mw.process_request(
+            Request("https://unapproved.test/x", cb_kwargs={"article_url": BASE + "alpha"})
+        )
+    # 同站请求照常放行
+    assert mw.process_request(Request(BASE + "alpha")) is None
+
+
 def test_request_stop_sets_reason_and_schedules_engine_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

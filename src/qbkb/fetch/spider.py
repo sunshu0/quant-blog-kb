@@ -234,13 +234,14 @@ class HostAllowlistMiddleware:
     def process_request(self, request: Request) -> None:
         # Scrapy 2.14+ 不再给 process_request 传 spider 参数（新签名），spider 从 crawler 取。
         spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
-        if spider is None:
-            return
-        stop_reason = getattr(spider, "stop_reason", None)
+        # 站点级停止（robots 跨站 / Retry-After 太久）需要 spider；拿不到 spider 时跳过，
+        # 下面的白名单检查仍照常做，绝不「失败即放行」。
+        stop_reason = getattr(spider, "stop_reason", None) if spider is not None else None
         if stop_reason is not None:
-            # 整站已经被叫停（robots 跨站 / Retry-After 太久）：所有后续请求一律 IgnoreRequest，
-            # 由 errback 处理但不记文章失败——这是站点级停止，不是这一篇的问题。
+            # 整站已经被叫停：所有后续请求一律 IgnoreRequest，由 errback 处理但不记文章失败——
+            # 这是站点级停止，不是这一篇的问题。
             raise IgnoreRequest(f"站点已停止抓取：{stop_reason}")
+        # 白名单检查不依赖 spider：scheme + host 不匹配就拦，即使拿不到 spider 也不能放行。
         if self._request_allowed(request):
             return
         article_url = request.cb_kwargs.get("article_url")
@@ -250,11 +251,13 @@ class HostAllowlistMiddleware:
             # 真跨 host 就停掉整站，不能放任 Scrapy 对 robots 失败默认放行、继续抓文章。
             if self._host_allowed(request.url):
                 return
-            spider.request_stop(  # type: ignore[attr-defined]
-                f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则"
-            )
+            if spider is not None:
+                spider.request_stop(  # type: ignore[attr-defined]
+                    f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则"
+                )
             raise IgnoreRequest(f"robots.txt 被重定向到未许可站点 {request.url}")
-        spider.fail_cross_host(str(article_url), request.url)  # type: ignore[attr-defined]
+        if spider is not None:
+            spider.fail_cross_host(str(article_url), request.url)  # type: ignore[attr-defined]
         # 已经记过一次失败：标记一下，errback 别再记第二次（否则失败数和 retries 都会翻倍）
         request.meta[_CROSS_HOST_BLOCKED] = True
         raise IgnoreRequest(f"请求目标 {request.url} 不在许可站点 {self.allowed_host} 内")
