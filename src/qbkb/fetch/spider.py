@@ -199,13 +199,16 @@ class HostAllowlistMiddleware:
     def __init__(self, allowed_scheme: str, allowed_host: str) -> None:
         self.allowed_scheme = (allowed_scheme or "https").lower()
         self.allowed_host = (allowed_host or "").lower().rstrip(".")
+        self._crawler: Crawler | None = None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
         spider = crawler.spider
         scheme = getattr(spider, "allowed_scheme", "https")
         host = getattr(spider, "allowed_domains", [""])[0]
-        return cls(scheme, host)
+        mw = cls(scheme, host)
+        mw._crawler = crawler
+        return mw
 
     def is_allowed(self, url: str) -> bool:
         parts = urlsplit(url)
@@ -228,7 +231,11 @@ class HostAllowlistMiddleware:
             return article_url is not None and same_site(str(article_url), request.url)
         return self.is_allowed(request.url)
 
-    def process_request(self, request: Request, spider: scrapy.Spider) -> None:
+    def process_request(self, request: Request) -> None:
+        # Scrapy 2.14+ 不再给 process_request 传 spider 参数（新签名），spider 从 crawler 取。
+        spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
+        if spider is None:
+            return
         stop_reason = getattr(spider, "stop_reason", None)
         if stop_reason is not None:
             # 整站已经被叫停（robots 跨站 / Retry-After 太久）：所有后续请求一律 IgnoreRequest，

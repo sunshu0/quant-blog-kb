@@ -98,6 +98,13 @@ class _Dummy(scrapy.Spider):
     name = "dummy"
 
 
+class _CrawlerStub:
+    """给直接构造的 HostAllowlistMiddleware 挂一个 spider（新签名从 crawler.spider 取）。"""
+
+    def __init__(self, spider: scrapy.Spider) -> None:
+        self.spider = spider
+
+
 class FakeClock:
     def __init__(self, t: float = 100.0) -> None:
         self.t = t
@@ -358,7 +365,7 @@ def test_cross_host_redirect_is_blocked_and_recorded(
     assert result.dont_filter  # RedirectMiddleware 继承了 dont_filter，Offsite 拦不住
     mw = HostAllowlistMiddleware.from_crawler(crawler)
     with pytest.raises(IgnoreRequest):
-        mw.process_request(result, spider)
+        mw.process_request(result)
     row = store.get_article(conn, url)
     assert row is not None and row["status"] == Status.FAILED
     assert "unapproved.test" in str(row["error"])
@@ -381,7 +388,7 @@ def test_scheme_downgrade_redirect_is_blocked(
     )
     assert isinstance(result, Request) and result.url.startswith("http://")
     with pytest.raises(IgnoreRequest):
-        HostAllowlistMiddleware.from_crawler(crawler).process_request(result, spider)
+        HostAllowlistMiddleware.from_crawler(crawler).process_request(result)
     assert store.get_article(conn, url)["status"] == Status.FAILED  # type: ignore[index]
 
 
@@ -395,7 +402,7 @@ def test_same_host_redirect_is_allowed(db: tuple[Path, sqlite3.Connection], tmp_
     )
     assert isinstance(result, Request) and result.url == BASE + "moved"
     # 同站（含子域）与同 scheme 的请求放行，不写状态库
-    assert HostAllowlistMiddleware.from_crawler(crawler).process_request(result, spider) is None
+    assert HostAllowlistMiddleware.from_crawler(crawler).process_request(result) is None
     assert store.get_article(conn, url)["status"] == Status.DISCOVERED  # type: ignore[index]
 
 
@@ -406,9 +413,10 @@ def test_cross_host_rejection_is_counted_once(
     counts: Counter[Kind] = Counter()
     spider = _spider(conn, tmp_path, counts)
     mw = HostAllowlistMiddleware("https", "www.example.test")
+    mw._crawler = _CrawlerStub(spider)  # type: ignore[assignment]
     request = Request("https://unapproved.test/private", cb_kwargs={"article_url": BASE + "alpha"})
     with pytest.raises(IgnoreRequest):
-        mw.process_request(request, spider)
+        mw.process_request(request)
     row = store.get_article(conn, BASE + "alpha")
     assert row is not None and row["retries"] == 1
     assert counts[Kind.FAILED] == 1
@@ -428,8 +436,9 @@ def test_robots_request_without_article_url_is_not_recorded_as_article(
     mw = HostAllowlistMiddleware("https", "www.example.test")
     # robots 请求没有 article_url：跨 host 被拦时不能当文章记失败（之前会 KeyError），而是停掉整站
     spider = _spider(conn, tmp_path, Counter())
+    mw._crawler = _CrawlerStub(spider)  # type: ignore[assignment]
     with pytest.raises(IgnoreRequest):
-        mw.process_request(Request("https://unapproved.test/robots.txt"), spider)
+        mw.process_request(Request("https://unapproved.test/robots.txt"))
     assert spider.stop_reason is not None  # 记下停止原因
     # 没有文章被误标失败
     for slug in ("alpha", "beta"):
@@ -442,12 +451,8 @@ def test_robots_same_host_scheme_change_is_allowed(
     _, conn = db
     mw = HostAllowlistMiddleware("http", "www.example.test")
     # http 站点把 robots.txt 规范重定向到 https（同 host 换 scheme）：对 robots 放行
-    assert (
-        mw.process_request(
-            Request("https://www.example.test/robots.txt"), _spider(conn, tmp_path, Counter())
-        )
-        is None
-    )
+    mw._crawler = _CrawlerStub(_spider(conn, tmp_path, Counter()))  # type: ignore[assignment]
+    assert mw.process_request(Request("https://www.example.test/robots.txt")) is None
 
 
 def test_request_stop_sets_reason_and_schedules_engine_close(
@@ -502,9 +507,10 @@ def test_host_allowlist_blocks_all_requests_after_stop(
     spider = _spider(conn, tmp_path, Counter())
     spider.stop_reason = "测试停止"
     mw = HostAllowlistMiddleware("https", "www.example.test")
+    mw._crawler = _CrawlerStub(spider)  # type: ignore[assignment]
     request = Request(BASE + "alpha", cb_kwargs={"article_url": BASE + "alpha"})
     with pytest.raises(IgnoreRequest):
-        mw.process_request(request, spider)
+        mw.process_request(request)
     # 整站停止不是这一篇的失败：没有记失败
     assert store.get_article(conn, BASE + "alpha")["status"] == Status.DISCOVERED  # type: ignore[index]
 

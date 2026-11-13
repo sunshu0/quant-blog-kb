@@ -114,3 +114,11 @@ sections:
 pdf:
   selector: ".sidebar ul.file-list a"
   min_chars: 3000
+  # 封面页混进正文的联系方式等噪音行：整行命中就删（通用代码不写死 CFM，这里只配规则）。
+  # 每行是一个正则，按 PDF 去首尾空白后的单行匹配；命中的行整个删掉，不进正文。
+  noise_patterns:
+    - '^www\.cfm\.fr$'
+    - '^Call us\b'
+    - '^Email us\b'
+    - '^Contact details$'
+    - '^Technical Note$'

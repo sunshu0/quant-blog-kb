@@ -70,6 +70,14 @@ def test_load_pdf_rules_defaults() -> None:
     assert rules is not None
     assert rules.min_chars == 500
     assert rules.max_size_bytes == 20 * 1024 * 1024
+    assert rules.noise_patterns == ()
+
+
+def test_load_pdf_rules_reads_noise_patterns() -> None:
+    rules = load_pdf_rules(_site({"selector": ".file-list a", "noise_patterns": [r"^www\.x$"]}))
+    assert rules is not None
+    assert len(rules.noise_patterns) == 1
+    assert rules.noise_patterns[0].pattern == r"^www\.x$"
 
 
 @pytest.mark.parametrize(
@@ -80,6 +88,9 @@ def test_load_pdf_rules_defaults() -> None:
         {"selector": ".a", "min_chars": -1},
         {"selector": ".a", "min_chars": True},
         {"selector": ".a", "max_size_mb": 0},
+        {"selector": ".a", "noise_patterns": "not-a-list"},
+        {"selector": ".a", "noise_patterns": [""]},
+        {"selector": ".a", "noise_patterns": ["(unclosed"]},
     ],
 )
 def test_bad_pdf_config_raises(pdf: dict) -> None:
@@ -534,25 +545,37 @@ class _StubSpider:
         pass
 
 
+class _CrawlerStub:
+    """给直接构造的 HostAllowlistMiddleware 挂一个 spider（新签名从 crawler.spider 取）。"""
+
+    def __init__(self, spider: object) -> None:
+        self.spider = spider
+
+
+def _mw_with_spider(mw: HostAllowlistMiddleware, spider: object) -> HostAllowlistMiddleware:
+    mw._crawler = _CrawlerStub(spider)  # type: ignore[assignment]
+    return mw
+
+
 def test_strict_host_middleware_rejects_subdomain() -> None:
-    mw = HostAllowlistMiddleware("http", "example.test")
+    mw = _mw_with_spider(HostAllowlistMiddleware("http", "example.test"), _StubSpider())
     req = _strict_request("http://child.example.test/outside.pdf")
     with pytest.raises(IgnoreRequest):
-        mw.process_request(req, _StubSpider())  # type: ignore[arg-type]
+        mw.process_request(req)
 
 
 def test_strict_host_middleware_allows_same_host() -> None:
-    mw = HostAllowlistMiddleware("http", "example.test")
-    mw.process_request(_strict_request("http://example.test/x.pdf"), _StubSpider())  # type: ignore[arg-type]
+    mw = _mw_with_spider(HostAllowlistMiddleware("http", "example.test"), _StubSpider())
+    mw.process_request(_strict_request("http://example.test/x.pdf"))
 
 
 def test_default_middleware_still_allows_subdomain() -> None:
     # 不带严格标记的请求（HTML）保留原有允许子域策略
-    mw = HostAllowlistMiddleware("http", "example.test")
+    mw = _mw_with_spider(HostAllowlistMiddleware("http", "example.test"), _StubSpider())
     req = Request(
         "http://child.example.test/x.html", cb_kwargs={"article_url": "http://example.test/a"}
     )
-    mw.process_request(req, _StubSpider())  # type: ignore[arg-type]
+    mw.process_request(req)
 
 
 def test_pdf_subdomain_redirect_not_requested(tmp_path: Path) -> None:
@@ -652,6 +675,9 @@ def test_cfm_pdf_config_reads_sidebar_selector_and_min_chars() -> None:
     assert rules is not None
     assert rules.selector == ".sidebar ul.file-list a"
     assert rules.min_chars == 3000
+    # 封面页联系方式等噪音行：配置里有规则，通用代码只透传正则、不写死 CFM
+    assert rules.noise_patterns
+    assert any(p.pattern.startswith("^www\\.") for p in rules.noise_patterns)
 
 
 CFM_PAPER_HTML = (
