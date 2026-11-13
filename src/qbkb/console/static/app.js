@@ -212,7 +212,7 @@ function renderToc() {
   browse.visible = new Set();
   if (browse.onlyPicked && !browse.picked.size) browse.onlyPicked = false;
   if (browse.onlyPicked) {
-    renderPickedList(list);
+    renderPickedList(list, q);
     toc.scrollTop = scroll;
     updateSelectBar();
     return;
@@ -241,7 +241,7 @@ function renderToc() {
 }
 
 // 「只看已选的」：把勾选的文章（不管在哪个站点、搜不搜得到）平铺出来，可逐个取消
-function renderPickedList(list) {
+function renderPickedList(list, q) {
   $("toc-sites").hidden = true;
   const back = el("button", { type: "button", className: "ghost small", textContent: "← 回到全部文章" });
   back.addEventListener("click", () => { browse.onlyPicked = false; renderToc(); });
@@ -250,7 +250,7 @@ function renderPickedList(list) {
   const box = el("div", { className: "sec-fold picked-list" });
   for (const u of browse.picked) {
     const a = browse.byUrl.get(u);
-    if (!a) continue;
+    if (!a || (q && !matches(a, q))) continue;
     browse.visible.add(u);
     box.append(articleCard(a));
   }
@@ -398,7 +398,7 @@ function fmtNum(n) {
 }
 
 // 简单的确认框：返回 true / false。showOk=false 时只有「知道了」。
-function askConfirm(title, lines, okLabel, showOk) {
+function askConfirm(title, lines, okLabel, showOk, okDisabled) {
   return new Promise((resolve) => {
     $("modal-title").textContent = title;
     const body = $("modal-body");
@@ -413,6 +413,7 @@ function askConfirm(title, lines, okLabel, showOk) {
       }
     }
     $("modal-ok").hidden = !showOk;
+    $("modal-ok").disabled = Boolean(okDisabled);
     $("modal-ok").textContent = okLabel;
     $("modal-cancel").textContent = showOk ? "取消" : "知道了";
     $("modal").hidden = false;
@@ -476,7 +477,7 @@ async function translateSelected(urls) {
     } else if (hasQuota && typeof d.chars === "number" && d.chars > d.quota_left) {
       lines.push({ text: SOFT, soft: true });
     }
-    if (!(await askConfirm("确认翻译全文", lines, `开始翻译 ${n} 篇`, true))) return;
+    if (!(await askConfirm("确认翻译全文", lines, `开始翻译 ${n} 篇`, true, !d.backend))) return;
     const r = await api("/api/translate", { urls, dry_run: false });
     for (const u of urls) browse.picked.delete(u);
     syncChecks();
@@ -527,6 +528,8 @@ async function openArticle(url, view) {
     $("meta-translate").hidden = !(known && !d.translated) || browse.legacy;
     // 只有摘要的文章：没有翻译时间，也没有中英对照可看
     const brief = known && !d.translated;
+    // 只有摘要的文章没有中英对照，停在 bi 视图时切回中文
+    if (brief && state.view !== "zh") return openArticle(url, "zh");
     $("meta-translated").hidden = brief;
     document.querySelector(".views").hidden = brief;
     const a = browse.byUrl.get(url);
