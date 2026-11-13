@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import date
 
 import pytest
 from lxml.html import document_fromstring
@@ -116,12 +117,22 @@ def test_page_key_parts_must_exist() -> None:
 
 
 def test_man_config_lists_sections_all_uncollected() -> None:
-    """用户还没勾选：man 的栏目全部 collect: false、标"待调研"（理由见 man.yaml 的注释）。"""
+    """用户已决定：只采「独立文章」（article），其余栏目保持 collect: false、标"待调研"。"""
     rules = load_section_rules(config.load_site("man"))
     ids = [s.id for s in rules.sections]
     assert "a-moment-in-macro" in ids and "views-from-the-floor" in ids and "article" in ids
-    assert not any(s.collect for s in rules.sections)
-    assert all(s.status == "待调研" for s in rules.sections)
+    collected = [s.id for s in rules.sections if s.collect]
+    assert collected == ["article"]
+    assert all(s.status == "待调研" for s in rules.sections if not s.collect)
+    article = rules.by_id("article")
+    assert article is not None and article.collect and article.status == "已选择"
+    assert article.survey == {
+        "sampled": 20,
+        "wanted": 10,
+        "ratio": 0.50,
+        "date": date(2026, 11, 13),
+        "by": "孙硕（AI 初标，用户决定）",
+    }
     macro = rules.by_id("a-moment-in-macro")
     assert macro is not None and macro.url_prefix == "/insights/a-moment-in-macro"
     vftf = rules.by_key("ARTICLE | VIEWS FROM THE FLOOR")

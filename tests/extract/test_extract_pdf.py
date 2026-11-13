@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -107,6 +109,37 @@ def test_long_paragraph_splits_at_sentences() -> None:
     assert max(len(p) for p in out) <= 2000
 
 
+def test_noise_patterns_remove_cover_contact_lines() -> None:
+    """站点配置的 PDF 噪音行（封面联系方式等）整行删掉，不进正文。"""
+    pdf = make_pdf(
+        [
+            "www.cfm.fr\nCall us +33 1 49 49 59 49\nEmail us cfm@cfm.fr\n"
+            "Contact details\nTechnical Note\n\nReal body paragraph one.",
+            "Second page body paragraph.",
+        ]
+    )
+    patterns = [
+        re.compile(r"^www\.cfm\.fr$"),
+        re.compile(r"^Call us\b"),
+        re.compile(r"^Email us\b"),
+        re.compile(r"^Contact details$"),
+        re.compile(r"^Technical Note$"),
+    ]
+    out = extract_pdf_text(pdf, noise_patterns=patterns)
+    joined = " ".join(out)
+    assert "www.cfm.fr" not in joined
+    assert "Call us" not in joined
+    assert "cfm@cfm.fr" not in joined
+    assert "Contact details" not in joined
+    assert "Real body paragraph one." in joined
+    assert "Second page body paragraph." in joined
+
+
+def test_pypdf_warnings_are_suppressed() -> None:
+    """pypdf 的 fontTools 缺失等非致命 WARNING 要压掉，只留 ERROR（不吞真正的错误）。"""
+    assert logging.getLogger("pypdf").level == logging.ERROR
+
+
 # ---- extract_one：接进 segments ----
 
 SHORT_HTML = (
@@ -186,6 +219,18 @@ def test_long_body_ignores_pdf(conn: sqlite3.Connection, tmp_path: Path) -> None
     joined = " ".join(s.html for s in segments)
     assert "First full paragraph of the body." not in joined
     assert "word" in joined
+
+
+def test_short_body_with_pdf_does_not_flag_short(conn: sqlite3.Connection, tmp_path: Path) -> None:
+    """正文太短按接上 PDF 后的总正文判断：短摘要 + 足够长的 PDF 全文不再报「正文太短」。"""
+    long_pdf = make_pdf(["word " * 600])  # 约 3000 字符，超过 min_chars=1000
+    _article(conn, tmp_path, URL, SHORT_HTML, long_pdf)
+    rules = ExtractRules(site="example", min_chars=1000)
+    issues = extract_one(
+        conn, URL, rules, root=tmp_path, pdf_rules=PdfRules(".pdf a", min_chars=100)
+    )
+    assert all("正文太短" not in i for i in issues)
+    assert any("PDF 正文" in i for i in issues)
 
 
 def test_short_body_without_pdf_falls_back_normally(

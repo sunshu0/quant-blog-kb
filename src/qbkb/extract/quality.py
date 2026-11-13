@@ -15,14 +15,20 @@ def keyword_pattern(keyword: str) -> re.Pattern[str]:
     return re.compile(rf"(?<!\w){words}(?!\w)", re.IGNORECASE)
 
 
-def check_quality(result: Extraction, rules: ExtractRules) -> list[str]:
-    """返回问题列表；空列表表示没发现问题。只检查正文，不检查附在后面的版权声明。"""
+def check_quality(
+    result: Extraction, rules: ExtractRules, *, total_chars: int | None = None
+) -> list[str]:
+    """返回问题列表；空列表表示没发现问题。只检查正文，不检查附在后面的版权声明。
+
+    total_chars：正文总字符数。缺省从网页正文段落算；接上 PDF 全文时，调用方把网页正文 +
+    PDF 全文的总字符数传进来，避免短摘要被误报「正文太短」（正文太短按接上 PDF 后的总正文判断）。
+    """
     issues: list[str] = []
     meta = result.article.meta
     body = result.article.segments[: result.n_body]
     texts = [block_text(s.html) for s in body]
 
-    chars = sum(len(t) for t in texts)
+    chars = sum(len(t) for t in texts) if total_chars is None else total_chars
     if chars < rules.min_chars:
         issues.append(f"正文太短：{chars} 字符（下限 {rules.min_chars}）")
     for kw in rules.noise_keywords:

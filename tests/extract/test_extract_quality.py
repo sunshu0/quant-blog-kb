@@ -71,3 +71,13 @@ def test_keyword_matches_whole_words_only() -> None:
     assert not p.search("eat less cookies")
     assert not p.search("fortunecookie")
     assert keyword_pattern("You are leaving").search("you  are\nleaving now")
+
+
+def test_total_chars_override_skips_short_body_flag() -> None:
+    """接上 PDF 全文后，正文太短按总字符数判断：短摘要 + PDF 全文不再报「正文太短」。"""
+    rules = _rules(templates=[TEMPLATE], min_chars=1000)
+    html = _page('<h1>T</h1><p class="date">2024-01-01</p><div id="body"><p>short</p></div>')
+    result = extract_full(html, URL, rules)
+    assert "正文太短" in check_quality(result, rules)[0]
+    issues = check_quality(result, rules, total_chars=5000)
+    assert "正文太短" not in " ".join(issues)

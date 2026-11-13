@@ -8,6 +8,7 @@ extract 阶段读 `pdf_path` 决定要不要用 PDF 正文（`load_pdf_rules` �
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -31,6 +32,8 @@ class PdfRules:
     selector: str
     min_chars: int = DEFAULT_MIN_CHARS
     max_size_bytes: int = int(DEFAULT_MAX_SIZE_MB * 1024 * 1024)
+    # 封面页混进正文的噪音行（联系方式等），整行命中就删；通用代码不写死具体站点
+    noise_patterns: tuple[re.Pattern[str], ...] = ()
 
 
 def load_pdf_rules(site: SiteConfig) -> PdfRules | None:
@@ -57,10 +60,22 @@ def load_pdf_rules(site: SiteConfig) -> PdfRules | None:
         or max_size_mb <= 0
     ):
         raise ValueError(f"站点 {site.name}: pdf.max_size_mb 必须是正数")
+    noise_patterns = raw.get("noise_patterns", [])
+    if not isinstance(noise_patterns, list) or not all(
+        isinstance(p, str) and p for p in noise_patterns
+    ):
+        raise ValueError(f"站点 {site.name}: pdf.noise_patterns 必须是非空正则字符串列表")
+    compiled: list[re.Pattern[str]] = []
+    for p in noise_patterns:
+        try:
+            compiled.append(re.compile(p))
+        except re.error as e:
+            raise ValueError(f"站点 {site.name}: pdf.noise_patterns 正则无效：{p!r}（{e}）") from e
     return PdfRules(
         selector=selector,
         min_chars=min_chars,
         max_size_bytes=int(max_size_mb * 1024 * 1024),
+        noise_patterns=tuple(compiled),
     )
 
 

@@ -12,10 +12,17 @@
 from __future__ import annotations
 
 import io
+import logging
 import re
 from collections import Counter
+from collections.abc import Sequence
 
 from pypdf import PdfReader
+
+# pypdf 遇到缺 fontTools 的 CFF Type1 字体会打大量 WARNING（"fontTools is required to
+# fully parse..."），只是降级解析、不是错误。把 pypdf 整包的日志级别提到 ERROR：
+# 只留它真正的错误，不吞错误、也不让这类非致命警告刷屏。
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # 超过这个字符数的段落按句号切分，避免单段太长不好翻译
 MAX_PARAGRAPH_CHARS = 2000
@@ -144,8 +151,11 @@ def _split_long(paragraphs: list[str], limit: int = MAX_PARAGRAPH_CHARS) -> list
     return out
 
 
-def extract_pdf_text(pdf_bytes: bytes) -> list[str]:
-    """PDF 字节 → 段落文本列表。失败抛 PdfExtractError / NoTextLayerError。"""
+def extract_pdf_text(pdf_bytes: bytes, noise_patterns: Sequence[re.Pattern[str]] = ()) -> list[str]:
+    """PDF 字节 → 段落文本列表。失败抛 PdfExtractError / NoTextLayerError。
+
+    noise_patterns：站点配置的 PDF 噪音行（封面联系方式等）；整行命中就删，不进正文。
+    """
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         raw_pages = [page.extract_text() or "" for page in reader.pages]
@@ -175,6 +185,8 @@ def extract_pdf_text(pdf_bytes: bytes) -> list[str]:
                 flush()
                 continue
             line = raw_line.strip()
+            if any(p.search(line) for p in noise_patterns):
+                continue  # 站点配置的噪音行（封面联系方式等），整行删掉
             norm = _norm(_strip_page_number(line))
             is_header = idx < _EDGE_LINES
             is_footer = n_lines > _EDGE_LINES and idx >= n_lines - _EDGE_LINES

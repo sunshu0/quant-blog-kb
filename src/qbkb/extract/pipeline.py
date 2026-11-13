@@ -101,11 +101,9 @@ def extract_one(
         raise KeyError(url)
     raw = _raw_file(row["raw_path"], root).read_bytes()
     result = extract_full(raw, url, rules)
-    issues = check_quality(result, rules)
     sec_rules = sections or SectionRules(site=rules.site)
     raw_text = decode_html(raw)
     page = page_section(document_fromstring(raw_text), raw_text, url, sec_rules)
-    issues += page.issues
     section = sec_rules.classify(url, page.key)
     art = result.article
 
@@ -114,11 +112,17 @@ def extract_one(
     keep = art.segments[result.n_body :]
     body_chars = sum(len(block_text(s.html)) for s in summary)
     pdf_segments: tuple[Segment, ...] = ()
+    pdf_chars = 0
     if pdf_rules is not None and row["pdf_path"] and body_chars < pdf_rules.min_chars:
         pdf_bytes = _raw_file(row["pdf_path"], root).read_bytes()
-        paragraphs = extract_pdf_text(pdf_bytes)
+        paragraphs = extract_pdf_text(pdf_bytes, noise_patterns=pdf_rules.noise_patterns)
         pdf_segments = tuple(Segment(idx=0, html=_paragraph_html(p)) for p in paragraphs)
+        pdf_chars = sum(len(p) for p in paragraphs)
+    # 正文太短按接上 PDF 后的总正文判断：短摘要 + PDF 全文不再误报
+    issues = check_quality(result, rules, total_chars=body_chars + pdf_chars)
+    if pdf_segments:
         issues.append("PDF 正文：公式、表格按原文文字提取，可能不完整")
+    issues += page.issues
     segments = _reindex((*summary, *pdf_segments, *keep))
     n_body = len(summary) + len(pdf_segments)
 

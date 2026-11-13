@@ -14,6 +14,9 @@ compliance:
 base_url: https://www.man.com
 # 输出 frontmatter 的 firm 字段和来源说明里用的机构名
 firm: Man Group
+# 两次请求的最小间隔（秒）。robots.txt 没写 Crawl-delay，但抽样抓取时用 10.5 秒间隔
+# 全程没遇 403/429（见 D:\dev\qbkb_smoke\man\man-survey.md 第 1 节），沿用同样的礼貌间隔。
+crawl_delay: 10.5
 
 discover:
   sitemap: https://www.man.com/sitemap.xml
@@ -80,12 +83,12 @@ extract:
         - "#article-body-text .digital-article"
 
 # 栏目（design.md 4.8）。采集阶段只按这里的 collect 决定翻译哪些文章，不做任何价值判断。
-# 调研依据：D:\dev\qbkb_smoke\research-v2.md 第 1 节（58 页样本 + sitemap 的网址计数，2026-11-12）。
+# 调研依据：D:\dev\qbkb_smoke\man\man-survey.md（129 篇抽样，2026-11-13）。
 #
-# collect 现在全部是 false、status 是"待调研"：用户还没有勾选栏目。全部 true 的话，每天的自动
-# 更新会把约 1000 篇全部送去翻译（估计 1500 万字符以上，远超免费额度），而且没法撤回；全部 false
-# 时最多是"抓了、没翻译"，勾选后下一次运行自动补上（不重抓）。调研用 `qbkb sections --site man`。
-# 勾选后把 status 改成"已调研"，survey 填上调研记录。
+# 用户 2026-11-13 看完抽样表后决定：只整栏采集「独立文章」（article）。它「要」占比 50%，
+# 没过 70% 门槛（量化方法论内容最集中的栏目，但混入约一半宏观/webinar，用户仍决定采集）。
+# 其余栏目保持 false、待调研，不采集。勾选后的下一次运行自动补上（不重抓）。
+# 调研用 `qbkb sections --site man`；勾选后把 status 改成"已调研"，survey 填上调研记录。
 sections:
   # Man 的文章网址是平铺的 /insights/<slug>，看不出栏目：栏目 = tagline 的"类型 + 系列名"。
   # tagline 格式"类型 | 时长 | 系列名"，时长和系列名都可能没有：
@@ -111,14 +114,14 @@ sections:
       name: A Moment in Macro（宏观博客，模板不同）
       url_prefix: /insights/a-moment-in-macro
       collect: false
-      status: 待调研 # 约 5 篇；v1 里按"宏观周评"整栏排除
+      status: 待调研 # 约 4 篇；v1 里按"宏观周评"整栏排除
       survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
     - id: article
       name: 独立文章（ARTICLE，无系列）
       key: ARTICLE
-      collect: false
-      status: 待调研 # 约 350–450 篇，量化方法论类文章最集中的地方
-      survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
+      collect: true
+      status: 已选择 # 约 509 篇，量化方法论类文章最集中的地方；抽样 50% 未过 70% 门槛，用户仍决定采集
+      survey: {sampled: 20, wanted: 10, ratio: 0.50, date: 2026-11-13, by: "孙硕（AI 初标，用户决定）"}
     - id: views-from-the-floor
       name: Views From the Floor（每周市场评论）
       key: ARTICLE | VIEWS FROM THE FLOOR
@@ -158,6 +161,6 @@ sections:
       name: 视频（VIDEO，无系列，含 AHL Explains）
       key: VIDEO
       collect: false
-      status: 待调研 # 约 60–100 篇
+      status: 待调研 # 约 16 篇（13 个 AHL Explains + 3 个 webinar）
       survey: {sampled: null, wanted: null, ratio: null, date: null, by: null}
       estimate: ['^ahl-explains', 'video', 'webinar']

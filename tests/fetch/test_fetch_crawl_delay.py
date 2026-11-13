@@ -61,3 +61,9 @@ def test_cfm_config_obeys_robots_crawl_delay() -> None:
     """cfm.com 的 robots.txt 写了 Crawl-delay: 10。"""
     delay = site_crawl_delay(config.load_site("cfm").raw)
     assert delay is not None and delay >= 10 > DOWNLOAD_DELAY_SECONDS
+
+
+def test_man_config_has_crawl_delay() -> None:
+    """man.com 的 robots.txt 没写 Crawl-delay，但站点配置仍要求 10.5 秒礼貌间隔。"""
+    delay = site_crawl_delay(config.load_site("man").raw)
+    assert delay == 10.5
