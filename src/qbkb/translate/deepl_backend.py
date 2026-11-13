@@ -163,12 +163,17 @@ class DeepLTranslator:
         """翻译记忆的 backend 键，带目标语言：换了目标语言不会命中别的语言的译文。"""
         return f"deepl:{self.target_lang}"
 
-    def request_units(self, html: str) -> tuple[int, int]:
+    def request_units(
+        self, html: str, glossary: Mapping[str, str] | None = None
+    ) -> tuple[int, int]:
         """这一段会展开成几个翻译单元、总长多少（分行 + 脚注占位之后）。
 
         pipeline 用单元数和总长两个维度分批，保证一批正好对应后端的一个请求，不会因为
         单元数超限（脚注列表分行后一行一个单元）被后端再切成多个请求。
+        glossary 对 DeepL 没有影响（术语表在服务端，不改变送出的长度），只为了和 Azure
+        后端的 request_units 保持同一签名。
         """
+        del glossary
         plan = split_lines(html)
         pieces = plan.lines if plan is not None else [html]
         lengths = [len(protect_sups(p)) for p in pieces]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import json
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
@@ -21,7 +21,6 @@ from qbkb.translate.base import (
     ArticleTranslationError,
     TranslatorUnavailableError,
     chunk_units,
-    count_chars,
 )
 from qbkb.translate.fixed import FIXED_FILE, is_interview, untranslated_units
 from qbkb.translate.footnotes import repair_marks, sent_length
@@ -32,16 +31,33 @@ from qbkb.translate.structure import plain_text, same_structure
 CONTEXT_CHARS = 1_200
 
 
-def _unit_info(translator: Translator, html: str) -> tuple[int, int]:
+def _unit_info(translator: Translator, html: str, glossary: Mapping[str, str]) -> tuple[int, int]:
     """这一段会展开成几个翻译单元、总长多少。
 
-    后端能报就用后端的（DeepL 把分行段落拆成一行一个单元，50 条上限按单元数算）；
-    没有这个方法的后端（假后端等）退回「一段一个单元、长度用脚注占位展开后的」。
+    后端能报就用后端的（DeepL 把分行段落拆成一行一个单元、50 条上限按单元数算；
+    Azure 把术语标记 / 分行展开后的总长一起报）；没有这个方法的后端（假后端等）退回
+    「一段一个单元、长度用脚注占位展开后的」。
     """
     fn = getattr(translator, "request_units", None)
     if callable(fn):
-        return cast("Callable[[str], tuple[int, int]]", fn)(html)
+        return cast("Callable[[str, Mapping[str, str]], tuple[int, int]]", fn)(html, glossary)
     return 1, sent_length(html)
+
+
+def _sent_chars(translator: Translator, texts: Sequence[str], glossary: Mapping[str, str]) -> int:
+    """这批文本实际送出去的总长度（后端加词典标记 / 脚注占位 / 行拆分后求和）。
+
+    Azure 的 request_units 含术语标记、DeepL 的是脚注占位展开后的长度；没有这个方法
+    的后端（假后端等，计费按原文长度）退回原文 HTML 长度。stats.chars 和 estimate_chars
+    都用它，让「送出 N 字符」「预计约 N 字符」和后端真实计费一致。
+    """
+    fn = getattr(translator, "request_units", None)
+    if callable(fn):
+        return sum(
+            cast("Callable[[str, Mapping[str, str]], tuple[int, int]]", fn)(t, glossary)[1]
+            for t in texts
+        )
+    return sum(len(t) for t in texts)
 
 
 @dataclass(slots=True)
@@ -161,7 +177,7 @@ def _translate_title(
     if found is not None:
         return found
     (tgt,) = _call(translator, [unit], glossary, context)
-    stats.chars += len(unit)
+    stats.chars += _sent_chars(translator, [unit], glossary)
     if not same_structure(unit, tgt):
         return None
     store.tm_put(conn, segment_hash(unit), translator.name, unit, tgt, glossary.version_for(unit))
@@ -242,6 +258,8 @@ def translate_article(
     seen: set[str] = set()
     interview = before is not None and is_interview(before["tags"])
     fixed_units = untranslated_units(segments, glossary.fixed, interview=interview)
+    # 单次请求的字符上限：后端可能比 pipeline 更保守（Azure 的限速窗口），取较小的
+    request_limit = min(max_batch_chars, getattr(translator, "request_limit", max_batch_chars))
     for pos, seg in enumerate(segments):
         h = seg.src_hash
         if h in seen:
@@ -283,8 +301,8 @@ def translate_article(
             # 不自动重翻，继续等人工复查
             rejected.add(h)
             continue
-        n_units, unit_chars = _unit_info(translator, seg.html)
-        if n_units > MAX_TEXTS_PER_REQUEST or unit_chars > max_batch_chars:
+        n_units, unit_chars = _unit_info(translator, seg.html, glossary)
+        if n_units > MAX_TEXTS_PER_REQUEST or unit_chars > request_limit:
             oversized.add(h)
             continue
         pending.append(pos)
@@ -301,17 +319,17 @@ def translate_article(
         stats.oversized = [s.idx for s in segments if s.src_hash in oversized]
 
     texts = [segments[p].html for p in pending]
-    # 按"实际送出去的单元数和长度"（分行 + 脚注占位展开后）分批，而不是原文段落数/长度：
+    # 按"实际送出去的单元数和长度"（分行 + 脚注占位 / 术语标记展开后）分批，而不是原文段落数/长度：
     # 保证一批只对应后端的一个请求，后一块失败时前面已计费的译文已经逐批落进翻译记忆、不会整个丢掉
-    info = [_unit_info(translator, t) for t in texts]
+    info = [_unit_info(translator, t, glossary) for t in texts]
     counts = [n for n, _ in info]
     lengths = [n for _, n in info]
     try:
-        for chunk in chunk_units(counts, lengths, MAX_TEXTS_PER_REQUEST, max_batch_chars):
+        for chunk in chunk_units(counts, lengths, MAX_TEXTS_PER_REQUEST, request_limit):
             batch = [pending[i] for i in chunk]
             batch_texts = [texts[i] for i in chunk]
             out = _call(translator, batch_texts, glossary, _context(segments, batch, context_chars))
-            stats.chars += count_chars(batch_texts)
+            stats.chars += _sent_chars(translator, batch_texts, glossary)
             bad: list[int] = []
             # 先把好段落存下来，再重翻坏的：重翻时额度用完，已计费的好段落也不会丢
             for pos, tgt in zip(batch, out, strict=True):
@@ -323,7 +341,7 @@ def translate_article(
                 seg = segments[pos]
                 stats.retried += 1
                 (tgt,) = _call(translator, [seg.html], glossary, "")
-                stats.chars += len(seg.html)
+                stats.chars += _sent_chars(translator, [seg.html], glossary)
                 if same_structure(seg.html, tgt):
                     save(pos, tgt)
                 else:
@@ -371,7 +389,10 @@ def translate_article(
         if stats.rejected:
             parts.append("结构校验未通过的段落 " + ", ".join(map(str, stats.rejected)))
         if stats.oversized:
-            parts.append("超过单次请求上限的段落 " + ", ".join(map(str, stats.oversized)))
+            parts.append(
+                f"超过单次请求上限（{request_limit} 字符）的段落 "
+                + ", ".join(map(str, stats.oversized))
+            )
         error = "；".join(parts)
         store.set_status(
             conn,
@@ -429,7 +450,7 @@ def _title_units(conn: sqlite3.Connection, urls: Iterable[str]) -> list[str]:
 def estimate_chars(
     conn: sqlite3.Connection,
     urls: Iterable[str],
-    backend: str,
+    translator: Translator,
     glossary: Glossary,
     *,
     retry_rejected: bool = True,
@@ -438,8 +459,10 @@ def estimate_chars(
 
     和 base.FREE_MONTHLY_CHARS 比较，就知道这个月的额度够不够。
     retry_rejected=False 时不算同一术语版本下已有 rejected 译文的段落（translate 不会重翻它们）。
-    按送出去的 HTML 长度算，是上界。
+    按后端实际送出的长度算（Azure 含术语标记、DeepL 含脚注占位），不是原文长度，
+    这样「预计约 N 字符」和后端真实计费一致。
     """
+    backend = translator.name
     urls = list(urls)
     units = [seg.html for seg in _unique_segments(conn, urls, glossary)] + _title_units(conn, urls)
     total = 0
@@ -450,7 +473,7 @@ def estimate_chars(
             entry = store.tm_lookup(conn, segment_hash(unit), backend, glossary.version_for(unit))
             if entry is not None:
                 continue
-        total += len(unit)
+        total += _sent_chars(translator, [unit], glossary)
     return total
 
 

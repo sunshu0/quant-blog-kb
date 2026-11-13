@@ -141,9 +141,12 @@ def _filter_opts(p: argparse.ArgumentParser) -> None:
 def _translate_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--translator",
-        choices=("deepl", "fake", "demo"),
+        choices=("deepl", "azure", "fake", "demo"),
         default="deepl",
-        help="翻译后端（demo：控制台演示模式用，示例文章自带中文，不联网）",
+        help=(
+            "翻译后端（azure：微软 Azure AI Translator，读 .env 的 AZURE_TRANSLATOR_*；"
+            "demo：控制台演示模式用，示例文章自带中文，不联网）"
+        ),
     )
     p.add_argument(
         "--url",
@@ -512,6 +515,10 @@ def _make_translator(args: argparse.Namespace, deps: Deps) -> Translator:
         from qbkb.console.demo import DemoTranslator
 
         return DemoTranslator.from_env()
+    if args.translator == "azure":
+        from qbkb.translate import AzureTranslator
+
+        return AzureTranslator.from_env()
     return DeepLTranslator.from_env()
 
 
@@ -583,6 +590,17 @@ def _print_quota(translator: object, when: str, prefix: str = "[translate]") -> 
     line = quota_line(translator, when, prefix)
     if line:
         print(line)
+
+
+def _print_metered_chars(translator: object) -> None:
+    """Azure 没有用量查询接口：运行结束时打印本次实际计费字符，让用户看到真实消耗。
+
+    metered_chars 是 AzureTranslator 按响应头 X-metered-usage 累计的（取不到时按送出长度算）；
+    DeepL 走 quota_line 的 usage()，没有这个属性，这里不打印。
+    """
+    metered = getattr(translator, "metered_chars", None)
+    if isinstance(metered, int):
+        print(f"[translate] Azure 本次计费 {metered} 字符（含术语标记）")
 
 
 def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) -> int:
@@ -725,7 +743,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
         translator = _make_translator(args, deps)
         glossary = tr.load_glossary(_cfg(args) / "glossary.yaml")
         need = tr.estimate_chars(
-            conn, urls, translator.name, glossary, retry_rejected=args.retry_rejected
+            conn, urls, translator, glossary, retry_rejected=args.retry_rejected
         )
         print(
             f"[translate] {site.name}: 待翻译 {len(urls)} 篇，"
@@ -771,9 +789,11 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 chars += e.stats.chars
                 print(f"[translate] 完成 {done} 篇、需复查 {review} 篇，送出 {chars} 字符")
                 _print_quota(translator, "翻译后")
+                _print_metered_chars(translator)
                 raise Stopped(EXIT_QUOTA, f"[translate] 翻译额度用完，停下：{e}") from e
             except tr.BackendStopped as e:
                 print(f"[translate] 完成 {done} 篇、需复查 {review} 篇")
+                _print_metered_chars(translator)
                 raise Stopped(EXIT_UNAVAILABLE, f"[translate] 翻译后端暂时不可用：{e}") from e
             except tr.BackendAuthError as e:
                 raise Stopped(EXIT_ERROR, f"[translate] 翻译后端鉴权失败，停下：{e}") from e
@@ -824,6 +844,7 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             f"送出 {chars} 字符；固定译文 / 说话人标签 / 按新规则复用 {free} 段（不计费）"
         )
         _print_quota(translator, "翻译后")
+        _print_metered_chars(translator)
         return EXIT_ATTENTION if review or notice else EXIT_OK
     finally:
         conn.close()
