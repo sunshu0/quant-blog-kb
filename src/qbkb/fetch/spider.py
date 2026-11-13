@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import time
 from collections import Counter
@@ -22,9 +23,11 @@ from scrapy.utils.defer import deferred_from_coro
 from twisted.python.failure import Failure
 
 from qbkb import store
+from qbkb.extract.rules import ExtractRules
 from qbkb.fetch.outcome import Kind, Outcome
 from qbkb.fetch.process import (
     META_RETRY_AFTER_REFUSED,
+    _write_atomic,
     apply_outcome,
     conditional_headers,
     is_pdf_url,
@@ -37,6 +40,8 @@ from qbkb.fetch.settings import (
     RETRY_BACKOFF_BASE_SECONDS,
     RETRY_BACKOFF_MAX_SECONDS,
 )
+from qbkb.models import Status
+from qbkb.pdf import PdfRules, find_pdf_url, pdf_raw_path, same_site
 
 
 def backoff_delay(
@@ -115,8 +120,9 @@ class BackoffRetryMiddleware:
     def _stop_site(self, reason: str, request: Request, retry_after: float, status: int) -> None:
         """让整站停止：Retry-After 太久时，继续抓其他文章同样违背服务器要求。
 
-        先无条件 fast 停站（合规停站不能依赖可失败的落库）；文章请求再把自己记成失败，
-        记成功才标 _RETRY_AFTER_RECORDED 让 parse_article 跳过。robots 之类的内部请求
+        先无条件 fast 停站（合规停站不能依赖可失败的落库）；HTML 文章请求再把自己记成失败，
+        记成功才标 _RETRY_AFTER_RECORDED 让 parse_article 跳过。PDF 请求的失败由 parse_pdf
+        用 _pdf_fail 记（pdf: 前缀、pdf_counts），这里不重复记。robots 之类的内部请求
         没有文章可记，直接停。
         """
         spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
@@ -124,7 +130,11 @@ class BackoffRetryMiddleware:
         if stop is not None:
             stop(reason)
         article_url = request.cb_kwargs.get("article_url")
-        if article_url is not None and spider is not None:
+        if (
+            article_url is not None
+            and spider is not None
+            and not request.meta.get(META_STRICT_HOST)
+        ):
             record = getattr(spider, "record_retry_after_failure", None)
             if record is not None and record(str(article_url), status, retry_after):
                 request.meta[_RETRY_AFTER_RECORDED] = True
@@ -172,6 +182,8 @@ class BackoffRetryMiddleware:
 _CROSS_HOST_BLOCKED = "qbkb_cross_host_blocked"
 # 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败；parse_article 看到它就跳过。
 _RETRY_AFTER_RECORDED = "qbkb_retry_after_recorded"
+# PDF 请求在 meta 里带的标记：要求与文章严格同 scheme+host（子域也不行），由白名单在发出前校验
+META_STRICT_HOST = "qbkb_strict_host"
 
 
 class HostAllowlistMiddleware:
@@ -205,13 +217,24 @@ class HostAllowlistMiddleware:
         host = (urlsplit(url).hostname or "").lower().rstrip(".")
         return host == self.allowed_host or host.endswith("." + self.allowed_host)
 
+    def _request_allowed(self, request: Request) -> bool:
+        """PDF 请求（带 META_STRICT_HOST）要求与文章严格同 scheme+host，子域也不行。
+
+        重定向中间件把 meta 原样继承给重定向请求，所以链上每一跳在发出前都走这里校验。
+        HTML 请求走原来的 is_allowed（允许同 host 子域）。
+        """
+        if request.meta.get(META_STRICT_HOST):
+            article_url = request.cb_kwargs.get("article_url")
+            return article_url is not None and same_site(str(article_url), request.url)
+        return self.is_allowed(request.url)
+
     def process_request(self, request: Request, spider: scrapy.Spider) -> None:
         stop_reason = getattr(spider, "stop_reason", None)
         if stop_reason is not None:
             # 整站已经被叫停（robots 跨站 / Retry-After 太久）：所有后续请求一律 IgnoreRequest，
             # 由 errback 处理但不记文章失败——这是站点级停止，不是这一篇的问题。
             raise IgnoreRequest(f"站点已停止抓取：{stop_reason}")
-        if self.is_allowed(request.url):
+        if self._request_allowed(request):
             return
         article_url = request.cb_kwargs.get("article_url")
         if article_url is None:
@@ -244,6 +267,10 @@ class ArticleSpider(scrapy.Spider):
         counts: Counter[Kind],
         *,
         allowed_scheme: str = "https",
+        pdf_rules: PdfRules | None = None,
+        pdf_urls: Sequence[str] = (),
+        pdf_counts: Counter[str] | None = None,
+        extract_rules: ExtractRules | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -255,6 +282,10 @@ class ArticleSpider(scrapy.Spider):
         self.counts = counts
         # 整站停止的原因（robots 跨站、Retry-After 太久……）；设了之后不再发任何请求
         self.stop_reason: str | None = None
+        self.pdf_rules = pdf_rules
+        self.pdf_urls = list(pdf_urls)
+        self.pdf_counts = pdf_counts if pdf_counts is not None else Counter()
+        self.extract_rules = extract_rules
 
     def request_stop(self, reason: str) -> None:
         """请求停止整站抓取：记下原因，并 fast 关闭引擎（fire-and-forget）。
@@ -286,7 +317,7 @@ class ArticleSpider(scrapy.Spider):
             if row is None:
                 continue
             if is_pdf_url(url):
-                # 不下载 PDF，直接标记，留给以后的 PDF 流程
+                # 直接指向 PDF 的网址：不做正文抽取，标记后留给按需处理
                 apply_outcome(self.conn, url, Outcome(Kind.PDF, None), b"", self.raw_dir)
                 self.counts[Kind.PDF] += 1
                 continue
@@ -296,6 +327,30 @@ class ArticleSpider(scrapy.Spider):
                 callback=self.parse_article,
                 errback=self.on_error,
                 cb_kwargs={"article_url": url},
+                dont_filter=True,
+            )
+        if self.pdf_rules is None:
+            return
+        # 断点续跑：HTML 已经抓下来、但站内 PDF 还没下载（或文件丢了）的文章，只补 PDF。
+        for url in self.pdf_urls:
+            row = store.get_article(self.conn, url)
+            if row is None or not row["raw_path"]:
+                continue
+            raw = Path(row["raw_path"])
+            if not raw.is_file():
+                continue
+            raw_bytes = raw.read_bytes()
+            pdf_url = find_pdf_url(raw_bytes, url, self.pdf_rules)
+            if pdf_url is None:
+                continue
+            if not self._needs_pdf(raw_bytes, url):
+                continue
+            yield Request(
+                pdf_url,
+                callback=self.parse_pdf,
+                errback=self.on_pdf_error,
+                cb_kwargs={"article_url": url},
+                meta={META_STRICT_HOST: True},
                 dont_filter=True,
             )
 
@@ -315,16 +370,104 @@ class ArticleSpider(scrapy.Spider):
         self.counts[Kind.FAILED] += 1
         return True
 
-    def parse_article(self, response: Response, article_url: str) -> None:
+    def parse_article(self, response: Response, article_url: str) -> Request | None:
         request = response.request
         if request is not None and request.meta.get(_RETRY_AFTER_RECORDED):
-            return  # 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败
+            return None  # 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败
         outcome = process_response(self.conn, article_url, response, self.raw_dir)
         self.counts[outcome.kind] += 1
         if outcome.kind == Kind.FAILED:
             self.logger.warning("failed %s: %s", article_url, outcome.reason)
         else:
             self.logger.info("%s %s %s", outcome.kind.value, outcome.http_status, article_url)
+        if outcome.kind == Kind.FETCHED and self.pdf_rules is not None:
+            pdf_url = find_pdf_url(
+                response.body, response.url, self.pdf_rules, allowed_url=article_url
+            )
+            if pdf_url is not None and self._needs_pdf(response.body, article_url):
+                return Request(
+                    pdf_url,
+                    callback=self.parse_pdf,
+                    errback=self.on_pdf_error,
+                    cb_kwargs={"article_url": article_url},
+                    meta={META_STRICT_HOST: True},
+                    dont_filter=True,
+                )
+        return None
+
+    def _needs_pdf(self, body: bytes, article_url: str) -> bool:
+        """网页正文（按抽取口径）短于 min_chars 才下载 PDF；没有抽取规则就保守地下。"""
+        rules = self.extract_rules
+        if rules is None or self.pdf_rules is None:
+            return True
+        from qbkb.extract.core import body_chars
+
+        try:
+            return body_chars(body, article_url, rules) < self.pdf_rules.min_chars
+        except Exception:  # 抽不出正文或抽取本身出错：网页必然太短，交给 PDF 补
+            return True
+
+    def parse_pdf(self, response: Response, article_url: str) -> None:
+        row = store.get_article(self.conn, article_url)
+        if row is None or self.pdf_rules is None:
+            return
+        refused = response.meta.get(META_RETRY_AFTER_REFUSED)
+        if refused is not None:
+            # 服务器要求等很久：这篇记失败；整站停止已由 BackoffRetryMiddleware 的 request_stop
+            # 处理（HostAllowlistMiddleware 会在后续请求发出前拦下它们）。
+            self._pdf_fail(
+                article_url,
+                f"服务器要求 Retry-After {refused:.0f} 秒，超过上限，不重试并停止本次抓取",
+            )
+            return
+        if not same_site(article_url, response.url):
+            self._pdf_fail(article_url, f"PDF 跨站（最终响应 {response.url}）")
+            return
+        if response.status != 200:
+            self._pdf_fail(article_url, f"HTTP {response.status}")
+            return
+        ctype = response.headers.get("Content-Type")
+        ctype = ctype.decode("latin-1").split(";")[0].strip().lower() if ctype else ""
+        body = response.body
+        if (ctype and ctype != "application/pdf") or not body.startswith(b"%PDF"):
+            self._pdf_fail(article_url, f"不是 PDF（内容类型 {ctype or '未知'}）")
+            return
+        if len(body) > self.pdf_rules.max_size_bytes:
+            self._pdf_fail(article_url, f"PDF 超过大小上限 {self.pdf_rules.max_size_bytes} 字节")
+            return
+        try:
+            path = pdf_raw_path(self.raw_dir.resolve(), str(row["site"]), str(row["slug"]))
+            _write_atomic(path, body)
+            # 成功回到 fetched（断点续跑时可能是 failed），清掉 pdf 错误，让 extract 接着处理
+            store.set_status(
+                self.conn, article_url, Status.FETCHED, pdf_path=path.as_posix(), error=None
+            )
+        except (OSError, sqlite3.Error, ValueError) as e:
+            # 写盘/落库失败不能当成成功：记 pdf 失败，让 CLI 返回需处理
+            self._pdf_fail(article_url, f"落库失败（{type(e).__name__}: {e}）")
+            return
+        self.pdf_counts["ok"] += 1
+        self.logger.info("pdf %s %s", response.status, article_url)
+
+    def _pdf_fail(self, article_url: str, reason: str) -> None:
+        self.pdf_counts["failed"] += 1
+        self.logger.warning("pdf failed %s: %s", article_url, reason)
+        with contextlib.suppress(sqlite3.Error):
+            store.record_failure(self.conn, article_url, f"pdf: {reason}")
+            # 下载失败不再让旧 pdf_path 冒充"已下载"，保证下次还能被补抓选中
+            store.set_fields(self.conn, article_url, pdf_path=None)
+
+    def on_pdf_error(self, failure: Failure) -> None:
+        request: Request = failure.request  # type: ignore[attr-defined]
+        if request.meta.get(_CROSS_HOST_BLOCKED):
+            return  # 白名单中间件已经记过失败，别重复计数 / 累加 retries
+        if self.stop_reason is not None:
+            return  # 整站停止（robots 跨站 / Retry-After），不是这一篇的失败，不记
+        url = str(request.cb_kwargs["article_url"])
+        exc = failure.value
+        if not isinstance(exc, BaseException):
+            exc = RuntimeError(str(exc))
+        self._pdf_fail(url, f"{type(exc).__name__}: {exc}")
 
     def on_error(self, failure: Failure) -> None:
         request: Request = failure.request  # type: ignore[attr-defined]

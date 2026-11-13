@@ -10,17 +10,22 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
 
 from lxml.html import document_fromstring
 
 from qbkb import store
 from qbkb.config import SiteConfig
+from qbkb.extract.clean import block_text
 from qbkb.extract.core import decode_html, extract_full
+from qbkb.extract.pdf import extract_pdf_text
 from qbkb.extract.quality import check_quality
 from qbkb.extract.rules import ExtractRules, load_rules
-from qbkb.models import Status
+from qbkb.models import Segment, Status, body_hash
+from qbkb.pdf import PdfRules, load_pdf_rules
 from qbkb.sections import (
     ApplyStats,
     NewSection,
@@ -64,18 +69,32 @@ def _raw_file(raw_path: str | None, root: Path) -> Path:
     return p if p.is_absolute() else root / p
 
 
+def _reindex(segments: Sequence[Segment]) -> tuple[Segment, ...]:
+    return tuple(Segment(idx=i, html=s.html) for i, s in enumerate(segments))
+
+
+def _paragraph_html(text: str) -> str:
+    """PDF 段落是纯文本，包成 `<p>` 才能进 segments 表、和 HTML 正文走同一套下游。"""
+    return f"<p>{escape(text)}</p>"
+
+
 def extract_one(
     conn: sqlite3.Connection,
     url: str,
     rules: ExtractRules,
     root: Path = Path("."),
     sections: SectionRules | None = None,
+    pdf_rules: PdfRules | None = None,
 ) -> list[str]:
     """抽取一篇文章并写回状态库，返回质检问题。失败时抛异常，由调用方记录。
 
     前置状态应是 fetched，或抽取阶段失败（retry_failed），或 v1 留下的老数据。成功后状态改为
     extracted、error 清空：用在已经翻译 / 等人工复查的文章上，会丢掉下游的进度和复查原因。
     质检问题只记录，不挡住文章。
+
+    配置了 `pdf:` 节的站点：网页正文（抽取后）短于 pdf.min_chars 且已下载了站内 PDF 时，
+    把 PDF 正文段落接在网页摘要后面一起入库（摘要保留为正文开头）；公式 / 表格按原文文字提取，
+    记一条质检提示。没配置 PDF 的站点行为完全不变。
     """
     row = store.get_article(conn, url)
     if row is None:
@@ -89,15 +108,29 @@ def extract_one(
     issues += page.issues
     section = sec_rules.classify(url, page.key)
     art = result.article
+
+    # 网页摘要保留为正文开头；需要时把 PDF 正文段落接在它后面。
+    summary = art.segments[: result.n_body]
+    keep = art.segments[result.n_body :]
+    body_chars = sum(len(block_text(s.html)) for s in summary)
+    pdf_segments: tuple[Segment, ...] = ()
+    if pdf_rules is not None and row["pdf_path"] and body_chars < pdf_rules.min_chars:
+        pdf_bytes = _raw_file(row["pdf_path"], root).read_bytes()
+        paragraphs = extract_pdf_text(pdf_bytes)
+        pdf_segments = tuple(Segment(idx=0, html=_paragraph_html(p)) for p in paragraphs)
+        issues.append("PDF 正文：公式、表格按原文文字提取，可能不完整")
+    segments = _reindex((*summary, *pdf_segments, *keep))
+    n_body = len(summary) + len(pdf_segments)
+
     # 两步各自一个事务（store 没有提供合并的接口）。先写段落再改状态：中途崩溃时文章
     # 仍是 fetched，下游不会读到这些段落；下次 run 会整体替换段落再推进状态，自动恢复。
-    store.replace_segments(conn, url, art.segments)
+    store.replace_segments(conn, url, segments)
     store.set_status(
         conn,
         url,
         Status.EXTRACTED,
-        body_hash=art.body_hash,
-        body_segments=result.n_body,
+        body_hash=body_hash(segments),
+        body_segments=n_body,
         title=art.meta.title or None,
         author=art.meta.author,
         published=art.meta.published,
@@ -169,6 +202,7 @@ def run(
     """
     rules = load_rules(site)
     sec_rules = load_section_rules(site)
+    pdf_rules = load_pdf_rules(site)
     stats = RunStats()
     urls = store.list_by_status(conn, Status.FETCHED, site.name)
     if retry_failed:
@@ -176,7 +210,7 @@ def run(
     legacy = _legacy(conn, site.name, LEGACY_REENTER, root)
     for url in urls + legacy:
         try:
-            issues = extract_one(conn, url, rules, root, sec_rules)
+            issues = extract_one(conn, url, rules, root, sec_rules, pdf_rules)
         except Exception as e:  # 一篇坏页面不能拖垮整批
             retries = store.record_failure(conn, url, f"{FAIL_PREFIX}{type(e).__name__}: {e}")
             log.warning("抽取失败 %s（第 %d 次）：%s", url, retries, e)

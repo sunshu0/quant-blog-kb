@@ -193,15 +193,16 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def cleanup_stale_tmp(raw_dir: Path, site: str) -> int:
-    """删掉上次被强行中断时留下的 raw/<site>/*.html.tmp，返回删了几个。"""
+    """删掉上次被强行中断时留下的 raw/<site>/*.{html,pdf}.tmp，返回删了几个。"""
     site_dir = raw_dir / site
     if not site_dir.is_dir():
         return 0
     removed = 0
-    for tmp in site_dir.glob("*.html" + TMP_SUFFIX):
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-            removed += 1
+    for pattern in ("*.html" + TMP_SUFFIX, "*.pdf" + TMP_SUFFIX):
+        for tmp in site_dir.glob(pattern):
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+                removed += 1
     return removed
 
 
@@ -236,6 +237,7 @@ def apply_outcome(
                 Status.FETCHED,
                 http_status=outcome.http_status,
                 raw_path=path.as_posix(),
+                pdf_path=None,  # 新 HTML 内容：旧 PDF 缓存失效，补抓时重新判定
                 fetched_at=datetime.now(UTC).isoformat(timespec="seconds"),
                 etag=outcome.etag,
                 last_modified=outcome.last_modified,
