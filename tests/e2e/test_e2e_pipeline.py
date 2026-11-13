@@ -195,7 +195,7 @@ def test_full_pipeline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> No
     assert all((env.out / SITE / "images" / n).read_bytes() == PNG for n in images)
 
     index = (env.out / "index.md").read_text(encoding="utf-8")
-    assert "共 3 篇" in index and "## 独立文章（ARTICLE，无系列）（3）" in index
+    assert "共 3 篇" in index and "## 独立文章（3）" in index
     for path in KEPT:
         assert f"({SITE}/{md_name(path)})" in index
         assert f"(bilingual/{SITE}/{md_name(path)})" in index
@@ -203,7 +203,7 @@ def test_full_pipeline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> No
     assert cli.main(["status", "--db", str(env.db), "--config-dir", str(env.cfg)]) == 0
     status = capsys.readouterr().out
     assert "published         3" in status and "unselected        2" in status
-    assert "独立文章（ARTICLE，无系列）（article）：3 篇，采集" in status
+    assert "独立文章（article）：3 篇，采集" in status
 
 
 def test_idempotent(tmp_path: Path) -> None:
