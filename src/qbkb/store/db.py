@@ -106,10 +106,24 @@ def _now() -> str:
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
-    """打开（不存在就创建）状态库，并确保表结构存在。"""
-    conn = sqlite3.connect(path)
+    """打开（不存在就创建）状态库，并确保表结构存在。
+
+    并发：控制台网页（只读的 status / 待复查页）会在 `qbkb run` 子进程写库时同时读库。
+    并发量小，busy_timeout 让写者遇到瞬时锁等待 30 秒再报错（而不是默认 5 秒就抛
+    database is locked）就够用。用户常复制 state.db 做只读备份，WAL 下只复制 .db 会漏
+    未 checkpoint 的已提交数据，所以不用 WAL，统一用默认的 DELETE 回滚日志。
+    老库如果是 WAL，这里切回 DELETE 时会先做一次 checkpoint，把 -wal 里的数据并回主库，不丢。
+    """
+    conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    try:
+        conn.execute("PRAGMA journal_mode = DELETE")
+    except sqlite3.OperationalError as e:
+        # 老 WAL 库还被别的连接打开时，切回 DELETE 会报 database is locked；别让 connect 崩，
+        # 继续用当前的 journal 模式（除 DELETE 外的模式读写都正常，只是复制备份要留意 -wal）。
+        log.warning("journal_mode 切回 DELETE 失败（%s），继续用当前模式", e)
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     _migrate(conn)
     return conn

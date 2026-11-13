@@ -16,6 +16,8 @@ from qbkb.models import QuotaExceededError
 from qbkb.translate.base import (
     MAX_REQUEST_CHARS,
     MAX_TEXTS_PER_REQUEST,
+    ArticleTranslationError,
+    BackendAuthError,
     TranslatorUnavailableError,
     chunk_texts,
     count_chars,
@@ -161,6 +163,17 @@ class DeepLTranslator:
         """翻译记忆的 backend 键，带目标语言：换了目标语言不会命中别的语言的译文。"""
         return f"deepl:{self.target_lang}"
 
+    def request_units(self, html: str) -> tuple[int, int]:
+        """这一段会展开成几个翻译单元、总长多少（分行 + 脚注占位之后）。
+
+        pipeline 用单元数和总长两个维度分批，保证一批正好对应后端的一个请求，不会因为
+        单元数超限（脚注列表分行后一行一个单元）被后端再切成多个请求。
+        """
+        plan = split_lines(html)
+        pieces = plan.lines if plan is not None else [html]
+        lengths = [len(protect_sups(p)) for p in pieces]
+        return len(lengths), sum(lengths)
+
     def translate(
         self, segments: Sequence[str], glossary: Mapping[str, str], context: str = ""
     ) -> list[str]:
@@ -258,6 +271,12 @@ class DeepLTranslator:
             except deepl.DeepLException as e:
                 if "too many glossaries" in str(e).lower():
                     raise GlossaryLimitError(f"{GLOSSARY_LIMIT_HINT}（DeepL：{e}）") from e
+                status = e.http_status_code
+                if status in (401, 403):
+                    # 术语表同步（list/create）的鉴权失败也要走同一条提示，别等 main() 兜底
+                    raise BackendAuthError(
+                        f"DeepL 鉴权失败（HTTP {status}），请检查 .env 里的 DEEPL_API_KEY"
+                    ) from e
                 if not _retryable(e):
                     raise
                 if attempt >= self.retries:
@@ -267,22 +286,39 @@ class DeepLTranslator:
                 self._sleep(min(self.backoff_s * 2**attempt, self.max_backoff_s))
                 attempt += 1
 
-    def _request(self, texts: list[str], glossary_id: str | None, context: str) -> list[str]:
-        result = self._with_retry(
-            lambda: self._client.translate_text(
-                texts,
-                source_lang=self.source_lang,
-                target_lang=self.target_lang,
-                tag_handling="html",
-                ignore_tags=list(self.ignore_tags) or None,
-                context=context or None,
-                # 传 id 而不是 GlossaryInfo：SDK 对 GlossaryInfo 的语言比对区分大小写
-                glossary=glossary_id,
+    def _map_request_error(self, e: deepl.DeepLException) -> RuntimeError | None:
+        """把翻译请求的不可重试错误归到"这篇的问题"还是"整个后端的问题"。"""
+        status = e.http_status_code
+        if status in (401, 403):
+            return BackendAuthError(
+                f"DeepL 鉴权失败（HTTP {status}），请检查 .env 里的 DEEPL_API_KEY"
             )
-        )
+        if status is not None and 400 <= status < 500:
+            return ArticleTranslationError(f"DeepL 拒绝这次请求（HTTP {status}）：{e}")
+        return None
+
+    def _request(self, texts: list[str], glossary_id: str | None, context: str) -> list[str]:
+        try:
+            result = self._with_retry(
+                lambda: self._client.translate_text(
+                    texts,
+                    source_lang=self.source_lang,
+                    target_lang=self.target_lang,
+                    tag_handling="html",
+                    ignore_tags=list(self.ignore_tags) or None,
+                    context=context or None,
+                    # 传 id 而不是 GlossaryInfo：SDK 对 GlossaryInfo 的语言比对区分大小写
+                    glossary=glossary_id,
+                )
+            )
+        except deepl.DeepLException as e:
+            mapped = self._map_request_error(e)
+            if mapped is not None:
+                raise mapped from e
+            raise
         results = result if isinstance(result, list) else [result]
         if len(results) != len(texts):
-            raise RuntimeError(f"DeepL 返回 {len(results)} 条译文，送出 {len(texts)} 条")
+            raise ArticleTranslationError(f"DeepL 返回 {len(results)} 条译文，送出 {len(texts)} 条")
         self.requests += 1
         self.chars_sent += count_chars(texts)
         return [r.text for r in results]

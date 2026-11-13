@@ -34,6 +34,7 @@ def test_status_counts_and_lists(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert "共 3 篇（站点 man）" in out
     assert "discovered        1" in out and "needs_review      1" in out
     assert "需要人工复查（needs_review，1 篇）" in out and "结构校验未通过的段落 3" in out
+    assert "重试：qbkb translate --retry-rejected" in out
     assert "失败（failed，1 篇）" in out and "HTTP 404" in out
 
 
@@ -147,3 +148,25 @@ def test_fetch_subprocess_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
             "cfg",
         ]
     ]
+
+
+def test_fetch_in_process_returns_attention_when_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """整站被停止（stop_reason 非空）但文章没失败时，fetch 也要返回 EXIT_ATTENTION。"""
+    import qbkb.fetch
+
+    def fake_run_fetch(*args: Any, **kwargs: Any) -> qbkb.fetch.FetchStats:
+        return qbkb.fetch.FetchStats(stop_reason="服务器要求 Retry-After 3600 秒，超过上限")
+
+    monkeypatch.setattr(qbkb.fetch, "run_fetch", fake_run_fetch)
+    args = argparse.Namespace(
+        db=str(tmp_path / "s.db"),
+        raw_dir=str(tmp_path / "raw"),
+        limit=None,
+        fetch_delay=None,
+        verbose=False,
+        config_dir=None,
+        url_file=None,
+    )
+    assert cli.fetch_in_process(args, "man") == cli.EXIT_ATTENTION

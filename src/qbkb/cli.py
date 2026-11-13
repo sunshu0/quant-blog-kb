@@ -31,6 +31,9 @@ EXIT_UNAVAILABLE = 4
 EXIT_ATTENTION = 5
 # 同时出现多种情况时，按这个顺序取第一个（先告诉用户"要等一会儿 / 等额度再跑"）
 _STOP_PRIORITY = (EXIT_UNAVAILABLE, EXIT_QUOTA, EXIT_ATTENTION)
+# 连续这么多篇被后端以同样原因（ArticleTranslationError）拒绝，就当是系统性的配置问题
+# （术语表被删、目标语言配置错等），停下让用户查配置，而不是把整个队列逐篇标成 needs_review。
+MAX_CONSECUTIVE_ARTICLE_ERRORS = 3
 
 EXIT_CODES_HELP = """退出码：
   0  正常完成
@@ -340,7 +343,9 @@ def fetch_in_process(args: argparse.Namespace, site_name: str) -> int:
         f"[fetch] {site.name}: 抓到 {s.fetched}、没变（304）{s.not_modified}、"
         f"PDF {s.pdf}、失败 {s.failed}"
     )
-    return EXIT_ATTENTION if s.failed else EXIT_OK
+    if s.stop_reason:
+        print(f"[fetch] {site.name}: 停止抓取：{s.stop_reason}")
+    return EXIT_ATTENTION if s.failed or s.stop_reason else EXIT_OK
 
 
 def fetch_in_subprocess(args: argparse.Namespace, site_name: str) -> int:
@@ -557,6 +562,8 @@ def stage_titles(args: argparse.Namespace, deps: Deps, site: config.SiteConfig) 
             raise Stopped(EXIT_QUOTA, f"[translate] 补翻标题时额度用完，停下：{e}") from e
         except tr.BackendStopped as e:
             raise Stopped(EXIT_UNAVAILABLE, f"[translate] 翻译后端暂时不可用：{e}") from e
+        except tr.BackendAuthError as e:
+            raise Stopped(EXIT_ERROR, f"[translate] 翻译后端鉴权失败，停下：{e}") from e
         print(
             f"[translate] {site.name}: 补翻标题 {n} / {len(urls)} 篇"
             "（已发布的退回 translated，下次 export 重新生成）"
@@ -615,8 +622,21 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
                 + "），其余按新规则复用，不花额度"
             )
         _print_quota(translator, "翻译前")
-        done = review = failed = chars = free = 0
+        problems = tr.fixed_translation_errors(conn, urls, glossary)
+        if problems:
+            for p in problems:
+                print(f"  ! {p}", file=sys.stderr)
+            print(f"错误：固定译文和原文结构不一致，请检查 config/{tr.FIXED_FILE}", file=sys.stderr)
+            return EXIT_ERROR
+        done = review = chars = free = 0
+        consecutive: list[
+            tuple[str, Status, str | None]
+        ] = []  # 连续同类请求错误的 (url, 原状态, 原 error)
+        last_error: str | None = None
         for url in urls:
+            before = store.get_article(conn, url)
+            orig_status = Status(before["status"]) if before is not None else Status.EXTRACTED
+            orig_error = before["error"] if before is not None else None
             try:
                 st = tr.translate_article(
                     conn, url, translator, glossary, retry_rejected=args.retry_rejected
@@ -629,10 +649,44 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             except tr.BackendStopped as e:
                 print(f"[translate] 完成 {done} 篇、需复查 {review} 篇")
                 raise Stopped(EXIT_UNAVAILABLE, f"[translate] 翻译后端暂时不可用：{e}") from e
-            except ValueError as e:
-                store.record_failure(conn, url, f"translate: {e}")
-                failed += 1
+            except tr.BackendAuthError as e:
+                raise Stopped(EXIT_ERROR, f"[translate] 翻译后端鉴权失败，停下：{e}") from e
+            except tr.ArticleTranslationError as e:
+                # 这一篇的请求有问题：标 needs_review（写明原因），继续下一篇，别拖垮整轮
+                msg = str(e)
+                store.set_status(conn, url, Status.NEEDS_REVIEW, error=f"translate: {e}")
+                review += 1
+                if msg == last_error:
+                    consecutive.append((url, orig_status, orig_error))
+                else:
+                    consecutive = [(url, orig_status, orig_error)]
+                last_error = msg
+                if len(consecutive) >= MAX_CONSECUTIVE_ARTICLE_ERRORS:
+                    # 连续 N 篇被后端以同样原因拒绝：多半是系统性的配置问题（术语表被删、目标语言
+                    # 配置错），不是这几篇自己的问题。把这批文章恢复原状态、不留一堆 needs_review，
+                    # 停下让用户查配置。4xx 不是"过一会儿就好"（那才是退出码 4），按配置错误退出 1。
+                    for u, st0, err0 in consecutive:
+                        store.set_status(conn, u, st0, error=err0)
+                    raise Stopped(
+                        EXIT_ERROR,
+                        f"[translate] 连续 {len(consecutive)} 篇被后端以同样原因拒绝（{msg}），"
+                        "疑似配置问题（术语表被删、目标语言写错等）。已把这批文章恢复原状态，"
+                        "请检查配置后重跑",
+                    ) from e
                 continue
+            except tr.FixedTranslationError as e:
+                # 理论上预检已经拦下；这里再兜一次底，同样整体报错而不是逐篇标 failed
+                raise Stopped(EXIT_ERROR, f"[translate] 配置错误：{e}") from e
+            except ValueError as e:
+                # 没有段落、单段超长等这一篇的问题：标 needs_review，继续下一篇
+                store.set_status(conn, url, Status.NEEDS_REVIEW, error=f"translate: {e}")
+                review += 1
+                consecutive = []
+                last_error = None
+                continue
+            # 这一篇正常翻完：连续同类错误从头数
+            consecutive = []
+            last_error = None
             chars += st.chars
             free += st.fixed + st.speaker_labels + st.revalidated
             if st.needs_review:
@@ -640,11 +694,11 @@ def stage_translate(args: argparse.Namespace, deps: Deps, site: config.SiteConfi
             else:
                 done += 1
         print(
-            f"[translate] {site.name}: 完成 {done} 篇、需复查 {review} 篇、失败 {failed} 篇，"
+            f"[translate] {site.name}: 完成 {done} 篇、需复查 {review} 篇，"
             f"送出 {chars} 字符；固定译文 / 说话人标签 / 按新规则复用 {free} 段（不计费）"
         )
         _print_quota(translator, "翻译后")
-        return EXIT_ATTENTION if review or failed else EXIT_OK
+        return EXIT_ATTENTION if review else EXIT_OK
     finally:
         conn.close()
 
@@ -768,6 +822,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"{label}（{st.value}，{len(rows)} 篇）：")
             for r in rows:
                 print(f"  {r['url']}\n    {r['error'] or ''}")
+            if st is Status.NEEDS_REVIEW:
+                print("  重试：qbkb translate --retry-rejected（重翻结构校验没过的段落）")
     finally:
         conn.close()
     return EXIT_OK
@@ -963,6 +1019,8 @@ def cmd_stages(args: argparse.Namespace, deps: Deps) -> int:
                 code = _run_stage(name, args, deps, site)
             except Stopped as e:
                 print(e)
+                if e.code == EXIT_ERROR:
+                    return EXIT_ERROR  # 鉴权失败等硬错误：立刻停下，不再跑后面的站点/阶段
                 seen.add(e.code)
                 continue
             if code == EXIT_ERROR:

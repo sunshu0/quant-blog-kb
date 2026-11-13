@@ -180,3 +180,94 @@ def test_translation_memory_none_glossary(conn: sqlite3.Connection) -> None:
     h = Segment(0, "<p>x</p>").src_hash
     store.tm_put(conn, h, "fake", "<p>x</p>", "<p>叉</p>")
     assert store.tm_get(conn, h, "fake", None) == "<p>叉</p>"
+
+
+# ---- 并发：busy_timeout ----
+
+
+def test_connect_sets_busy_timeout_and_delete_journal(tmp_path: Path) -> None:
+    c = store.connect(tmp_path / "state.db")
+    assert c.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    c.close()
+
+
+def test_connect_switches_existing_wal_back_to_delete(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute(
+        "CREATE TABLE articles (url TEXT PRIMARY KEY, site TEXT, slug TEXT, status TEXT,"
+        " updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO articles (url, site, slug, status, updated_at)"
+        " VALUES ('https://a.test/1', 'x', '1', 'discovered', 'now')"
+    )
+    conn.commit()
+    conn.close()
+    # 已是 WAL 的库在 connect 时切回 DELETE（先 checkpoint，把 -wal 里的数据并回主库）
+    c = store.connect(db)
+    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    assert c.execute("SELECT COUNT(*) FROM articles").fetchone()[0] == 1
+    c.close()
+
+
+def test_connect_survives_wal_locked_by_other_connection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """老 WAL 库还被别的连接打开时，connect 切 DELETE 报 database is locked：不崩，继续当前模式。"""
+    db = tmp_path / "state.db"
+    a = sqlite3.connect(db)
+    a.execute("PRAGMA journal_mode = WAL")
+    a.execute(
+        "CREATE TABLE articles (url TEXT PRIMARY KEY, site TEXT, slug TEXT, status TEXT,"
+        " updated_at TEXT)"
+    )
+    a.execute(
+        "INSERT INTO articles (url, site, slug, status, updated_at)"
+        " VALUES ('https://a.test/1', 'x', '1', 'discovered', 'now')"
+    )
+    a.commit()
+    # a 保持打开：connect 切 DELETE 需要独占锁，拿不到就告警、继续用 WAL
+    with caplog.at_level("WARNING"):
+        c = store.connect(db)
+    assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"  # 保持当前模式
+    assert c.execute("SELECT COUNT(*) FROM articles").fetchone()[0] == 1
+    assert any("journal_mode 切回 DELETE 失败" in m for m in caplog.messages)
+    c.close()
+    a.close()
+
+
+def test_concurrent_writers_wait_instead_of_failing(tmp_path: Path) -> None:
+    """一个连接持有写事务时，另一个连接的写操作在 busy_timeout 内等待，而不是立刻报锁冲突。"""
+    import threading
+
+    db = tmp_path / "state.db"
+    b = store.connect(db)  # 只在主线程用
+    started = threading.Event()
+    release = threading.Event()
+
+    def writer_a() -> None:
+        a = store.connect(db)  # 只在 writer_a 这个线程用
+        a.execute(
+            "INSERT INTO articles (url, site, slug, status, updated_at)"
+            " VALUES ('https://a.test/1', 'x', '1', 'discovered', 'now')"
+        )
+        started.set()
+        release.wait(5)
+        a.commit()
+        a.close()
+
+    t = threading.Thread(target=writer_a)
+    t.start()
+    assert started.wait(5)
+    threading.Timer(0.5, release.set).start()
+    # a 还持有写锁：b 的这条写会等 busy_timeout，等 a 提交后成功，而不是抛 database is locked
+    b.execute(
+        "INSERT INTO articles (url, site, slug, status, updated_at)"
+        " VALUES ('https://a.test/2', 'x', '2', 'discovered', 'now')"
+    )
+    b.commit()
+    t.join(5)
+    b.close()

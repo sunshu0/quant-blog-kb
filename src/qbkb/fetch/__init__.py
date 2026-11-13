@@ -36,15 +36,23 @@ class FetchStats:
     pdf: int = 0
     failed: int = 0
     stale_tmp_removed: int = 0
+    # 整站停止的原因（robots 跨站、Retry-After 太久……）；没有停止就是 None
+    stop_reason: str | None = None
 
     @classmethod
-    def from_counts(cls, counts: Counter[Kind], stale_tmp_removed: int = 0) -> FetchStats:
+    def from_counts(
+        cls,
+        counts: Counter[Kind],
+        stale_tmp_removed: int = 0,
+        stop_reason: str | None = None,
+    ) -> FetchStats:
         return cls(
             fetched=counts[Kind.FETCHED],
             not_modified=counts[Kind.NOT_MODIFIED],
             pdf=counts[Kind.PDF],
             failed=counts[Kind.FAILED],
             stale_tmp_removed=stale_tmp_removed,
+            stop_reason=stop_reason,
         )
 
 
@@ -96,20 +104,25 @@ def run_fetch(
     removed = cleanup_stale_tmp(raw, site.name)
     counts: Counter[Kind] = Counter()
     conn = store.connect(db_path)
+    stop_reason: str | None = None
     try:
         settings = build_settings(
             http_cache=http_cache, log_level=log_level, **(settings_overrides or {})
         )
         process = CrawlerProcess(settings=settings)
+        # 显式 create_crawler 是为了在 process.start() 之后还能拿到 spider，读回 stop_reason
+        crawler = process.create_crawler(ArticleSpider)
         process.crawl(
-            ArticleSpider,
+            crawler,
             conn=conn,
             urls=targets,
             raw_dir=raw,
             allowed_host=urlsplit(base_url).hostname or "",
+            allowed_scheme=urlsplit(base_url).scheme or "https",
             counts=counts,
         )
         process.start()
+        stop_reason = getattr(crawler.spider, "stop_reason", None)
     finally:
         conn.close()
-    return FetchStats.from_counts(counts, removed)
+    return FetchStats.from_counts(counts, removed, stop_reason)

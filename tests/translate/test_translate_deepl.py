@@ -10,6 +10,8 @@ import pytest
 from qbkb import store
 from qbkb.models import DiscoveredUrl, QuotaExceededError, Segment
 from qbkb.translate import (
+    ArticleTranslationError,
+    BackendAuthError,
     DeepLTranslator,
     Glossary,
     SegmentTooLargeError,
@@ -130,6 +132,16 @@ def test_oversized_segment_fails_before_any_request() -> None:
     with pytest.raises(SegmentTooLargeError):
         t.translate(["ok", "x" * 11], GLOSSARY)
     assert client.translate_calls == [] and client.created == []
+
+
+def test_request_units_counts_split_lines() -> None:
+    t, _ = _translator(FakeClient())
+    assert t.request_units("<p>a</p>") == (1, len("<p>a</p>"))
+    # 15 行编号列表：split_lines 拆成 15 个单元，每行重复外层标签后总长比整段长
+    lines = "<br>".join(f"{i}. line {i}" for i in range(1, 16))
+    footnote = f"<p>{lines}</p>"
+    n, total = t.request_units(footnote)
+    assert n == 15 and total > len(footnote)
 
 
 def test_glossary_uploads_case_variants() -> None:
@@ -342,17 +354,20 @@ def test_default_backoff_is_bounded() -> None:
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "expected"),
     [
-        deepl.AuthorizationException("bad key", http_status_code=403),
-        deepl.ConnectionException("bad url", should_retry=False),
-        deepl.DeepLException("bad request", http_status_code=400),
+        # 鉴权失败（403）→ 整个后端的问题，映射成 BackendAuthError
+        (deepl.AuthorizationException("bad key", http_status_code=403), BackendAuthError),
+        # 不可重试的连接错误（无状态码）→ 无法归类，原样抛回
+        (deepl.ConnectionException("bad url", should_retry=False), deepl.ConnectionException),
+        # 其余 4xx → 这一篇请求的问题，映射成 ArticleTranslationError
+        (deepl.DeepLException("bad request", http_status_code=400), ArticleTranslationError),
     ],
 )
-def test_permanent_errors_are_not_retried(error: Exception) -> None:
+def test_permanent_errors_are_not_retried(error: Exception, expected: type[Exception]) -> None:
     client = FakeClient([error])
     t, sleeps = _translator(client)
-    with pytest.raises(type(error)):
+    with pytest.raises(expected):
         t.translate(["x"], {})
     assert sleeps == [] and len(client.translate_calls) == 1
 
@@ -382,6 +397,17 @@ def test_wrong_result_count_is_an_error() -> None:
     t, _ = _translator(Short())
     with pytest.raises(RuntimeError):
         t.translate(["a", "b"], {})
+
+
+def test_sync_glossary_auth_error_is_mapped() -> None:
+    class Unauthorized(FakeClient):
+        def list_glossaries(self) -> list[deepl.GlossaryInfo]:
+            raise deepl.AuthorizationException("bad key", http_status_code=403)
+
+    t, sleeps = _translator(Unauthorized())
+    with pytest.raises(BackendAuthError):
+        t.sync_glossary(GLOSSARY)
+    assert sleeps == []  # 鉴权错误不可重试，直接报
 
 
 def test_usage() -> None:

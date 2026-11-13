@@ -140,72 +140,93 @@ def test_run_lock_is_exclusive(tmp_path: Path) -> None:
     a.release()
     b.acquire("定时任务")
     b.release()
-    assert not b.path.exists()
+    # 锁文件不删除（互斥由操作系统持有），但元数据已清空
+    assert b.path.exists() and b.holder() is None
 
 
-def _write_lock(tmp_path: Path, data: object) -> Path:
+def _write_lock(tmp_path: Path, data: dict[str, object]) -> Path:
+    """模仿一个已持有的锁：第 0 字节是锁字节，第 1 字节起是元数据。"""
     path = tmp_path / ".qbkb" / jobs.LOCK_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data), "utf-8")
+    payload = b"\x00" + json.dumps(data).encode("utf-8")
+    path.write_bytes(payload)
     return path
 
 
-def test_lock_of_dead_process_is_taken_over_immediately(tmp_path: Path) -> None:
-    """持有者被硬杀（pid 不在了）：不用等，马上能拿到锁。"""
+def test_stale_metadata_file_does_not_block_acquire(tmp_path: Path) -> None:
+    """旧进程留下的元数据（进程已死）不再需要残留判断：操作系统根本没持有锁，直接能拿到。"""
     _write_lock(tmp_path, {"who": "崩掉的控制台", "pid": 999999, "started": 1.0, "since": "x"})
-    seen: list[tuple[int, float | None]] = []
-
-    def alive(pid: int, started: float | None) -> bool:
-        seen.append((pid, started))
-        return False
-
-    lock = jobs.RunLock(tmp_path, alive=alive)
+    lock = jobs.RunLock(tmp_path)
     lock.acquire("新任务")
-    assert seen == [(999999, 1.0)]
     assert lock.holder()["who"] == "新任务"  # type: ignore[index]
 
 
-def test_lock_of_reused_pid_is_stale_but_live_owner_is_respected(tmp_path: Path) -> None:
-    """pid 被别的进程复用：创建时间对不上 → 残留；对得上 → 有效。用真实的进程信息判断。"""
-    from qbkb.console import procinfo
+def test_metadata_write_failure_releases_os_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = jobs.RunLock(tmp_path)
 
-    me = procinfo.self_start_time()
-    assert me is not None and me > 0
-    # 当前进程的 pid、但创建时间早了一小时：等于"同一个号码换了个进程"
-    _write_lock(tmp_path, {"who": "旧进程", "pid": os.getpid(), "started": me - 3600})
-    assert jobs.RunLock(tmp_path).stale() is True
-    _write_lock(tmp_path, {"who": "控制台", "pid": os.getpid(), "started": me})
-    assert jobs.RunLock(tmp_path).stale() is False
-    with pytest.raises(jobs.Busy):
-        jobs.RunLock(tmp_path).acquire("定时任务")
+    def boom(fd: int, data: dict[str, Any]) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lock, "_write_info", boom)
+    with pytest.raises(OSError):
+        lock.acquire("控制台")
+    assert not lock.held and lock._fd is None
+    # 锁已经释放：另一个锁能立刻拿到，不会一直 Busy 到重启
+    other = jobs.RunLock(tmp_path)
+    other.acquire("定时任务")
+    other.release()
 
 
-def test_lock_of_finished_real_process_is_stale(tmp_path: Path) -> None:
+def test_holder_reads_metadata_and_release_clears_it(tmp_path: Path) -> None:
+    _write_lock(tmp_path, {"who": "旧任务", "pid": 1, "started": 1.0, "since": "x", "token": "t"})
+    assert jobs.RunLock(tmp_path).holder()["who"] == "旧任务"  # type: ignore[index]
+    lock = jobs.RunLock(tmp_path)
+    lock.acquire("控制台")
+    assert lock.holder()["who"] == "控制台"  # type: ignore[index]
+    lock.release()
+    assert lock.holder() is None  # 元数据清空，文件还在
+
+
+def test_os_lock_auto_released_on_process_exit(tmp_path: Path) -> None:
+    """进程退出（被硬杀）后操作系统自动放锁，另一个进程不用等就能拿到。"""
     import subprocess
 
-    from qbkb.console import procinfo
-
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    root = str(tmp_path)
+    ready = tmp_path / "ready"
+    code = (
+        "import sys, time; "
+        "from pathlib import Path; "
+        "from qbkb.console import jobs; "
+        "l = jobs.RunLock(Path(sys.argv[1])); "
+        "l.acquire('child'); "
+        "open(sys.argv[2], 'w').write('ok'); "
+        "time.sleep(30)"
+    )
+    child = subprocess.Popen([sys.executable, "-c", code, root, str(ready)])
     try:
-        started = procinfo.start_time(child.pid)
-        assert started is not None
-        _write_lock(tmp_path, {"who": "子进程", "pid": child.pid, "started": started})
-        assert jobs.RunLock(tmp_path).stale() is False
+        for _ in range(200):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        assert ready.exists()
+        with pytest.raises(jobs.Busy):
+            jobs.RunLock(tmp_path).acquire("parent")
     finally:
         child.kill()
         child.wait()
-    assert jobs.RunLock(tmp_path).stale() is True
-    assert procinfo.start_time(child.pid) is None or not procinfo.same_process(child.pid, started)
-
-
-def test_corrupt_lock_gets_a_grace_period(tmp_path: Path) -> None:
-    path = tmp_path / ".qbkb" / jobs.LOCK_FILE
-    path.parent.mkdir(parents=True)
-    path.write_text("", "utf-8")  # 另一个进程刚创建、还没写完
-    assert jobs.RunLock(tmp_path).stale() is False
-    later = jobs.RunLock(tmp_path, clock=lambda: time.time() + jobs.CORRUPT_GRACE_S + 5)
-    assert later.stale() is True
-    later.acquire("新任务")
+    lock = jobs.RunLock(tmp_path)
+    # 子进程死了，操作系统自动放锁；teardown 可能比 wait() 返回晚一瞬，轮询等一下
+    for _ in range(200):
+        try:
+            lock.acquire("parent")
+            break
+        except jobs.Busy:
+            time.sleep(0.01)
+    else:
+        raise AssertionError("子进程退出后锁仍未释放")
+    lock.release()
 
 
 def test_touch_refreshes_lock_while_held(tmp_path: Path) -> None:
@@ -216,7 +237,7 @@ def test_touch_refreshes_lock_while_held(tmp_path: Path) -> None:
     assert lock.path.stat().st_mtime > 1
     lock.release()
     lock.touch()  # 没持有时什么都不做
-    assert not lock.path.exists()
+    assert lock.holder() is None
 
 
 def _manager(tmp_path: Path, popen: FakePopen, **kw: Any) -> jobs.JobManager:
@@ -252,7 +273,7 @@ def test_job_manager_collects_output_and_result(tmp_path: Path) -> None:
     log = Path(job.log_path).read_text("utf-8")
     assert "***" in log and "sk-abcdefghijklmnop9876" not in log
     assert Path(job.log_path).parent == ws.logs
-    assert not m.lock.path.exists()  # 跑完放锁
+    assert not m.lock.held and m.lock.holder() is None  # 跑完放锁
     assert popen.calls[0]["env"]["A"] == "1"
     # 增量取日志
     assert job.summary(since=3)["lines"] == job.lines[3:]
@@ -355,7 +376,7 @@ def test_start_failure_after_lock_releases_it(
     with pytest.raises(RuntimeError):
         m.start(ws, "run", "运行", [["a"]], {})
     monkeypatch.undo()
-    assert not m.lock.path.exists() and m.job is None
+    assert not m.lock.held and m.job is None
     job = m.start(ws, "run", "运行", [["a"]], {})  # 之后还能正常开始
     m.wait(5)
     assert job.exit_code == 0
@@ -388,7 +409,7 @@ def test_failed_spawn_releases_lock(tmp_path: Path) -> None:
     job = m.start(workspace(tmp_path, "demo"), "run", "运行", [["a"]], {})
     m.wait(5)
     assert job.exit_code == jobs.EXIT_ERROR and "启动任务失败" in job.lines[-1]
-    assert not m.lock.path.exists()
+    assert not m.lock.held and m.lock.holder() is None
 
 
 def test_real_subprocess_output_is_utf8(tmp_path: Path) -> None:

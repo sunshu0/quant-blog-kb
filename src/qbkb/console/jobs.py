@@ -2,8 +2,8 @@
 
 - Twisted reactor 一个进程只能启动一次，所以控制台从不在自己的进程里跑流程，一律开子进程；
 - 同一时间只允许一个任务：进程内用 threading.Lock，跨进程（控制台和每天的定时任务）用
-  数据目录下的锁文件 `.qbkb/run.lock`（O_EXCL 创建；记下持有者的 pid 和进程创建时间，
-  进程不在了就算残留）；
+  数据目录下的锁文件 `.qbkb/run.lock`（操作系统持有的独占锁，进程退出自动释放；
+  文件第 1 字节起写持有者元数据，只给人看）；
 - 日志每个任务一份，写在数据目录的 logs/ 下；写之前把 key 换成 ***（纵深防御）。
 """
 
@@ -58,8 +58,6 @@ _STAGE_LINE = re.compile(r"^\[(discover|fetch|extract|translate|export)\]")
 _QUOTA_LINE = re.compile(r"本月额度：已用 (\d+) / 上限 (\d+) 字符（剩余 (\d+)）")
 _PUBLISHED_LINE = re.compile(r"^\[export\] \S+: 发布 (\d+)（内容没变 (\d+)）")
 MAX_LINES = 5000
-# 锁文件内容读不出来（另一个进程刚创建还没写完）时，等这么久再当残留
-CORRUPT_GRACE_S = 120
 # 运行中每隔这么久刷新一次锁文件的修改时间
 TOUCH_EVERY_S = 30
 LOCK_FILE = "run.lock"
@@ -164,12 +162,44 @@ class Busy(RuntimeError):
     """已经有任务在跑。"""
 
 
+def _lock_nb(fd: int) -> None:
+    """尝试对 fd 加独占锁（不阻塞）。拿不到抛 OSError。
+
+    Windows 上 msvcrt.locking 锁文件第 0 字节（强制锁：别的进程读不到这个字节，但读第 1 字节
+    起的元数据不受影响）；其他系统用 fcntl.flock（建议锁，锁整个文件）。
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        # 锁字节必须存在：新文件先补 1 字节，元数据从第 1 字节起写
+        if os.fstat(fd).st_size < 1:
+            os.write(fd, b"\x00")
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 class RunLock:
     """一个数据根目录同时只跑一个任务（控制台和定时任务共用）。
 
-    锁文件里记下持有者进程的 pid 和创建时间。别人检查时：pid 对应的进程还活着、而且创建时间
-    对得上（Windows 会复用 pid），才算锁有效；进程不在了（被硬杀、断电）就视为没有锁，
-    不用等。锁文件坏了（读不出来）且超过 CORRUPT_GRACE_S 秒没更新，也视为残留。
+    互斥由操作系统持有的独占锁保证：进程退出（哪怕被硬杀）时自动释放，不存在"判残留 →
+    删除 → 重建"的竞态，也不用删除文件。锁文件第 1 字节起写持有者元数据（who / pid /
+    started / since / token），只给人看：Busy 提示和 release 核验持有者用它，不影响互斥本身。
     持有期间 touch() 刷新修改时间，方便人看（`last_seen`）。
     """
 
@@ -185,54 +215,77 @@ class RunLock:
         ),
     ) -> None:
         self.path = _state_dir(root) / LOCK_FILE
-        self._clock = clock
-        self._alive = alive
+        # clock / alive 已不再参与互斥（OS 锁取代了残留判断），保留参数只为兼容旧调用方
         self._me = me
+        self._fd: int | None = None
+        self._token: str | None = None
         self.held = False
 
     def holder(self) -> dict[str, Any] | None:
+        """读持有者元数据（第 1 字节起）。读不到 / 不是 JSON 映射返回 None。"""
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            fd = os.open(self.path, os.O_RDONLY)
+        except OSError:
+            return None
+        try:
+            os.lseek(fd, 1, os.SEEK_SET)
+            chunks: list[bytes] = []
+            while True:
+                block = os.read(fd, 4096)
+                if not block:
+                    break
+                chunks.append(block)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+        try:
+            data = json.loads(b"".join(chunks).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
             return None
         return data if isinstance(data, dict) else None
 
+    def _write_info(self, fd: int, data: dict[str, Any]) -> None:
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        os.lseek(fd, 1, os.SEEK_SET)
+        os.write(fd, payload)
+        os.ftruncate(fd, 1 + len(payload))  # 清掉上一次更长元数据留下的尾巴
+
     def acquire(self, who: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
-            try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError as e:
-                if self.stale():
-                    with contextlib.suppress(OSError):
-                        self.path.unlink()
-                    continue
-                h = self.holder() or {}
-                raise Busy(
-                    f"已经有任务在运行（{h.get('who', '未知')}，{h.get('since', '?')} 开始）"
-                ) from e
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR)
+        try:
+            _lock_nb(fd)
+        except OSError as e:
+            os.close(fd)
+            h = self.holder() or {}
+            raise Busy(
+                f"已经有任务在运行（{h.get('who', '未知')}，{h.get('since', '?')} 开始）"
+            ) from e
+        try:
             pid, started = self._me()
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                since = datetime.now().isoformat(timespec="seconds")
-                data = {"who": who, "pid": pid, "started": started, "since": since}
-                json.dump(data, f, ensure_ascii=False)
-            self.held = True
-            return
-        raise Busy("锁文件删不掉，请稍后再试")
-
-    def stale(self) -> bool:
-        """锁是不是残留的（持有者进程已经不在了）。"""
-        h = self.holder()
-        pid = h.get("pid") if h else None
-        if not isinstance(pid, int):
-            # 读不出来：可能另一个进程刚创建、还没写完，给一点时间
-            try:
-                age = self._clock() - self.path.stat().st_mtime
-            except OSError:
-                return True
-            return age > CORRUPT_GRACE_S
-        started = h.get("started") if h else None
-        return not self._alive(pid, started if isinstance(started, (int, float)) else None)
+            token = f"{pid}-{time.time_ns()}"
+            self._write_info(
+                fd,
+                {
+                    "who": who,
+                    "pid": pid,
+                    "started": started,
+                    "since": datetime.now().isoformat(timespec="seconds"),
+                    "token": token,
+                },
+            )
+        except BaseException:
+            # 取锁成功但写元数据失败：必须释放锁并关句柄，否则内核锁仍被本进程持有，
+            # 之后所有新任务一直 Busy，直到重启控制台 / 进程
+            with contextlib.suppress(OSError):
+                _unlock(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        self._fd = fd
+        self._token = token
+        self.held = True
 
     def touch(self) -> None:
         if self.held:
@@ -240,10 +293,23 @@ class RunLock:
                 os.utime(self.path)
 
     def release(self) -> None:
-        if self.held:
-            with contextlib.suppress(OSError):
-                self.path.unlink()
-            self.held = False
+        if not self.held or self._fd is None:
+            return
+        # 核验持有者：元数据 token 对得上才清空（OS 锁已经保证互斥，这里是纵深防御）。
+        # 对不上（不该发生）就跳过清空，仍解锁关闭，把互斥交给操作系统。
+        try:
+            cur = self.holder()
+            if cur is None or cur.get("token") == self._token:
+                os.ftruncate(self._fd, 1)
+        except OSError:
+            pass
+        with contextlib.suppress(OSError):
+            _unlock(self._fd)
+        with contextlib.suppress(OSError):
+            os.close(self._fd)
+        self._fd = None
+        self._token = None
+        self.held = False
 
 
 # ---- 执行 -------------------------------------------------------------------

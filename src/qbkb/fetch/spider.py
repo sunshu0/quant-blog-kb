@@ -11,12 +11,14 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import urlsplit
 
 import scrapy
 from scrapy.crawler import Crawler
 from scrapy.downloadermiddlewares.retry import RetryMiddleware
-from scrapy.exceptions import CloseSpider
+from scrapy.exceptions import IgnoreRequest
 from scrapy.http import Request, Response
+from scrapy.utils.defer import deferred_from_coro
 from twisted.python.failure import Failure
 
 from qbkb import store
@@ -28,6 +30,7 @@ from qbkb.fetch.process import (
     is_pdf_url,
     process_error,
     process_response,
+    retry_after_refused_reason,
 )
 from qbkb.fetch.settings import (
     RETRY_AFTER_MAX_SECONDS,
@@ -92,19 +95,39 @@ class BackoffRetryMiddleware:
         self.retry_after_max = retry_after_max
         self._clock = clock
         self.resume_at = 0.0
+        self._crawler: Crawler | None = None
 
     @classmethod
     def from_crawler(cls, crawler: Crawler) -> Self:
         s = crawler.settings
-        return cls(
+        mw = cls(
             RetryMiddleware.from_crawler(crawler),
             base=s.getfloat("QBKB_BACKOFF_BASE", RETRY_BACKOFF_BASE_SECONDS),
             max_delay=s.getfloat("QBKB_BACKOFF_MAX", RETRY_BACKOFF_MAX_SECONDS),
             retry_after_max=s.getfloat("QBKB_RETRY_AFTER_MAX", RETRY_AFTER_MAX_SECONDS),
         )
+        mw._crawler = crawler
+        return mw
 
     def pause(self, seconds: float) -> None:
         self.resume_at = max(self.resume_at, self._clock() + seconds)
+
+    def _stop_site(self, reason: str, request: Request, retry_after: float, status: int) -> None:
+        """让整站停止：Retry-After 太久时，继续抓其他文章同样违背服务器要求。
+
+        先无条件 fast 停站（合规停站不能依赖可失败的落库）；文章请求再把自己记成失败，
+        记成功才标 _RETRY_AFTER_RECORDED 让 parse_article 跳过。robots 之类的内部请求
+        没有文章可记，直接停。
+        """
+        spider = getattr(self._crawler, "spider", None) if self._crawler is not None else None
+        stop = getattr(spider, "request_stop", None) if spider is not None else None
+        if stop is not None:
+            stop(reason)
+        article_url = request.cb_kwargs.get("article_url")
+        if article_url is not None and spider is not None:
+            record = getattr(spider, "record_retry_after_failure", None)
+            if record is not None and record(str(article_url), status, retry_after):
+                request.meta[_RETRY_AFTER_RECORDED] = True
 
     async def process_request(self, request: Request) -> None:
         wait = self.resume_at - self._clock()
@@ -118,6 +141,12 @@ class BackoffRetryMiddleware:
             retry_after = parse_retry_after(header.decode("latin-1") if header else None)
             if retry_after is not None and retry_after > self.retry_after_max:
                 request.meta[META_RETRY_AFTER_REFUSED] = retry_after
+                self._stop_site(
+                    f"服务器要求 Retry-After {retry_after:.0f} 秒，超过上限",
+                    request,
+                    retry_after,
+                    response.status,
+                )
                 return response
         result = self._retry.process_response(request, response)
         if isinstance(result, Request):
@@ -139,6 +168,68 @@ class BackoffRetryMiddleware:
         return result
 
 
+# 白名单中间件已经记过一次失败后，放在 request.meta 里的标记；errback 看到它就跳过，不再记第二次。
+_CROSS_HOST_BLOCKED = "qbkb_cross_host_blocked"
+# 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败；parse_article 看到它就跳过。
+_RETRY_AFTER_RECORDED = "qbkb_retry_after_recorded"
+
+
+class HostAllowlistMiddleware:
+    """显式 scheme + host 白名单检查：约束初始 URL 和每一次重定向目标。
+
+    Scrapy 自带的 OffsiteMiddleware 会被请求上的 dont_filter 直接放行（文章请求都带
+    dont_filter=True），RedirectMiddleware 又把该标记继承给重定向请求，所以 allowed_domains
+    实际拦不住跨站重定向。这里不理会 dont_filter，对进入下载器的每个请求（初始请求、HTTP 3xx
+    和 meta refresh 生成的重定向请求）再做一次 scheme + host 检查：不匹配就把文章记成失败
+    （写清原因），不保存任何内容。
+    """
+
+    def __init__(self, allowed_scheme: str, allowed_host: str) -> None:
+        self.allowed_scheme = (allowed_scheme or "https").lower()
+        self.allowed_host = (allowed_host or "").lower().rstrip(".")
+
+    @classmethod
+    def from_crawler(cls, crawler: Crawler) -> Self:
+        spider = crawler.spider
+        scheme = getattr(spider, "allowed_scheme", "https")
+        host = getattr(spider, "allowed_domains", [""])[0]
+        return cls(scheme, host)
+
+    def is_allowed(self, url: str) -> bool:
+        parts = urlsplit(url)
+        if (parts.scheme or "").lower() != self.allowed_scheme:
+            return False
+        return self._host_allowed(url)
+
+    def _host_allowed(self, url: str) -> bool:
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        return host == self.allowed_host or host.endswith("." + self.allowed_host)
+
+    def process_request(self, request: Request, spider: scrapy.Spider) -> None:
+        stop_reason = getattr(spider, "stop_reason", None)
+        if stop_reason is not None:
+            # 整站已经被叫停（robots 跨站 / Retry-After 太久）：所有后续请求一律 IgnoreRequest，
+            # 由 errback 处理但不记文章失败——这是站点级停止，不是这一篇的问题。
+            raise IgnoreRequest(f"站点已停止抓取：{stop_reason}")
+        if self.is_allowed(request.url):
+            return
+        article_url = request.cb_kwargs.get("article_url")
+        if article_url is None:
+            # 内部请求（robots.txt 之类）：没有 article_url，不是文章，不能当文章记失败。
+            # 同 host（scheme 可以不同，比如 http 站点把 robots 规范重定向到 https）放行；
+            # 真跨 host 就停掉整站，不能放任 Scrapy 对 robots 失败默认放行、继续抓文章。
+            if self._host_allowed(request.url):
+                return
+            spider.request_stop(  # type: ignore[attr-defined]
+                f"robots.txt 被重定向到未许可站点 {request.url}，取不到 robots 规则"
+            )
+            raise IgnoreRequest(f"robots.txt 被重定向到未许可站点 {request.url}")
+        spider.fail_cross_host(str(article_url), request.url)  # type: ignore[attr-defined]
+        # 已经记过一次失败：标记一下，errback 别再记第二次（否则失败数和 retries 都会翻倍）
+        request.meta[_CROSS_HOST_BLOCKED] = True
+        raise IgnoreRequest(f"请求目标 {request.url} 不在许可站点 {self.allowed_host} 内")
+
+
 class ArticleSpider(scrapy.Spider):
     """抓给定的文章 URL，每个响应交给 process_response 落库。"""
 
@@ -151,6 +242,8 @@ class ArticleSpider(scrapy.Spider):
         raw_dir: Path,
         allowed_host: str,
         counts: Counter[Kind],
+        *,
+        allowed_scheme: str = "https",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -158,7 +251,34 @@ class ArticleSpider(scrapy.Spider):
         self.urls = list(urls)
         self.raw_dir = raw_dir
         self.allowed_domains = [allowed_host]
+        self.allowed_scheme = allowed_scheme.lower()
         self.counts = counts
+        # 整站停止的原因（robots 跨站、Retry-After 太久……）；设了之后不再发任何请求
+        self.stop_reason: str | None = None
+
+    def request_stop(self, reason: str) -> None:
+        """请求停止整站抓取：记下原因，并 fast 关闭引擎（fire-and-forget）。
+
+        robots 跨站被拦、服务器要求过长的 Retry-After 等"继续抓其他文章也违背服务器要求"的
+        情况都会走这里。stop_reason 一记下，后续请求在 HostAllowlistMiddleware 里会被直接
+        IgnoreRequest（不计文章失败）；引擎的 close_spider_async(fast) 会取消下载器里还没
+        发出去的请求、并拒绝之后新进入下载器的请求。只调用一次（幂等）：第一次调用生效，
+        之后再调用直接返回。
+        """
+        if self.stop_reason is not None:
+            return
+        self.stop_reason = reason
+        engine = getattr(getattr(self, "crawler", None), "engine", None)
+        if engine is not None:
+            # Scrapy 2.20：close_spider_async 是 async，deferred_from_coro 把它调度到运行中的 loop。
+            deferred_from_coro(engine.close_spider_async(reason=reason, mode="fast"))
+
+    def fail_cross_host(self, article_url: str, target_url: str) -> None:
+        """跨站（或换 scheme）请求：把文章记成失败，不保存目标内容。"""
+        outcome = Outcome(Kind.FAILED, None, f"重定向到未许可站点 {target_url}，不保存内容")
+        apply_outcome(self.conn, article_url, outcome, b"", self.raw_dir)
+        self.counts[Kind.FAILED] += 1
+        self.logger.warning("blocked cross-host request: %s -> %s", article_url, target_url)
 
     async def start(self) -> AsyncIterator[Request]:
         for url in self.urls:
@@ -179,19 +299,39 @@ class ArticleSpider(scrapy.Spider):
                 dont_filter=True,
             )
 
+    def record_retry_after_failure(self, article_url: str, status: int, retry_after: float) -> bool:
+        """长 Retry-After：把当前文章记成失败，返回是否记成功。
+
+        不经过 classify_response（那时 response.request 还没被引擎补上），直接用已知的
+        status 和 Retry-After 秒数拼原因。落库失败只记日志、返回 False——不能因此阻止
+        整站 fast 停站；失败计数留给 errback / parse_article 的兜底。
+        """
+        outcome = Outcome(Kind.FAILED, status, retry_after_refused_reason(status, retry_after))
+        try:
+            apply_outcome(self.conn, article_url, outcome, b"", self.raw_dir)
+        except (OSError, sqlite3.Error, ValueError, KeyError) as e:
+            self.logger.error("记录 Retry-After 失败时出错（整站停止已触发）：%s", e)
+            return False
+        self.counts[Kind.FAILED] += 1
+        return True
+
     def parse_article(self, response: Response, article_url: str) -> None:
+        request = response.request
+        if request is not None and request.meta.get(_RETRY_AFTER_RECORDED):
+            return  # 长 Retry-After 已经在 BackoffRetryMiddleware 里记过这一篇失败
         outcome = process_response(self.conn, article_url, response, self.raw_dir)
         self.counts[outcome.kind] += 1
         if outcome.kind == Kind.FAILED:
             self.logger.warning("failed %s: %s", article_url, outcome.reason)
         else:
             self.logger.info("%s %s %s", outcome.kind.value, outcome.http_status, article_url)
-        if response.meta.get(META_RETRY_AFTER_REFUSED) is not None:
-            # 服务器要求等很久：不只是这篇不重试，整个站点这次都不再请求
-            raise CloseSpider("retry_after_too_long")
 
     def on_error(self, failure: Failure) -> None:
         request: Request = failure.request  # type: ignore[attr-defined]
+        if request.meta.get(_CROSS_HOST_BLOCKED):
+            return  # 白名单中间件已经记过失败，别重复计数 / 累加 retries
+        if self.stop_reason is not None:
+            return  # 整站停止（robots 跨站 / Retry-After），不是这一篇的失败，不记
         url = str(request.cb_kwargs["article_url"])
         exc = failure.value
         if not isinstance(exc, BaseException):

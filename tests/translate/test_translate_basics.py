@@ -10,7 +10,7 @@ from qbkb.translate import (
     load_glossary,
     same_structure,
 )
-from qbkb.translate.base import chunk_texts, count_chars
+from qbkb.translate.base import chunk_texts, chunk_texts_by_length, chunk_units, count_chars
 from qbkb.translate.glossary import NO_TERMS, case_variants
 from qbkb.translate.structure import plain_text
 
@@ -132,6 +132,47 @@ def test_chunk_texts_limits() -> None:
 def test_chunk_texts_rejects_oversized() -> None:
     with pytest.raises(SegmentTooLargeError):
         chunk_texts(["ok", "x" * 10], max_items=5, max_chars=3)
+
+
+def test_chunk_texts_by_length_uses_given_lengths_not_raw() -> None:
+    # lengths 和原文长度可以不一致（脚注占位展开）：按 lengths 分批
+    assert chunk_texts_by_length([1, 1, 4], max_items=2, max_chars=100) == [
+        range(0, 2),
+        range(2, 3),
+    ]
+    assert chunk_texts_by_length([5, 2, 2], max_items=10, max_chars=7) == [range(0, 2), range(2, 3)]
+    assert chunk_texts_by_length([], 5, 5) == []
+
+
+def test_chunk_texts_by_length_rejects_oversized() -> None:
+    with pytest.raises(SegmentTooLargeError):
+        chunk_texts_by_length([3, 11], max_items=5, max_chars=10)
+
+
+def test_chunk_units_limits_by_unit_count_not_element_count() -> None:
+    # 单元数才是 DeepL 的 50 条上限：40 段（各 1 单元）+ 1 个 15 行脚注列表（15 单元）=
+    # 41 个元素但 55 个单元，必须拆成两批，不能由后端再切成两个请求。
+    counts = [1] * 40 + [15]
+    lengths = [5] * 40 + [150]
+    assert chunk_units(counts, lengths, max_units=50, max_chars=10000) == [
+        range(0, 40),
+        range(40, 41),
+    ]
+
+
+def test_chunk_units_limits_by_chars_too() -> None:
+    assert chunk_units([1, 1, 4], [5, 2, 2], max_units=10, max_chars=7) == [
+        range(0, 2),
+        range(2, 3),
+    ]
+    assert chunk_units([], [], 5, 5) == []
+
+
+def test_chunk_units_rejects_oversized() -> None:
+    with pytest.raises(SegmentTooLargeError):
+        chunk_units([60], [100], max_units=50, max_chars=10000)
+    with pytest.raises(SegmentTooLargeError):
+        chunk_units([1], [101], max_units=50, max_chars=100)
 
 
 def test_fake_translator_keeps_tags_and_applies_glossary() -> None:
