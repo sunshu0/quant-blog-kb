@@ -99,7 +99,7 @@ body.has-bar .toast { bottom: 76px; }
 .toc a:hover { background: var(--bg); }
 .toc a.active { background: var(--active-bg); }
 .toc .sub { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
-.reader { flex: 1; min-width: 0; overflow-y: auto; padding: 12px 28px 40px; }
+.reader { flex: 1; min-width: 0; overflow-y: auto; padding: 12px 28px 96px; }
 .reader-back { display: none; margin-bottom: 8px; }
 .meta {
   display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center;
@@ -167,7 +167,11 @@ button.small { font-size: 13px; padding: 3px 10px; }
   padding: 10px 20px calc(10px + env(safe-area-inset-bottom)); background: var(--surface);
   border-top: 1px solid var(--line); box-shadow: 0 -2px 8px rgba(0, 0, 0, .15);
 }
-.select-count { font-weight: 600; margin-right: auto; }
+.select-info { display: flex; flex-direction: column; margin-right: auto; min-width: 0; line-height: 1.3; }
+.select-count { font-weight: 600; white-space: nowrap; }
+.select-sub { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.select-sub.warn-text { color: var(--warn-text); font-weight: 600; }
+.select-bar button { white-space: nowrap; }
 .select-bar .primary { padding: 8px 16px; }
 .modal {
   position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, .5); display: flex;
@@ -180,6 +184,15 @@ button.small { font-size: 13px; padding: 3px 10px; }
 .modal-box h3 { margin: 0 0 8px; font-size: 17px; }
 .modal-body p { margin: 6px 0; line-height: 1.6; overflow-wrap: anywhere; }
 .modal-body .bad-text { color: var(--bad); font-weight: 600; }
+.modal-body .soft-text { background: var(--warn-bg); color: var(--fg); padding: 6px 10px; border-radius: 6px; font-size: 14px; }
+.modal-list {
+  margin: 6px 0; padding: 6px 8px 6px 26px; font-size: 13.5px; color: var(--muted); line-height: 1.45;
+  max-height: 32vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px;
+}
+.modal-list li { margin: 2px 0; overflow-wrap: anywhere; }
+.meta-note { width: 100%; font-size: 13px; color: var(--warn-text); }
+.picked-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; margin-top: 10px; }
+.more-btn { display: block; width: calc(100% - 24px); margin: 8px 12px 10px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
 .modal-actions button { padding: 8px 16px; }
 
@@ -246,8 +259,8 @@ button.small { font-size: 13px; padding: 3px 10px; }
 
 /* 手机和窄窗口：列表和阅读区轮流占满屏幕，页面不横向滚动 */
 @media (max-width: 800px) {
-  html, body { overflow-x: hidden; }
-  .top { flex-wrap: wrap; gap: 4px 10px; padding: 6px 10px; }
+  html, body { overflow-x: clip; }
+  .top { flex-wrap: wrap; gap: 4px 10px; padding: 6px 10px; position: static; }
   .brand span { display: none; }
   .tabs { order: 3; width: 100%; flex-wrap: wrap; gap: 0; }
   .tabs button { padding: 6px 9px; font-size: 14px; }
@@ -259,11 +272,18 @@ button.small { font-size: 13px; padding: 3px 10px; }
   .reader { overflow: visible; padding: 8px 12px 90px; }
   #tab-browse:not(.reading) .reader { display: none; }
   #tab-browse.reading .toc { display: none; }
-  .reader-back { display: inline-block; }
+  .reader-back {
+    display: block; position: sticky; top: 0; z-index: 3; width: calc(100% + 24px);
+    margin: -8px -12px 8px; padding: 10px 12px; text-align: left; border: none; border-radius: 0;
+    border-bottom: 1px solid var(--line); background: var(--surface);
+  }
   .doc { font-size: 15.5px; }
   .key-row { grid-template-columns: 1fr; }
   .review-item { flex-direction: column; gap: 6px; }
-  .select-bar { padding-left: 12px; padding-right: 12px; gap: 6px; }
+  .select-bar { padding-left: 12px; padding-right: 12px; gap: 6px; flex-wrap: wrap; }
+  .select-bar #select-go { flex: 1 1 100%; }
+  body.has-bar .toast { bottom: 110px; }
+  .toc, .reader { padding-bottom: 130px; }
   .toast { left: 10px; right: 10px; max-width: none; }
   .log { height: 300px; }
   .card { padding: 12px; }

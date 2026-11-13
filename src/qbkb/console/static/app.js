@@ -17,7 +17,11 @@ async function api(path, body) {
   const r = await fetch(path, opts);
   let data = {};
   try { data = await r.json(); } catch (e) { /* 非 JSON */ }
-  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error(data.error || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return data;
 }
 
@@ -47,6 +51,7 @@ function fmtTime(s) {
 // ---- 标签页 ----
 
 function showTab(name) {
+  if (name === "browse" && state.tab === "browse") closeReader();
   state.tab = name;
   for (const b of document.querySelectorAll(".tabs button")) {
     b.classList.toggle("active", b.dataset.tab === name);
@@ -118,7 +123,15 @@ const browse = {
   legacy: false,
   busy: false,
   scrollY: 0,
+  onlyPicked: false, // 「只看已选的」
+  byUrl: new Map(), // url → 文章，给确认框列标题、只看已选用
+  visible: new Set(), // 当前列表（站点 + 搜索）里的 url
 };
+
+const BATCH = 50; // 大栏目分批显示，每批 50 张卡片
+const BACKENDS = { deepl: "DeepL", azure: "Azure 翻译", llm: "大模型翻译", fake: "演示翻译" };
+// 这个 flag 几乎每篇 PDF 都有，卡片上已有 PDF 标签，只在阅读区提示一次
+const isPdfNoise = (f) => /PDF/.test(f) && /不完整/.test(f);
 
 async function loadToc() {
   const data = await api("/api/articles");
@@ -130,9 +143,9 @@ async function loadToc() {
     updateSelectBar();
     return;
   }
-  const alive = new Set();
-  for (const s of data.sites) for (const sec of s.sections) for (const a of sec.articles) alive.add(a.url);
-  for (const u of [...browse.picked]) if (!alive.has(u)) browse.picked.delete(u);
+  browse.byUrl = new Map();
+  for (const s of data.sites) for (const sec of s.sections) for (const a of sec.articles) browse.byUrl.set(a.url, a);
+  for (const u of [...browse.picked]) if (!browse.byUrl.has(u)) browse.picked.delete(u);
   if (browse.site !== "all" && !data.sites.some((s) => s.site === browse.site)) browse.site = "all";
   renderToc();
 }
@@ -196,12 +209,21 @@ function renderToc() {
     return;
   }
   renderSiteChips(data.sites);
+  browse.visible = new Set();
+  if (browse.onlyPicked && !browse.picked.size) browse.onlyPicked = false;
+  if (browse.onlyPicked) {
+    renderPickedList(list);
+    toc.scrollTop = scroll;
+    updateSelectBar();
+    return;
+  }
   let shown = 0;
   for (const site of data.sites) {
     if (browse.site !== "all" && browse.site !== site.site) continue;
     const blocks = [];
     for (const sec of site.sections) {
       const arts = q ? sec.articles.filter((a) => matches(a, q)) : sec.articles;
+      for (const a of arts) browse.visible.add(a.url);
       if (q && !arts.length) continue;
       shown += arts.length;
       blocks.push(sectionBlock(site, sec, arts, q));
@@ -216,6 +238,23 @@ function renderToc() {
   else if (q) list.prepend(el("div", { className: "hint search-hit", textContent: `找到 ${shown} 篇` }));
   toc.scrollTop = scroll;
   updateSelectBar();
+}
+
+// 「只看已选的」：把勾选的文章（不管在哪个站点、搜不搜得到）平铺出来，可逐个取消
+function renderPickedList(list) {
+  $("toc-sites").hidden = true;
+  const back = el("button", { type: "button", className: "ghost small", textContent: "← 回到全部文章" });
+  back.addEventListener("click", () => { browse.onlyPicked = false; renderToc(); });
+  list.append(el("div", { className: "picked-head" },
+    el("span", { className: "hint", id: "picked-head-text" }), back));
+  const box = el("div", { className: "sec-fold picked-list" });
+  for (const u of browse.picked) {
+    const a = browse.byUrl.get(u);
+    if (!a) continue;
+    browse.visible.add(u);
+    box.append(articleCard(a));
+  }
+  list.append(box);
 }
 
 function countTranslated(sites) {
@@ -239,7 +278,20 @@ function sectionBlock(site, sec, arts, q) {
     if (body.dataset.filled) return;
     body.dataset.filled = "1";
     body.append(sectionTools(arts));
-    for (const a of arts) body.append(articleCard(a));
+    let done = 0;
+    const more = el("button", { type: "button", className: "ghost more-btn" });
+    const batch = () => {
+      const frag = document.createDocumentFragment();
+      for (const a of arts.slice(done, done + BATCH)) frag.append(articleCard(a));
+      done = Math.min(done + BATCH, arts.length);
+      more.before(frag);
+      const left = arts.length - done;
+      more.hidden = left <= 0;
+      more.textContent = `再显示 ${Math.min(BATCH, left)} 篇（还剩 ${left} 篇）`;
+    };
+    more.addEventListener("click", batch);
+    body.append(more);
+    batch();
   };
   det.addEventListener("toggle", () => {
     if (det.open) fill();
@@ -252,7 +304,8 @@ function sectionBlock(site, sec, arts, q) {
 // 栏目里的快捷操作：把这个栏目还没翻全文的文章一次勾上
 function sectionTools(arts) {
   const todo = arts.filter((a) => !a.translated);
-  const all = el("button", { type: "button", className: "ghost small", textContent: `勾选未翻的 ${todo.length} 篇` });
+  const label = todo.length > MAX_PICK ? `勾选前 ${MAX_PICK} 篇（未翻 ${todo.length}）` : `勾选未翻的 ${todo.length} 篇`;
+  const all = el("button", { type: "button", className: "ghost small", textContent: label });
   all.disabled = !todo.length;
   all.addEventListener("click", () => {
     let skipped = 0;
@@ -284,6 +337,7 @@ function articleCard(a) {
     }
     if (box.checked) browse.picked.add(a.url); else browse.picked.delete(a.url);
     updateSelectBar();
+    if (browse.onlyPicked && !browse.picked.size) renderToc();
   });
   const check = el("label", { className: "art-check" }, box);
 
@@ -297,7 +351,7 @@ function articleCard(a) {
     el("span", { className: "art-date", textContent: a.date || "无日期" }),
     el("span", { className: `tag ${a.translated ? "full" : "brief"}`, textContent: a.translated ? "已翻全文" : "只有摘要" }));
   if (a.has_pdf) meta.append(el("span", { className: "tag pdf", textContent: "PDF" }));
-  for (const f of (a.flags || []).slice(0, 3)) meta.append(el("span", { className: "tag flag", textContent: f }));
+  for (const f of (a.flags || []).filter((x) => !isPdfNoise(x)).slice(0, 3)) meta.append(el("span", { className: "tag flag", textContent: f }));
   main.append(meta);
 
   if (a.summary) {
@@ -327,7 +381,14 @@ function updateSelectBar() {
   const show = n > 0 && state.tab === "browse" && !browse.legacy;
   $("select-bar").hidden = !show;
   document.body.classList.toggle("has-bar", show);
+  let inList = 0;
+  for (const u of browse.picked) if (browse.visible.has(u)) inList += 1;
   $("select-count").textContent = `已选 ${n} 篇`;
+  $("select-sub").textContent = browse.onlyPicked ? "正在只看已选的" : `当前列表里 ${inList} 篇`;
+  $("select-sub").classList.toggle("warn-text", !browse.onlyPicked && inList < n);
+  $("select-only").textContent = browse.onlyPicked ? "看全部" : "只看已选的";
+  const head = $("picked-head-text");
+  if (head) head.textContent = `已选的 ${n} 篇（取消勾选就不翻）`;
   $("select-go").textContent = `翻译选中的 ${n} 篇`;
   $("select-go").disabled = browse.busy;
 }
@@ -343,13 +404,20 @@ function askConfirm(title, lines, okLabel, showOk) {
     const body = $("modal-body");
     body.replaceChildren();
     for (const l of lines) {
-      body.append(el("p", { className: l.bad ? "bad-text" : "", textContent: l.text }));
+      if (l.list) {
+        const ul = el("ul", { className: "modal-list" });
+        for (const t of l.list) ul.append(el("li", { textContent: t }));
+        body.append(ul);
+      } else {
+        body.append(el("p", { className: l.bad ? "bad-text" : l.soft ? "soft-text" : "", textContent: l.text }));
+      }
     }
     $("modal-ok").hidden = !showOk;
     $("modal-ok").textContent = okLabel;
     $("modal-cancel").textContent = showOk ? "取消" : "知道了";
     $("modal").hidden = false;
-    (showOk ? $("modal-ok") : $("modal-cancel")).focus();
+    (showOk ? $("modal-ok") : $("modal-cancel")).focus({ preventScroll: true });
+    document.querySelector(".modal-box").scrollTop = 0;
     const done = (v) => {
       $("modal").hidden = true;
       $("modal-ok").onclick = $("modal-cancel").onclick = $("modal").onclick = null;
@@ -378,16 +446,39 @@ async function translateSelected(urls) {
       await askConfirm("不用翻译", [{ text: `选中的 ${urls.length} 篇都已经翻过全文了。` }], "", false);
       return;
     }
-    const lines = [{ text: `将翻 ${n} 篇${already ? `（另有 ${already} 篇已翻过，会跳过）` : ""}，${d.chars_upper_bound === true
-      ? `最多约 ${fmtNum(d.chars)} 字符（已翻过的段落不重复收费，实际会更少）`
-      : `约 ${fmtNum(d.chars)} 字符`}。` }];
-    lines.push({ text: `翻译服务：${d.backend || "未确定"}；剩余额度：${d.quota_left === null || d.quota_left === undefined ? "未知" : `${fmtNum(d.quota_left)} 字符`}。` });
-    if (typeof d.quota_left === "number" && typeof d.chars === "number" && d.chars > d.quota_left) {
-      lines.push({ text: "注意：预计字符数超过了剩余额度，可能翻不完。", bad: true });
+    // chars_base：基础估算；chars：最坏上限。没有 chars_base 的老后端按 chars_upper_bound 判断。
+    const hasBase = typeof d.chars_base === "number";
+    const charsText = hasBase
+      ? `约 ${fmtNum(d.chars_base)} 字符（最多 ${fmtNum(d.chars)}）`
+      : d.chars_upper_bound === true
+        ? `最多约 ${fmtNum(d.chars)} 字符（已翻过的段落不重复收费，实际会更少）`
+        : `约 ${fmtNum(d.chars)} 字符`;
+    const lines = [{ text: `将翻 ${n} 篇${already ? `（另有 ${already} 篇已翻过，会跳过）` : ""}，${charsText}。` }];
+    // 要翻的标题（已翻全文的会被后端跳过，这里也不列）
+    const titles = urls.map((u) => browse.byUrl.get(u)).filter((a) => a && !a.translated).map((a) => a.title || a.title_en || a.url);
+    if (titles.length) {
+      const shownTitles = titles.slice(0, 10);
+      if (titles.length > 10) shownTitles.push(`…共 ${n} 篇`);
+      lines.push({ list: shownTitles });
+    }
+    const hasQuota = typeof d.quota_left === "number";
+    if (d.backend) {
+      lines.push({ text: `翻译服务：${BACKENDS[d.backend] || d.backend}；剩余额度：${hasQuota ? `${fmtNum(d.quota_left)} 字符` : "未知"}。` });
+    } else {
+      lines.push({ text: "还没配置翻译服务，开始后会失败。请先到「设置」里填好翻译服务的 key。", bad: true });
+    }
+    // 红字只给「基础估算就超额度」；只有上限超额度时用温和提示
+    const base = hasBase ? d.chars_base : d.chars_upper_bound === true ? null : d.chars;
+    const BAD = "注意：预计字符数超过了剩余额度，可能翻不完；额度不够会自动停下，已翻的会保存。";
+    const SOFT = "最多的情况会超过剩余额度。这是保守估计，实际通常更少；额度不够会自动停下，已翻的会保存。";
+    if (hasQuota && typeof base === "number" && base > d.quota_left) {
+      lines.push({ text: BAD, bad: true });
+    } else if (hasQuota && typeof d.chars === "number" && d.chars > d.quota_left) {
+      lines.push({ text: SOFT, soft: true });
     }
     if (!(await askConfirm("确认翻译全文", lines, `开始翻译 ${n} 篇`, true))) return;
     const r = await api("/api/translate", { urls, dry_run: false });
-    browse.picked.clear();
+    for (const u of urls) browse.picked.delete(u);
     syncChecks();
     updateSelectBar();
     toast(`已开始翻译 ${r.count ?? n} 篇，进度看下面的日志。`);
@@ -395,7 +486,7 @@ async function translateSelected(urls) {
     if (j.job) beginJob(j.job);
     showTab("run");
   } catch (e) {
-    toast(e.message, true);
+    toast(e.status === 409 ? "已有翻译或运行任务在跑，等它完成再点。勾选都还留着。" : e.message, true);
   } finally {
     browse.busy = false;
     updateSelectBar();
@@ -434,6 +525,14 @@ async function openArticle(url, view) {
       st.className = `tag ${d.translated ? "full" : "brief"}`;
     }
     $("meta-translate").hidden = !(known && !d.translated) || browse.legacy;
+    // 只有摘要的文章：没有翻译时间，也没有中英对照可看
+    const brief = known && !d.translated;
+    $("meta-translated").hidden = brief;
+    document.querySelector(".views").hidden = brief;
+    const a = browse.byUrl.get(url);
+    const note = a && (a.flags || []).find(isPdfNoise);
+    $("meta-note").hidden = !note;
+    $("meta-note").textContent = note ? `提示：${note}（PDF 转出来的正文，公式和表格请对照原文）` : "";
     body.innerHTML = d.html; // 服务端已渲染并做过安全处理（render.py）
     body.parentElement.scrollTop = 0;
     window.scrollTo(0, 0);
@@ -777,7 +876,19 @@ document.addEventListener("DOMContentLoaded", () => {
     }, 200);
   });
   $("select-go").addEventListener("click", () => translateSelected([...browse.picked]));
-  $("select-clear").addEventListener("click", () => { browse.picked.clear(); syncChecks(); updateSelectBar(); });
+  $("select-clear").addEventListener("click", () => {
+    browse.picked.clear();
+    if (browse.onlyPicked) { browse.onlyPicked = false; renderToc(); }
+    syncChecks();
+    updateSelectBar();
+  });
+  $("select-only").addEventListener("click", () => {
+    browse.onlyPicked = !browse.onlyPicked;
+    closeReader();
+    renderToc();
+    window.scrollTo(0, 0);
+    $("toc").scrollTop = 0;
+  });
   $("reader-back").addEventListener("click", closeReader);
   $("meta-translate").addEventListener("click", () => { if (state.url) translateSelected([state.url]); });
   $("run-start").addEventListener("click", startRun);
