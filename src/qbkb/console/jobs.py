@@ -133,6 +133,19 @@ def retranslate_commands(
     return [tr, ex]
 
 
+def translate_urls_commands(
+    ws: Workspace, url_file: Path, python: str = sys.executable
+) -> list[list[str]]:
+    """「翻选中的文章全文」：translate --url-file 清单，然后 export 把译文发布出来。
+
+    没带 --site：清单里的文章可能来自几个站点，translate 会逐站点处理各自的网址。
+    """
+    tr = [python, "-m", "qbkb.cli", "translate", *base_args(ws), *backend_args(ws)]
+    tr += ["--url-file", str(url_file)]
+    ex = [python, "-m", "qbkb.cli", "export", *base_args(ws), "--out", str(ws.out)]
+    return [tr, ex]
+
+
 def child_env(base: Mapping[str, str]) -> dict[str, str]:
     """子进程统一 UTF-8 输出（Windows 默认 GBK），不缓冲（实时看到进度）。"""
     env = dict(base)

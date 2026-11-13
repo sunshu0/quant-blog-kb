@@ -24,12 +24,13 @@ import os
 import secrets
 import sys
 import threading
+import time
 import webbrowser
 from collections.abc import Callable, Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
@@ -37,7 +38,7 @@ import yaml
 
 from qbkb import config, store
 from qbkb.config import CONFIG_DIR
-from qbkb.console import demo, jobs, sections_ui
+from qbkb.console import browse, demo, jobs, sections_ui
 from qbkb.console.net import LocalServer
 from qbkb.console.render import render_markdown
 from qbkb.console.schedule import ScheduleError, Scheduler, TaskState
@@ -275,6 +276,7 @@ class App:
         return {
             "mode": ws.mode,
             "total": len(rows),
+            "sites": self._sites_view(ws, rows),
             "groups": [
                 {
                     "category": c,
@@ -285,6 +287,68 @@ class App:
                 for c in order
             ],
         }
+
+    def _site_layout(self, ws: Workspace) -> list[tuple[str, str, list[tuple[str, str]]]]:
+        """按配置顺序的 (站点 id, 站点显示名, [(栏目 id, 栏目名)])。配置读不出来的站点只给 id。"""
+        cfg = ws.config_dir or CONFIG_DIR
+        out: list[tuple[str, str, list[tuple[str, str]]]] = []
+        try:
+            names = config.list_sites(cfg)
+        except OSError:
+            return out
+        for name in names:
+            if ws.site and name != ws.site:
+                continue
+            display = name
+            secs: list[tuple[str, str]] = []
+            try:
+                site = config.load_site(name, cfg)
+                display = browse.site_display_name(name, site.raw.get("firm"))
+                secs = [(s.id, s.name) for s in load_section_rules(site).sections]
+            except (OSError, ValueError, yaml.YAMLError):
+                pass
+            out.append((name, display, secs))
+        return out
+
+    def _sites_view(self, ws: Workspace, rows: list[Any]) -> list[dict[str, object]]:
+        """站点 → 栏目 → 文章 的分组（浏览页 v2）。站点、栏目按配置顺序，文章按日期倒序。"""
+        layout = self._site_layout(ws)
+        by_site: dict[str, list[Any]] = {}
+        for r in rows:
+            by_site.setdefault(str(r["site"]), []).append(r)
+        known = {site for site, _, _ in layout}
+        layout += [(s, s, []) for s in sorted(by_site) if s not in known]
+        sites: list[dict[str, object]] = []
+        for site, display, secs in layout:
+            site_rows = by_site.get(site)
+            if not site_rows:
+                continue
+            labels = dict(secs)
+            groups: dict[str, dict[str, Any]] = {}
+            for r in site_rows:
+                sid = str(r["section"]) if r["section"] else ""
+                if sid:
+                    key, label = sid, labels.get(sid, sid)
+                else:
+                    label = str(r["category"] or "未分类")
+                    key = f"category:{label}"
+                g = groups.setdefault(key, {"id": key, "name": label, "articles": []})
+                g["articles"].append(browse.article_card(r))
+            order = [sid for sid, _ in secs if sid in groups]
+            order += sorted(k for k in groups if k not in order)
+            sections: list[dict[str, object]] = []
+            for key in order:
+                g = groups[key]
+                arts = sorted(
+                    g["articles"], key=lambda a: (str(a["date"] or ""), str(a["url"])), reverse=True
+                )
+                sections.append(
+                    {"id": g["id"], "name": g["name"], "total": len(arts), "articles": arts}
+                )
+            sites.append(
+                {"site": site, "name": display, "total": len(site_rows), "sections": sections}
+            )
+        return sites
 
     def article(self, url: str, view: str) -> dict[str, object]:
         from qbkb.export import article_paths
@@ -324,6 +388,9 @@ class App:
             else None,
             "translated_at": row["translated_at"],
             "translator": row["translator"],
+            "summary": row["summary_zh"] or None,
+            "translated": bool(row["translated_at"]),
+            "has_pdf": bool(row["pdf_path"]),
             "view": view,
             "html": body,
         }
@@ -735,6 +802,91 @@ class App:
         title = f"重翻 {url}" if url else f"重翻站点 {site} 的待复查文章"
         return self._start(ws, "retranslate", title, jobs.retranslate_commands(ws, url, site))
 
+    def translate_fulltext(self, body: Mapping[str, Any]) -> dict[str, object]:
+        """翻选中文章的全文。dry_run=true 只估算（不调外部服务）；false 才开后台任务。"""
+        dry_run = body.get("dry_run")
+        if not isinstance(dry_run, bool):
+            raise _bad("dry_run 必须是 true / false")
+        raw = body.get("urls")
+        if not isinstance(raw, list) or any(not isinstance(u, str) or not u for u in raw):
+            raise _bad("urls 必须是网址列表")
+        urls = list(dict.fromkeys(cast("list[str]", raw)))
+        if not urls:
+            raise _bad("请先选择要翻译的文章")
+        if len(urls) > browse.MAX_TRANSLATE_URLS:
+            raise _bad(f"一次最多选 {browse.MAX_TRANSLATE_URLS} 篇")
+        ws = self.ws()
+        conn = self._conn(ws)
+        if conn is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "还没有文章")
+        try:
+            todo: list[str] = []
+            for url in urls:
+                row = store.get_article(conn, url)
+                if (
+                    row is None
+                    or row["status"] != Status.PUBLISHED
+                    or (ws.site and row["site"] != ws.site)
+                ):
+                    raise _bad(f"只能选已发布的文章，这篇不是：{url}")
+                if not row["translated_at"]:
+                    todo.append(url)
+            already = len(urls) - len(todo)
+            if dry_run:
+                return self._translate_estimate(ws, conn, todo, already)
+        finally:
+            conn.close()
+        if not todo:
+            raise _bad("选中的文章都已经翻过全文了")
+        # 同 _prepare 的检查，但不必启动演示站点：演示译者自带中文，translate 不联网
+        if self.jobs.running():
+            raise ApiError(HTTPStatus.CONFLICT, "已经有任务在运行，等它跑完再开始新的")
+        if not ws.demo and not keys_configured(self.keys()):
+            raise _bad("真实模式需要先在「设置」页填写 DeepL 的 key（或切回演示模式）")
+        path = self._write_url_list(todo)
+        try:
+            title = f"翻译全文（{len(todo)} 篇，{'演示' if ws.demo else '真实'}模式）"
+            self._start(ws, "translate", title, jobs.translate_urls_commands(ws, path))
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return {"started": True, "count": len(todo)}
+
+    def _translate_estimate(
+        self, ws: Workspace, conn: Any, todo: list[str], already: int
+    ) -> dict[str, object]:
+        """dry_run：估算待翻字符数。只读状态库和 quota.json，不建翻译客户端、不联网。"""
+        name = self._translator_name(ws)
+        chars = 0
+        if name is not None and todo:
+            chars = browse.estimate_fulltext_chars(conn, todo, name, self._glossary(ws))
+        quota = None if ws.demo else read_json(state_dir(self.root) / QUOTA_FILE)
+        left = quota.get("remaining") if quota else None
+        has_key = (
+            ws.demo or self._translator_factory is not None or bool(self.keys().get(DEEPL_KEY))
+        )
+        return {
+            "count": len(todo),
+            "already": already,
+            "chars": chars,
+            "chars_upper_bound": False,  # 已扣掉翻译记忆命中的段落,不是上限
+            "backend": name.split(":")[0] if name and has_key else None,
+            "quota_left": left if isinstance(left, int) else None,
+        }
+
+    def _write_url_list(self, urls: list[str]) -> Path:
+        """把要翻的网址写进临时清单（每行一个）。顺手清掉一天前留下的旧清单。"""
+        folder = state_dir(self.root)
+        folder.mkdir(parents=True, exist_ok=True)
+        cutoff = time.time() - 86400
+        for old in folder.glob("translate-urls-*.txt"):
+            with contextlib.suppress(OSError):
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+        path = folder / f"translate-urls-{secrets.token_hex(6)}.txt"
+        path.write_bytes(("\n".join(urls) + "\n").encode("utf-8"))
+        return path
+
     def _start(
         self, ws: Workspace, kind: str, title: str, commands: list[list[str]]
     ) -> dict[str, object]:
@@ -1015,6 +1167,7 @@ def make_handler(app: App, port_box: list[int]) -> type[BaseHTTPRequestHandler]:
             routes: dict[str, Callable[[dict[str, Any]], dict[str, object]]] = {
                 "/api/run": app.start_run,
                 "/api/retranslate": app.retranslate,
+                "/api/translate": app.translate_fulltext,
                 "/api/stop": lambda b: app.stop(),
                 "/api/keys": app.save_keys,
                 "/api/keys/test": app.test_key,
