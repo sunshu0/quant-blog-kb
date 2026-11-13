@@ -378,12 +378,13 @@ async function translateSelected(urls) {
       await askConfirm("不用翻译", [{ text: `选中的 ${urls.length} 篇都已经翻过全文了。` }], "", false);
       return;
     }
-    const lines = [{ text: `将翻 ${n} 篇${already ? `（另有 ${already} 篇已翻过，会跳过）` : ""}，约 ${fmtNum(d.chars)} 字符。` }];
+    const lines = [{ text: `将翻 ${n} 篇${already ? `（另有 ${already} 篇已翻过，会跳过）` : ""}，${d.chars_upper_bound === true
+      ? `最多约 ${fmtNum(d.chars)} 字符（已翻过的段落不重复收费，实际会更少）`
+      : `约 ${fmtNum(d.chars)} 字符`}。` }];
     lines.push({ text: `翻译服务：${d.backend || "未确定"}；剩余额度：${d.quota_left === null || d.quota_left === undefined ? "未知" : `${fmtNum(d.quota_left)} 字符`}。` });
     if (typeof d.quota_left === "number" && typeof d.chars === "number" && d.chars > d.quota_left) {
       lines.push({ text: "注意：预计字符数超过了剩余额度，可能翻不完。", bad: true });
     }
-    lines.push({ text: "字符数是按正文估算的，翻译记忆里已有的段落不会再花额度。" });
     if (!(await askConfirm("确认翻译全文", lines, `开始翻译 ${n} 篇`, true))) return;
     const r = await api("/api/translate", { urls, dry_run: false });
     browse.picked.clear();
