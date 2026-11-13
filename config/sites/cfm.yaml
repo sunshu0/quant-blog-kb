@@ -84,25 +84,25 @@ sections:
     selector: ".thinking-type-container h5"
   list:
     - id: the-edge-a-cfm-blog
-      name: The Edge a CFM blog
+      name: The Edge 博客（The Edge a CFM blog）
       key: The Edge a CFM blog
       collect: false
       status: 已调研
       survey: {sampled: 20, wanted: 8, ratio: 0.40, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
     - id: commentary-insights
-      name: Commentary & Insights
+      name: 评论与洞察（Commentary & Insights）
       key: Commentary & Insights
       collect: false
       status: 已调研
       survey: {sampled: 20, wanted: 7, ratio: 0.35, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
     - id: academic-papers
-      name: Academic Papers
+      name: 学术论文（Academic Papers）
       key: Academic Papers
       collect: true
       status: 已选择
       survey: {sampled: 20, wanted: 20, ratio: 1.00, date: 2026-11-13, by: "孙硕（AI 初标，用户确认）"}
     - id: whitepaper
-      name: Whitepaper
+      name: 白皮书（Whitepaper）
       key: Whitepaper
       collect: true
       status: 已选择

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -554,6 +554,24 @@ class JobManager:
             self._job = job
             self._thread = thread
             return job
+
+    @contextlib.contextmanager
+    def exclusive(self, who: str) -> Iterator[None]:
+        """在控制台进程内直接调用付费翻译（不开子进程）时用：原子拿到和后台任务同一把 OS 锁。
+
+        持有期间 start() 取不到锁（Busy → 409），定时任务和命令行的 run 也拿不到；
+        已经有任务在跑就直接抛 Busy。用单独的 RunLock 对象（同一个锁文件），不碰 self.lock 的状态。
+        子进程（qbkb translate 等）自己不取这把锁，所以不会和持有者抢锁。
+        """
+        lock = RunLock(self.root)
+        with self._mutex:
+            if self.running():
+                raise Busy("已经有任务在运行，等它跑完再开始新的")
+            lock.acquire(f"控制台：{who}")
+        try:
+            yield
+        finally:
+            lock.release()
 
     def _work(self, job: Job, ws: Workspace, env: dict[str, str]) -> None:
         secrets = self._secrets()

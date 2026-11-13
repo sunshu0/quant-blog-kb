@@ -8,15 +8,17 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from qbkb import store
-from qbkb.console import sections_ui
+from qbkb.models import segment_hash
 from qbkb.translate.fixed import is_interview, untranslated_units
 from qbkb.translate.footnotes import sent_length
 from qbkb.translate.glossary import Glossary
-from qbkb.translate.pipeline import title_unit
+from qbkb.translate.pipeline import lookup_translation, title_unit
 
 MAX_FLAGS = 3
 MAX_FLAG_CHARS = 24
@@ -73,22 +75,66 @@ def article_card(r: Mapping[str, Any] | sqlite3.Row) -> dict[str, object]:
     }
 
 
-def estimate_fulltext_chars(
-    conn: sqlite3.Connection, urls: Iterable[str], backend: str, glossary: Glossary
-) -> int:
-    """估算翻这些文章全文还要多少字符：正文段落 + 标题，扣掉固定译文和翻译记忆已命中的，
-    跨文章去重。按送出前的长度算（DeepL 脚注占位展开后），是上限：实际可能因后端而略有出入。
+@dataclass(frozen=True, slots=True)
+class FulltextEstimate:
+    """翻选中文章全文的字符估算。
+
+    base：按流水线（translate_article）同样的规则算出的基础字符数，不含结构校验失败后的重试；
+    maximum：再加上"每个待翻正文段落都校验失败、重翻一次"的最坏情况
+    （重翻单独送一次、不带 context）。
+    没有待翻正文段落时只剩标题（标题不重试），base 就是确切值。
     """
-    units: list[str] = []
+
+    base: int
+    maximum: int
+
+    @property
+    def exact(self) -> bool:
+        return self.base == self.maximum
+
+
+def estimate_fulltext(
+    conn: sqlite3.Connection, urls: Iterable[str], backend: str, glossary: Glossary
+) -> FulltextEstimate:
+    """估算翻这些文章全文要送出多少字符，规则和 translate_article 一致（--retry-rejected 关）：
+
+    - 正文段落：固定译文 / 说话人标签不送；翻译记忆里有记录的不送（含 rejected：流水线不自动重翻，
+      留给人工复查）；没有记录的才送。跨文章按 hash 去重（先翻的写进翻译记忆，后面的命中）；
+    - 标题：只有翻译记忆里有**可用**译文才免费，rejected 的照样送；和某个待翻正文段落相同的
+      标题单元也免费（正文先翻完，标题命中）；
+    - 按送出前的长度算（DeepL 脚注占位展开后）。
+    """
+    body: dict[str, str] = {}  # hash → 待翻正文段落
+    titles: dict[str, None] = {}
     for url in urls:
         row = store.get_article(conn, url)
         if row is None:
             continue
         segments = store.get_segments(conn, url)
         skip = untranslated_units(segments, glossary.fixed, interview=is_interview(row["tags"]))
-        units += [seg.html for seg in segments if seg.src_hash not in skip]
+        for seg in segments:
+            if seg.src_hash in skip or seg.src_hash in body:
+                continue
+            if store.tm_lookup(conn, seg.src_hash, backend, glossary.version_for(seg.html)):
+                continue
+            body[seg.src_hash] = seg.html
         title = row["title"]
         if title and str(title).strip():
-            units.append(title_unit(str(title)))
-    missing = sections_ui.missing_units(conn, units, backend, glossary)
-    return sum(sent_length(u) for u in missing)
+            titles[title_unit(str(title))] = None
+    body_chars = sum(sent_length(h) for h in body.values())
+    title_chars = sum(
+        sent_length(u)
+        for u in titles
+        if segment_hash(u) not in body and lookup_translation(conn, u, backend, glossary) is None
+    )
+    return FulltextEstimate(base=body_chars + title_chars, maximum=2 * body_chars + title_chars)
+
+
+def url_problem(url: str) -> str | None:
+    """网址不能带控制字符（含换行、NUL）、行分隔符，也不能首尾有空白或以 # 开头：
+    网址清单是一行一个，这些字符会把一个网址拆成几行，或者被当成注释行。"""
+    if url != url.strip() or url.startswith("#"):
+        return "网址首尾不能有空白，也不能以 # 开头"
+    if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in url):
+        return "网址里不能有换行、控制字符"
+    return None

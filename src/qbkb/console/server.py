@@ -699,7 +699,7 @@ class App:
             raise _bad("这个栏目没有抽样的文章")
         # 互斥：翻译记忆按文本 hash 共享，不同栏目可能撞同一段文本；只按栏目拦重入挡不住两个标签页
         # 同时翻不同栏目各自重复计费。所以用一把 App 级锁：整个控制台同一时间只允许一个栏目在翻译。
-        # 跨进程（CLI 和控制台同时翻）不在此锁范围内。
+        # 另外还要拿任务锁（见下），和后台任务、每天的定时任务互斥。
         with self._translating_lock:
             if self._translating:
                 raise ApiError(HTTPStatus.CONFLICT, "已有栏目正在翻译，等它完成再点")
@@ -707,44 +707,12 @@ class App:
         done = 0
         failed_plain: list[str] = []
         try:
-            try:
-                translator = self._translator(ws)
-            except Exception as e:
-                raise ApiError(HTTPStatus.BAD_REQUEST, f"翻译后端起不来：{e}") from e
-            glossary = self._glossary(ws)
-            conn = self._conn(ws)
-            if conn is None:
-                raise ApiError(HTTPStatus.NOT_FOUND, "还没有文章")
-            try:
-                units: list[str] = []
-                title_rows: list[tuple[str, str]] = []
-                for r in sec_rows:
-                    url = r.get("网址", "")
-                    row = store.get_article(conn, url)
-                    if row is None:
-                        continue
-                    title = str(row["title"] or "")
-                    if title and not row["title_zh"]:
-                        units.append(title_unit(title))
-                        title_rows.append((url, title))
-                    summary = sections_ui.summary_text(conn, url)
-                    if summary:
-                        units.append(sections_ui.summary_unit(summary))
-                try:
-                    done, failed = sections_ui.translate_units(conn, units, translator, glossary)
-                except QuotaExceededError as e:
-                    raise ApiError(
-                        HTTPStatus.TOO_MANY_REQUESTS, f"翻译额度用完，没翻完：{e}"
-                    ) from e
-                except TranslatorUnavailableError as e:
-                    raise ApiError(HTTPStatus.BAD_GATEWAY, f"翻译后端暂时不可用：{e}") from e
-                for url, title in title_rows:
-                    zh = translated_title(conn, title, translator.name, glossary)
-                    if zh:
-                        store.set_fields(conn, url, title_zh=zh)
-                failed_plain = [plain_text(u) for u in failed]
-            finally:
-                conn.close()
+            # 和 /api/run、/api/translate、重翻共用同一把任务锁：原子拿到后才读翻译记忆、
+            # 构造待翻单元，一直持有到调用和翻译记忆落库结束，期间别的翻译入口都返回 409
+            with self.jobs.exclusive("栏目翻译"):
+                done, failed_plain = self._translate_section_units(ws, sec_rows)
+        except jobs.Busy as e:
+            raise ApiError(HTTPStatus.CONFLICT, str(e)) from e
         finally:
             with self._translating_lock:
                 self._translating = False
@@ -752,6 +720,49 @@ class App:
         view["translated"] = done
         view["failed"] = failed_plain
         return view
+
+    def _translate_section_units(
+        self, ws: Workspace, sec_rows: list[dict[str, str]]
+    ) -> tuple[int, list[str]]:
+        """翻一个栏目抽样文章的标题 + 摘要（调用方已持有任务锁）。
+
+        返回 (新译条数, 校验失败的原文)。"""
+        try:
+            translator = self._translator(ws)
+        except Exception as e:
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"翻译后端起不来：{e}") from e
+        glossary = self._glossary(ws)
+        conn = self._conn(ws)
+        if conn is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "还没有文章")
+        try:
+            units: list[str] = []
+            title_rows: list[tuple[str, str]] = []
+            for r in sec_rows:
+                url = r.get("网址", "")
+                row = store.get_article(conn, url)
+                if row is None:
+                    continue
+                title = str(row["title"] or "")
+                if title and not row["title_zh"]:
+                    units.append(title_unit(title))
+                    title_rows.append((url, title))
+                summary = sections_ui.summary_text(conn, url)
+                if summary:
+                    units.append(sections_ui.summary_unit(summary))
+            try:
+                done, failed = sections_ui.translate_units(conn, units, translator, glossary)
+            except QuotaExceededError as e:
+                raise ApiError(HTTPStatus.TOO_MANY_REQUESTS, f"翻译额度用完，没翻完：{e}") from e
+            except TranslatorUnavailableError as e:
+                raise ApiError(HTTPStatus.BAD_GATEWAY, f"翻译后端暂时不可用：{e}") from e
+            for url, title in title_rows:
+                zh = translated_title(conn, title, translator.name, glossary)
+                if zh:
+                    store.set_fields(conn, url, title_zh=zh)
+            return done, [plain_text(u) for u in failed]
+        finally:
+            conn.close()
 
     # ---- 写 ----
 
@@ -810,6 +821,9 @@ class App:
         raw = body.get("urls")
         if not isinstance(raw, list) or any(not isinstance(u, str) or not u for u in raw):
             raise _bad("urls 必须是网址列表")
+        for u in cast("list[str]", raw):
+            if (problem := browse.url_problem(u)) is not None:
+                raise _bad(problem)
         urls = list(dict.fromkeys(cast("list[str]", raw)))
         if not urls:
             raise _bad("请先选择要翻译的文章")
@@ -857,9 +871,9 @@ class App:
     ) -> dict[str, object]:
         """dry_run：估算待翻字符数。只读状态库和 quota.json，不建翻译客户端、不联网。"""
         name = self._translator_name(ws)
-        chars = 0
+        est = browse.FulltextEstimate(0, 0)
         if name is not None and todo:
-            chars = browse.estimate_fulltext_chars(conn, todo, name, self._glossary(ws))
+            est = browse.estimate_fulltext(conn, todo, name, self._glossary(ws))
         quota = None if ws.demo else read_json(state_dir(self.root) / QUOTA_FILE)
         left = quota.get("remaining") if quota else None
         has_key = (
@@ -868,8 +882,11 @@ class App:
         return {
             "count": len(todo),
             "already": already,
-            "chars": chars,
-            "chars_upper_bound": False,  # 已扣掉翻译记忆命中的段落,不是上限
+            # chars 已扣掉翻译记忆命中的段落，并把结构校验失败后的重翻算作最坏情况（上限）；
+            # chars_base 是不含重翻的基础估算；没有待翻正文段落（只剩标题）时两者相等、不是上限
+            "chars": est.maximum,
+            "chars_base": est.base,
+            "chars_upper_bound": not est.exact,
             "backend": name.split(":")[0] if name and has_key else None,
             "quota_left": left if isinstance(left, int) else None,
         }
@@ -884,7 +901,12 @@ class App:
                 if old.stat().st_mtime < cutoff:
                     old.unlink()
         path = folder / f"translate-urls-{secrets.token_hex(6)}.txt"
-        path.write_bytes(("\n".join(urls) + "\n").encode("utf-8"))
+        text = "\n".join(urls) + "\n"
+        path.write_bytes(text.encode("utf-8"))
+        # 消费方（qbkb translate --url-file）按行拆：确认每一行正好是选中的那一个网址
+        if text.splitlines() != urls:
+            path.unlink(missing_ok=True)
+            raise _bad("网址里含有换行等特殊字符，拒绝翻译")
         return path
 
     def _start(

@@ -145,7 +145,7 @@ def test_sites_grouped_in_config_order_and_old_groups_kept(tmp_path: Path) -> No
     # 栏目按配置顺序（academic-papers 在 whitepaper 前），未知栏目最后
     assert [s["id"] for s in cfm["sections"]] == ["academic-papers", "whitepaper", "zzz-new"]
     assert [s["total"] for s in cfm["sections"]] == [1, 2, 1]
-    assert cfm["sections"][1]["name"] == "Whitepaper"
+    assert cfm["sections"][1]["name"] == "白皮书（Whitepaper）"  # 中文在前，英文括号在后
     assert cfm["sections"][2]["name"] == "zzz-new"  # 未知栏目没有名字就显示 id
     wp = cfm["sections"][1]["articles"]
     assert [a["date"] for a in wp] == ["2024-06-01", "2023-05-01"]  # 日期倒序
@@ -338,7 +338,8 @@ def test_dry_run_counts_already_and_estimates_without_external_calls(
     assert data["count"] == 1 and data["already"] == 1  # wp_new 已翻
     assert data["backend"] == "deepl" and data["quota_left"] is None
     full = data["chars"]
-    assert full > 0 and data["chars_upper_bound"] is False
+    # 有待翻正文段落：chars 把"校验失败重翻一次"也算进去（上限），chars_base 是不含重翻的基础值
+    assert full > data["chars_base"] > 0 and data["chars_upper_bound"] is True
     # 正文段落进翻译记忆后，估算减少
     conn = store.connect(tmp_path / "state.db")
     unit = "<p>Some English paragraph for the article.</p>"
@@ -351,8 +352,10 @@ def test_dry_run_counts_already_and_estimates_without_external_calls(
         glossary.version_for(unit),
     )
     conn.close()
-    after = _post(client, {"urls": [urls["wp_old"]], "dry_run": True}).json()["chars"]
-    assert after < full
+    est = _post(client, {"urls": [urls["wp_old"]], "dry_run": True}).json()
+    # 正文命中后只剩标题（标题不重试）：数字是确切的，不再是上限
+    assert est["chars"] == est["chars_base"] > 0 and est["chars"] < full
+    assert est["chars_upper_bound"] is False
     # 额度来自上次记录（quota.json），没有就是 null
     (tmp_path / ".qbkb" / "quota.json").write_text(
         json.dumps({"used": 1, "limit": 500000, "remaining": 499999}), encoding="utf-8"
@@ -454,6 +457,222 @@ def test_dry_run_uses_injected_backend_name_in_demo(tmp_path: Path) -> None:
         "--url-file",
         "x.txt",
     ]
+
+
+def _tm_put(conn: Any, unit: str, glossary: Any, tgt: str, **kw: Any) -> None:
+    store.tm_put(
+        conn, segment_hash(unit), REAL_BACKEND, unit, tgt, glossary.version_for(unit), **kw
+    )
+
+
+def test_estimate_matches_pipeline_title_rejected_body_hit(tmp_path: Path) -> None:
+    """标题只有 rejected 的翻译记忆 + 正文已命中：流水线仍会送标题，估算不能报 0。"""
+    from qbkb.translate.fake import FakeTranslator
+    from qbkb.translate.pipeline import title_unit, translate_article
+
+    app = _real_app(tmp_path)
+    conn = store.connect(tmp_path / "state.db")
+    url = _add(conn, "cfm", "a", section="whitepaper", title_zh=None)
+    glossary = app._glossary(app.ws())  # pyright: ignore[reportPrivateUsage]
+    body = "<p>Some English paragraph for the article.</p>"
+    _tm_put(conn, body, glossary, "<p>已翻正文。</p>")
+    _tm_put(conn, title_unit("Title a"), glossary, "<b>坏的</b>", quality=store.TM_REJECTED)
+    conn.close()
+    est = app.translate_fulltext({"urls": [url], "dry_run": True})
+    title_len = len(title_unit("Title a"))
+    assert est["chars"] == est["chars_base"] == title_len > 0
+    assert est["chars_upper_bound"] is False  # 没有待翻正文，标题不重试：确切值
+    # 和流水线对照：真实送出的就是这个标题，字符数相同
+    tr = FakeTranslator(name=REAL_BACKEND)
+    conn = store.connect(tmp_path / "state.db")
+    translate_article(conn, url, tr, glossary)
+    conn.close()
+    assert tr.calls == [[title_unit("Title a")]] and tr.chars_used == est["chars"]
+
+
+def test_estimate_base_equals_real_send_and_skips_rejected_body(tmp_path: Path) -> None:
+    from qbkb.translate.fake import FakeTranslator
+    from qbkb.translate.pipeline import translate_article
+
+    app = _real_app(tmp_path)
+    conn = store.connect(tmp_path / "state.db")
+    url = _add(conn, "cfm", "b", section="whitepaper", title_zh=None)
+    other = _add(conn, "cfm", "c", section="whitepaper", title_zh=None, body="Second body.")
+    glossary = app._glossary(app.ws())  # pyright: ignore[reportPrivateUsage]
+    # 第二篇的正文有 rejected 记录：流水线不自动重翻，不送也不该估
+    _tm_put(conn, "<p>Second body.</p>", glossary, "<b>坏</b>", quality=store.TM_REJECTED)
+    conn.close()
+    est: Any = app.translate_fulltext({"urls": [url, other], "dry_run": True})
+    tr = FakeTranslator(name=REAL_BACKEND)
+    conn = store.connect(tmp_path / "state.db")
+    translate_article(conn, url, tr, glossary)
+    translate_article(conn, other, tr, glossary)
+    conn.close()
+    assert est["chars_base"] == tr.chars_used  # 所有请求都通过校验时，基础估算正好等于实际
+    assert est["chars"] > est["chars_base"] and est["chars_upper_bound"] is True
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "https://cfm.example.test/a\nhttps://cfm.example.test/b",
+        "https://cfm.example.test/a\r",
+        "https://cfm.example.test/a\x00",
+        "https://cfm.example.test/a\x85b",
+        "https://cfm.example.test/a b",
+        " https://cfm.example.test/a",
+        "https://cfm.example.test/a ",
+        "#https://cfm.example.test/a",
+    ],
+)
+def test_urls_with_control_chars_or_outer_whitespace_are_rejected(tmp_path: Path, bad: str) -> None:
+    popen = SpyPopen()
+    app = _real_app(tmp_path, popen)
+    conn = store.connect(tmp_path / "state.db")
+    # 状态库里真有这样的异常主键且已发布：入参校验也得先拒绝，不能把它拆成清单里的多行
+    store.upsert_discovered(conn, DiscoveredUrl(bad, "cfm", "x"))
+    store.set_status(conn, bad, Status.PUBLISHED, title="T")
+    conn.close()
+    for dry in (True, False):
+        with pytest.raises(ApiError) as info:
+            app.translate_fulltext({"urls": [bad], "dry_run": dry})
+        assert info.value.status == 400
+    assert popen.calls == [] and not list((tmp_path / ".qbkb").glob("translate-urls-*.txt"))
+
+
+def test_url_list_is_checked_line_by_line_before_use(tmp_path: Path) -> None:
+    app = _real_app(tmp_path)
+    ok = app._write_url_list(["https://x.test/a", "https://x.test/b"])  # pyright: ignore[reportPrivateUsage]
+    assert ok.read_text(encoding="utf-8").splitlines() == ["https://x.test/a", "https://x.test/b"]
+    with pytest.raises(ApiError) as info:
+        app._write_url_list(["https://x.test/a\nhttps://x.test/b"])  # pyright: ignore[reportPrivateUsage]
+    assert info.value.status == 400
+    assert [p for p in (tmp_path / ".qbkb").glob("translate-urls-*.txt")] == [ok]  # 坏清单已删
+
+
+# ---- 栏目翻译与其它翻译入口共用一把任务锁 --------------------------------------
+
+
+class _Blocking:
+    """假翻译后端：翻译时先报到，等放行才返回（模拟栏目翻译正在调付费接口）。"""
+
+    name = REAL_BACKEND
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def translate(self, segments: Any, glossary: Any, context: str = "") -> list[str]:
+        self.calls += 1
+        self.entered.set()
+        assert self.release.wait(5)
+        return [str(s) for s in segments]
+
+
+def _section_app(
+    root: Path, popen: SpyPopen, tr: _Blocking, monkeypatch: pytest.MonkeyPatch
+) -> tuple[App, str]:
+
+    (root / ".env").write_text(f"DEEPL_API_KEY={DEEPL}\n", encoding="utf-8")
+    app = App(
+        root,
+        token=TOKEN,
+        popen=popen,
+        environ={"PATH": "x"},
+        is_windows=False,
+        kill=lambda p: p.terminate(),
+        translator_factory=lambda _ws: tr,  # pyright: ignore[reportArgumentType]
+    )
+    app.set_mode({"mode": "real"})
+    conn = store.connect(root / "state.db")
+    url = _add(conn, "cfm", "s1", section="whitepaper", title_zh=None)
+    conn.close()
+    csv = root / "survey.csv"
+    csv.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(app, "_resolve_section_site", lambda ws, site: "cfm")
+    monkeypatch.setattr(app, "_csv_path", lambda ws, site: csv)
+    monkeypatch.setattr(server.survey, "read_csv", lambda p: [{"栏目id": "w", "网址": url}])
+    monkeypatch.setattr(app, "sections_view", lambda site: {})
+    return app, url
+
+
+def test_section_translation_blocks_fulltext_and_run_until_it_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tr = _Blocking()
+    popen = SpyPopen()
+    app, url = _section_app(tmp_path, popen, tr, monkeypatch)
+    errors: list[BaseException] = []
+
+    def section() -> None:
+        try:
+            app.translate_section({"site": "cfm", "section": "w"})
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    t = threading.Thread(target=section)
+    t.start()
+    try:
+        assert tr.entered.wait(5)
+        for call in (
+            lambda: app.translate_fulltext({"urls": [url], "dry_run": False}),
+            lambda: app.start_run({"limit": 1}),
+        ):
+            with pytest.raises(ApiError) as info:
+                call()
+            assert info.value.status == 409
+        with pytest.raises(ApiError) as info:  # 再来一个栏目翻译：仍是 409
+            app.translate_section({"site": "cfm", "section": "w"})
+        assert info.value.status == 409
+        assert popen.calls == [] and not list((tmp_path / ".qbkb").glob("translate-urls-*.txt"))
+        # 估算只读，不受锁影响
+        assert app.translate_fulltext({"urls": [url], "dry_run": True})["count"] == 1
+    finally:
+        tr.release.set()
+        t.join(5)
+    assert not errors
+    # 栏目翻译结束后锁释放：全文翻译可以开始
+    assert app.translate_fulltext({"urls": [url], "dry_run": False}) == {
+        "started": True,
+        "count": 1,
+    }
+    app.close()
+
+
+def test_running_job_blocks_section_translation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = threading.Event()
+    tr = _Blocking()
+    app, url = _section_app(tmp_path, SpyPopen(gate), tr, monkeypatch)
+    try:
+        assert app.translate_fulltext({"urls": [url], "dry_run": False})["started"]
+        with pytest.raises(ApiError) as info:
+            app.translate_section({"site": "cfm", "section": "w"})
+        assert info.value.status == 409 and tr.calls == 0  # 一次付费调用都没发
+        # 被拒绝后栏目的"正在翻译"标志已清掉，不会把以后的栏目翻译锁死
+        assert app._translating is False  # pyright: ignore[reportPrivateUsage]
+    finally:
+        gate.set()
+        app.close()
+    tr.release.set()
+    app.translate_section({"site": "cfm", "section": "w"})
+    assert tr.calls >= 1  # 任务结束后恢复正常
+
+
+def test_section_lock_excludes_other_processes_using_run_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """定时任务（auto.py）用同一个 RunLock：栏目翻译持有期间它拿不到。"""
+    tr = _Blocking()
+    app, _ = _section_app(tmp_path, SpyPopen(), tr, monkeypatch)
+    with app.jobs.exclusive("栏目翻译"):
+        other = jobs.RunLock(tmp_path)
+        with pytest.raises(jobs.Busy):
+            other.acquire("定时任务")
+    other.acquire("定时任务")  # 释放后可以拿
+    other.release()
 
 
 def test_translate_urls_commands_real(tmp_path: Path) -> None:
